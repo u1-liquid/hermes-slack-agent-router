@@ -39,14 +39,19 @@ CURRENT text, not just a classifier label.
 `tests/test_semantic.py` exercises exact spans, selected source authors, current topic
 groups, joint recipients, multilingual ACK/new-work, quoted context, generic lead/source
 support without bootstrap, atomic uncertainty, typed distribution/key/confidence validation,
-request/output caps and actual native subprocess cancellation/reaping. `test_boundaries.py`
+request/response caps, actual async stream cancellation/closure, fixed official URL/Bearer/JSON,
+no subprocess dependency, safe redirect/HTTP/transport failures and missing-key no-egress.
+Native tests additionally exercise real Hermes multiplex secret isolation and serving-runtime
+scope versus receiving-profile scope. `test_boundaries.py`
 checks canonical inputs, edits and workspace/ambiguous-identity isolation. DB lock/schema/
 migration/CAS/audit/purge/election tests are intentionally removed with the rejected store.
 
 ## Explicit real fictional inference
 
-`JEV_FICTIONAL_CANARY_DIR` opts into real Jev CLI0.23.1 through the production
-prepare→JevClient.ask→assemble path. The semantic journey test requires READY/correct
+`JEV_FICTIONAL_CANARY_DIR` opts into the real official HTTPS API through the production
+prepare→JevClient.ask→assemble path, using the caller's existing Hermes native secret
+mapping before isolating fixture homes (never writing a real key to them). No Jev CLI or
+TypeSafe SDK is required. The semantic journey test requires READY/correct
 scopes for two topics, contextual unmentioned reply, ACK/new work, same-topic multiple
 recipients, quote/reference and a generic lead inferred from conversation; ambiguous
 addressee requires unresolved/no views. The native real-Jev test additionally drives
@@ -54,11 +59,17 @@ actual AsyncApp→SlackAdapter input for both recipients of a multi-topic messag
 unmentioned contextual reply and a generic continuation. SDK history and final model
 receiver remain controlled; inference is external and real, not replayed fixture answers.
 
-Raw request/result/exit/latency, plan and native received-text artifacts belong only to
+Raw request/result/HTTP-outcome/latency, plan and native received-text artifacts belong only to
 the opt-in test harness. Production has no filesystem transcript/decision capture. No
 private Slack/customer/credential/reversible-private fixture or CI credential is used.
 Confidence0.8 is preserved, not tuned to make canaries pass. These are bounded fictional
 examples, not calibrated accuracy: uncertain answers remain no-work, not synthetic success.
+The current official-API fictional invocation returned READY for two topics, contextual
+reply, quote/reference and generic continuation, but abstained on ACK/new-work and
+same-topic joint references; that aggregate semantic assertion is FAILED, not relabeled
+PASS. The separate actual-API native four-scope delivery invocation passed. The earlier
+CLI-era failed quote invocation remains historical failed evidence, not API acceptance.
+No unchanged retry, confidence reduction or prompt retuning was used to obtain green.
 
 ## Packaging/startup and independent acceptance
 

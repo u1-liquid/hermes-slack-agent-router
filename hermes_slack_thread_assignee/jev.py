@@ -1,4 +1,4 @@
-"""Native Jev Choice protocol. No shell, generated instructions or embedded auth."""
+"""Official TypeSafe System One Choice protocol; Hermes-scoped credentials."""
 
 import asyncio
 import json
@@ -63,86 +63,84 @@ def validate_answers(batch, result, confidence=0.8):
 
 
 class JevClient:
-    @staticmethod
-    async def _read_bounded(stream, limit):
-        chunks, size = [], 0
-        while chunk := await stream.read(min(4096, limit + 1 - size)):
-            size += len(chunk)
-            if size > limit:
-                raise JevError("oversized native output")
-            chunks.append(chunk)
-        return b"".join(chunks)
+    """One request-owned HTTPS connection; no cached credentials or background work."""
 
-    async def _exchange(self, process, raw):
-        async def send():
-            try:
-                process.stdin.write(raw)
-                await process.stdin.drain()
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-            finally:
-                process.stdin.close()
+    endpoint = "https://api.typesafe.ai/v1/systemone"
+    model = "jev-latest"
+    limit = 262144
 
-        tasks = [
-            asyncio.create_task(self._read_bounded(process.stdout, 262144)),
-            asyncio.create_task(self._read_bounded(process.stderr, 16384)),
-            asyncio.create_task(send()),
-        ]
-        try:
-            stdout, stderr, _ = await asyncio.gather(*tasks)
-            await process.wait()
-            return stdout, stderr
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    def __init__(self, executable="jev", timeout=1.2):
-        if not 0 < timeout <= 1.2:
+    def __init__(self, timeout=1.2):
+        if not math.isfinite(timeout) or not 0 < timeout <= 1.2:
             raise ValueError("Jev sub-budget must be in (0, 1.2] seconds")
-        self.executable = executable
         self.timeout = timeout
 
+    async def _exchange(self, raw, key):
+        import httpx
+
+        async with (
+            httpx.AsyncClient(
+                timeout=self.timeout,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client,
+            client.stream(
+                "POST",
+                self.endpoint,
+                content=raw,
+                headers={
+                    "Authorization": "Bearer " + key,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "Accept-Encoding": "identity",
+                },
+            ) as response,
+        ):
+            # Never follow redirects, retry errors, or expose service error bodies.
+            if response.status_code != 200:
+                raise JevError("Jev HTTP request failed")
+            if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                raise JevError("unsupported Jev response encoding")
+            length = response.headers.get("Content-Length")
+            if length is not None and (not length.isdecimal() or int(length) > self.limit):
+                raise JevError("oversized or invalid Jev response length")
+            chunks, size = [], 0
+            async for chunk in response.aiter_bytes():
+                size += len(chunk)
+                if size > self.limit:
+                    raise JevError("oversized Jev response")
+                chunks.append(chunk)
+            return b"".join(chunks)
+
     async def ask(self, batch):
-        raw = json.dumps(batch, ensure_ascii=False, allow_nan=False).encode()
-        if len(raw) > 262144:
+        try:
+            raw = json.dumps({"model": self.model, **batch}, ensure_ascii=False, allow_nan=False).encode()
+        except (ValueError, TypeError, UnicodeError):
+            raise JevError("invalid serialized request") from None
+        if len(raw) > self.limit:
             raise JevError("oversized serialized request")
-        process = None
+        # Import and resolve inside the calling request's native Hermes scope, not
+        # at registration/construction or through CLI-specific auth/environment files.
+        try:
+            from agent.secret_scope import get_secret
+
+            key = get_secret("TYPESAFE_API_KEY")
+        except (ImportError, RuntimeError, OSError):
+            raise JevError("Hermes Jev credential scope unavailable") from None
+        if not isinstance(key, str) or not key:
+            raise JevError("Hermes Jev credential unavailable")
+        import httpx
 
         try:
+            # The total sub-budget includes connect/send/stream and resource cleanup;
+            # the caller's whole-ingress deadline may cancel it earlier.
             async with asyncio.timeout(self.timeout):
-                process = await asyncio.create_subprocess_exec(
-                    self.executable,
-                    "ask",
-                    "--timeout",
-                    str(self.timeout),
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, _ = await self._exchange(process, raw)
-            if process.returncode != 0:
-                raise JevError("native Jev failed")
-            if len(stdout) > 262144:
-                raise JevError("oversized native answer")
+                stdout = await self._exchange(raw, key)
             try:
                 result = json.loads(stdout)
-            except (ValueError, UnicodeError) as exc:
-                raise JevError("invalid native JSON") from exc
+            except (ValueError, UnicodeError):
+                raise JevError("invalid Jev JSON") from None
             return validate_answers(batch, result)
-        except (TimeoutError, OSError) as exc:
-            raise JevError("native Jev timeout or launch failure") from exc
-        finally:
-            if process is not None and process.returncode is None:
-                process.kill()
-
-                # Reap on timeout AND task cancellation; never detach inference.
-                async def reap():
-                    async def discard(stream):
-                        while await stream.read(4096):
-                            pass
-
-                    await asyncio.gather(discard(process.stdout), discard(process.stderr), process.wait())
-
-                await asyncio.shield(reap())
+        except (TimeoutError, httpx.HTTPError, OSError, ValueError) as exc:
+            if isinstance(exc, JevError):
+                raise
+            raise JevError("Jev HTTPS transport failed") from None

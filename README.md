@@ -50,10 +50,19 @@ Only `fictional` and `public-permitted` data classes are supported. A public cha
 hash or alias is not permission to send private/customer/credential data. Do not deploy
 this candidate on private conversations using the example policy.
 
-Jev CLI0.23.1 must be available on PATH and authenticated through its documented
-`TYPESAFE_API_KEY` environment or native keystore interface. The plugin embeds/copies no
-credentials. It runs actual `jev ask --timeout` with a named typed Choice batch and
-validates exact answer keys, types, finite probabilities, coverage, source grounding and
+The package declares `httpx` for direct asynchronous HTTPS to the official
+`https://api.typesafe.ai/v1/systemone` endpoint; no local Jev executable, CLI auth file
+or TypeSafe SDK is required. Every request resolves `TYPESAFE_API_KEY` through Hermes's
+native `agent.secret_scope.get_secret` inside the actual serving runtime's native profile
+scope, not the receiving adapter's cached credentials. Hermes owns `.env`/external secret
+source hydration. No key belongs in plugin configuration. Missing/inaccessible scope or
+key is unresolved before HTTP egress; multiplex mode never borrows process-global keys.
+The POST uses Bearer authentication and JSON `model: jev-latest`, `state`, `questions`;
+returned `answers` keep the same typed Choice validation. TLS verification is enabled;
+redirects, environment proxies, automatic retries and compressed responses are disabled.
+The client does not log headers, keys, transcripts or service error bodies.
+
+Validate exact answer keys, types, finite probabilities, coverage, source grounding and
 confidence0.8 for relevant judgments. No model-generated instructions or identifiers are
 accepted. People derive from selected source-message authors; topics are request-local
 groups, not permanently assigned IDs.
@@ -93,9 +102,10 @@ excluded. History pagination/has_more, missing root, foreign/future/conflicting 
 or unsupported prior composition are unresolved rather than silently truncated. Canonical
 ordering uses original source IDs and sorted scoped recipients, not local agent preference.
 Current text is at most6000characters,6 units,4 recipients and96 questions. Serialized
-request/stdout are capped at262144bytes, stderr at16384. Whole ingress target2.5s includes
-context and Jev (at most1.2s); cancellation kills/reaps request inference. This is not a
-hard real-time scheduling SLA.
+request and response bodies are each capped at262144bytes. Whole ingress target2.5s includes
+context and Jev (at most1.2s); cancellation closes the request-owned async response/client
+without detached local tasks or retry. This is not a hard real-time scheduling SLA or a
+guarantee that the remote service stops computing after client cancellation.
 
 Normal input, legacy busy/steer, shared burst, runner FIFO/merge/replay and pending controls
 are exercised at pinned native boundaries. Native duplicate accepted-event suppression

@@ -7,6 +7,7 @@ name = "hermes-slack-thread-assignee"
 version = "0.1.0"
 description = "Stateless contextual Slack recipient routing through Jev for Hermes"
 requires-python = ">=3.11"
+dependencies = ["httpx>=0.28.1,<0.29"]
 license = "MIT"
 authors = [{name = "u1-liquid"}]
 

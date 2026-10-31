@@ -26,6 +26,14 @@ if os.environ.get("HERMES_REQUIRE_NATIVE") == "1" and not SOURCE:
 @unittest.skipUnless(SOURCE, "optional local native suite; CI requires it explicitly")
 class NativeDispatch(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        # Capture the caller's documented native secret mapping BEFORE isolating the
+        # test home; never write a real key into the fixture home or protocol evidence.
+        self.canary_secrets = None
+        if os.environ.get("JEV_FICTIONAL_CANARY_DIR"):
+            from agent.secret_scope import build_profile_secret_scope
+            from hermes_constants import get_hermes_home
+
+            self.canary_secrets = build_profile_secret_scope(get_hermes_home())
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -209,6 +217,148 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
 
         self.gate.jev = AsyncMock()
         self.gate.jev.ask.side_effect = classify
+
+    async def test_api_key_is_bound_to_native_request_profile_not_receiving_context(self):
+        import httpx
+        from agent.secret_scope import reset_secret_scope, set_secret_scope
+        from test_semantic import controlled_answers
+
+        from hermes_slack_thread_assignee.jev import JevClient
+
+        self.enable_semantic()
+        self.gate.jev = JevClient()
+        (self.home / ".env").write_text("TYPESAFE_API_KEY=synthetic-request-profile\n")
+        seen = []
+
+        async def respond(request):
+            seen.append(request.headers["Authorization"])
+            batch = json.loads(request.content)
+            return httpx.Response(
+                200,
+                json=controlled_answers(
+                    batch,
+                    {
+                        "coverage": "complete",
+                        "main": "none",
+                        "u0_kind": "action",
+                        "u0_destination": "specific",
+                        "u0_to1": "yes",
+                    },
+                ),
+            )
+
+        native = httpx.AsyncClient
+        token = set_secret_scope({"TYPESAFE_API_KEY": "synthetic-receiving-profile"})
+        try:
+            with (
+                patch.object(self.runner, "_profile_scope_key_for_source", return_value=self.home),
+                patch(
+                    "httpx.AsyncClient",
+                    side_effect=lambda **kw: native(transport=httpx.MockTransport(respond), **kw),
+                ),
+                patch("asyncio.create_subprocess_exec", side_effect=AssertionError("CLI forbidden")),
+            ):
+                await self.dispatch(self.message("<@UBETA> revise the diagram."))
+                await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        finally:
+            reset_secret_scope(token)
+        self.assertEqual(seen, ["Bearer synthetic-request-profile"])
+        self.model.assert_awaited_once()
+        self.assertIn("revise the diagram", self.model.await_args.args[0].text)
+
+    async def test_api_real_native_secret_multiplex_isolation_and_missing_scope(self):
+        import httpx
+        from agent import secret_scope
+        from test_semantic import snapshot, two_topic_answers
+
+        from hermes_slack_thread_assignee.jev import JevClient, JevError
+        from hermes_slack_thread_assignee.semantic import prepare
+
+        batch = prepare(snapshot())
+        seen = []
+        both_started = asyncio.Event()
+
+        async def respond(request):
+            seen.append(request.headers["Authorization"])
+            if len(seen) == 2:
+                both_started.set()
+            await asyncio.wait_for(both_started.wait(), 1)
+            return httpx.Response(200, json=two_topic_answers(batch))
+
+        native = httpx.AsyncClient
+        client = JevClient()
+        mode = secret_scope.set_multiplex_context(True)
+        try:
+            with (
+                patch.dict(os.environ, {"TYPESAFE_API_KEY": "synthetic-ambient-forbidden"}),
+                patch(
+                    "httpx.AsyncClient",
+                    side_effect=lambda **kw: native(transport=httpx.MockTransport(respond), **kw),
+                ),
+                patch("asyncio.create_subprocess_exec", side_effect=AssertionError("CLI forbidden")),
+            ):
+
+                async def ask_in_scope(value):
+                    token = secret_scope.set_secret_scope({"TYPESAFE_API_KEY": value})
+                    try:
+                        await client.ask(batch)
+                    finally:
+                        secret_scope.reset_secret_scope(token)
+
+                await asyncio.gather(ask_in_scope("synthetic-atlas"), ask_in_scope("synthetic-birch"))
+                for mapping in ({}, None):
+                    token = secret_scope.set_secret_scope(mapping)
+                    try:
+                        with self.assertRaises(JevError):
+                            await client.ask(batch)
+                    finally:
+                        secret_scope.reset_secret_scope(token)
+        finally:
+            secret_scope.reset_multiplex_context(mode)
+        self.assertCountEqual(seen, ["Bearer synthetic-atlas", "Bearer synthetic-birch"])
+
+    async def test_api_http_fault_is_atomic_silent_and_late_pending_is_preserved(self):
+        import httpx
+        from agent.secret_scope import reset_secret_scope, set_secret_scope
+
+        from hermes_slack_thread_assignee.jev import JevClient
+
+        self.enable_semantic()
+        self.gate.jev = JevClient()
+        native = httpx.AsyncClient
+        status = 401
+        late = False
+        _, session_key = self.source_and_key()
+        seen = []
+
+        async def respond(request):
+            seen.append(request)
+            if late:
+                state = self.SessionState()
+                state.persistent.update_prompt_pending = True
+                self.runner._sessions[session_key] = state
+            return httpx.Response(status, content=b"synthetic-private-error-body")
+
+        token = set_secret_scope({"TYPESAFE_API_KEY": "synthetic-key"})
+        try:
+            with (
+                patch(
+                    "httpx.AsyncClient",
+                    side_effect=lambda **kw: native(transport=httpx.MockTransport(respond), **kw),
+                ),
+                patch("asyncio.create_subprocess_exec", side_effect=AssertionError("CLI forbidden")),
+            ):
+                for status in (302, 401, 429, 503):
+                    await self.assert_rejected(
+                        self.message("<@UALPHA> revise summary; <@UBETA> check diagram.")
+                    )
+                self.assertEqual(len(seen), 4)
+                late = True
+                body = self.message("<@UBETA> yes")
+                await self.dispatch(body)
+                self.assertEqual(self.downstream[-1]["event"]["text"], body["event"]["text"])
+        finally:
+            reset_secret_scope(token)
 
     async def test_semantic_sender_auth_before_context_allow_unknown_and_pending(self):
         self.enable_semantic()
@@ -999,8 +1149,11 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         os.environ.get("JEV_FICTIONAL_CANARY_DIR"), "explicit fictional external native canary"
     )
     async def test_real_jev_contextual_generic_and_multitopic_native_inputs(self):
+        from agent.secret_scope import reset_secret_scope, set_secret_scope
         from test_semantic import RecordingJev
 
+        token = set_secret_scope(self.canary_secrets)
+        self.addCleanup(reset_secret_scope, token)
         self.enable_semantic()
         root = Path(os.environ["JEV_FICTIONAL_CANARY_DIR"]) / "native"
         history = [

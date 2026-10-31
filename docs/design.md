@@ -58,10 +58,27 @@ No exactly-once or durable unresolved-work guarantee is claimed.
 
 ## Jev contract and generic continuation
 
-Native CLI0.23.1 accepts `jev ask --timeout` stdin containing `state` and named `questions`;
-Choice questions have closed-set `criteria` and return choice/probabilities/confidence.
-Do not invent a freeform generation or multi-select type. Recipient sets use independent
-membership Choices. People derive from actual selected prior-message authors.
+The official [System One API](https://docs.typesafe.ai/api.md) accepts HTTPS POST to
+`https://api.typesafe.ai/v1/systemone`: Bearer `TYPESAFE_API_KEY` and JSON `model: jev-latest`,
+`state`, named `questions` → `answers`, `model`, `usage`. This retains the previously selected
+Jev default alias and closed-set Choice questions/probabilities/confidence, not freeform
+generation or multi-select. Recipient sets use independent membership Choices; people
+derive from selected prior-message authors.
+
+The small declared `httpx` dependency is imported only on inference, preserving SDK-free
+core registration. One request owns its async client and response. TLS verification stays
+on, `trust_env=false`, `follow_redirects=false`, identity encoding only and no retries.
+Non200 (including redirects/401/429/5xx), transport/timeout/size/JSON/typed validation
+failure is unresolved; no error body/header/key is echoed. Reject advertised or streamed
+oversize before JSON parsing; compressed responses are rejected before decompression.
+
+Immediately around inference, enter the native runner's `_async_profile_scope_for_source`
+for the bound actual serving runtime. `agent.secret_scope.get_secret("TYPESAFE_API_KEY")`
+is called inside each ask, never during global import, registration or client construction.
+Hermes's own loader/hydrated secret sources own storage. There is no independent keyring,
+raw credential-file parsing, hardcoded home, CLI-auth fallback or cross-request key cache.
+Missing key/unscoped multiplex fails before client creation; another profile's ambient
+process key cannot fill the miss. Native sender/pending controls still precede inference.
 
 Candidate splitting accounts for every authored character, including punctuation and
 acknowledgement/reference units. Same-line English/Japanese clauses are supported only
@@ -87,10 +104,11 @@ support on generic work yields unresolved, not a mandatory owner-bootstrap workf
 ## Timing, uncertainty and privacy
 
 Keep current/history text<=6000characters each, prior messages<=6, CURRENT units<=6,
-scoped recipients<=4, questions<=96, serialized request/stdout<=262144bytes and stderr<=16384.
+scoped recipients<=4, questions<=96 and serialized request/response bodies<=262144bytes.
 Any exceeded bound is unresolved. The2.5s ingress ceiling covers SDK/context and inference;
-Jev's at-most1.2s is a sub-budget. Cancellation kills/reaps the request subprocess. These
-are bounded engineering targets, not hard real-time OS scheduling guarantees.
+Jev's at-most1.2s is a sub-budget. Cancellation closes the request-owned asynchronous
+response/client; no detached task or retry survives it. These are bounded engineering
+targets, not hard real-time OS scheduling guarantees.
 
 Relevant action/reference/coverage confidence remains0.8; this is not calibrated truth.
 Invalid output, uncertainty, timeout, unsupported media, incomplete history and disabled

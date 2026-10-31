@@ -21,6 +21,10 @@ architecture. This supersedes the unreleased persistent-design plan and its old 
 - Keep native sender/channel/mention/wake authorization, commands, DMs/bots/monitoring and
   pending approval/clarification/confirmation/update handling. Preserve busy/queue/replay
   scope and native transport dedup without a cross-process exactly-once promise.
+- Replace all production Jev subprocess/executable/CLI-auth dependence with direct bounded
+  asynchronous official System One HTTPS. Declare only httpx, enter the bound native runtime
+  secret scope and resolve TYPESAFE_API_KEY per request. No credential/config migration,
+  cached key, redirects, retries, logged response bodies or detached timeout work.
 - Rewrite public config/package/README/design/native acceptance to the actual stateless
   product. Production Jev has no filesystem capture; opt-in fictional tests own raw evidence.
 
@@ -34,15 +38,17 @@ architecture. This supersedes the unreleased persistent-design plan and its old 
 | Same-topic joint recipients and separate prior authors | semantic group/reference controls; actual native scoped receiver/reconstructed Gate |
 | Generic continuation without manual owner | same-batch lead/source evidence controls; ambiguous/conflicting lead→unresolved; explicit real semantic/native generic canary |
 | Quoted/forwarded/code as context only | canonical source/provenance controls and quote canary; no quoted current action or wake token |
-| Uncertainty/failure/partial coverage | atomic empty views, strict typed keys/distributions/relevant confidence, subprocess timeout/cancel/reap/output caps, native empty ACK/no model/warning |
+| Uncertainty/failure/partial coverage | atomic empty views, strict typed keys/distributions/relevant confidence, HTTPS status/redirect/transport/timeout/cancel/body caps, native empty ACK/no model/warning |
+| Official API and Hermes credential scope | production client URL/Bearer/JSON/no-CLI tests; real native request-profile and concurrent multiplex isolation, missing/unscoped key no-egress; actual fictional API/native canaries |
 | Shared canonical inputs and isolation | sorted registry/history equality across opposite actual receivers; cross-workspace/foreign/future/conflicting/incomplete evidence rejection; edited source reclassification |
 | Native safety and operational paths | real sender denial before context/Jev; original/projected native gates; pending before/after awaits and failures; normal/legacy busy/shared burst/FIFO/merge/replay, bots/DMs/commands/monitoring/unload |
 | Packaging and current CI | Ruff/check-format/diff/build; actual discovery/Doctor, installed wheel; exact-head core/native on Python3.14 with unchanged required rules |
 
 ## Delivery sequence
 
-1. Record concrete removal ACK and concise Astra/high design delta before source mutation.
-2. Establish fresh-startup and stateless semantic RED, then implement/removal as one batch.
+1. The no-store architecture/removal phase is accepted historical input; do not replay it.
+2. ACK the selected API delta, execute transport/credential RED, then coherently replace
+   production CLI with HTTPS and request-scoped Hermes credentials; preserve all semantics.
 3. Run complete current local gates, actual fictional Jev and native received-input checks.
    Preserve failures and distinguish controlled external SDK/model receivers from real Jev.
 4. Freeze the candidate and obtain one consolidated independent Ritsuko acceptance on the

@@ -8,7 +8,7 @@ import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, call, patch
 
 from hermes_slack_thread_assignee.config import Config, ConfigError
 from hermes_slack_thread_assignee.jev import JevClient, JevError, validate_answers
@@ -78,20 +78,21 @@ class RecordingJev(JevClient):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
 
-    async def _exchange(self, process, raw):
+    async def _exchange(self, raw, key):
         (self.directory / "jev-request.json").write_bytes(raw)
         started = time.monotonic()
+        outcome = "failed"
         try:
-            stdout, stderr = await super()._exchange(process, raw)
+            stdout = await super()._exchange(raw, key)
             (self.directory / "jev-result.json").write_bytes(stdout)
-            (self.directory / "jev-stderr.txt").write_bytes(stderr)
-            return stdout, stderr
+            outcome = "HTTP-200"
+            return stdout
         finally:
             (self.directory / "jev-receipt.json").write_text(
                 json.dumps(
                     {
-                        "protocol": "jev ask Choice",
-                        "exit": process.returncode,
+                        "protocol": "official HTTPS System One Choice",
+                        "outcome": outcome,
                         "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
                     },
                     indent=2,
@@ -394,55 +395,242 @@ class SemanticTests(unittest.TestCase):
                 prepare(source)
 
 
-class ProtocolTests(unittest.IsolatedAsyncioTestCase):
-    async def test_oversized_request_never_launches(self):
-        with patch("asyncio.create_subprocess_exec") as spawn, self.assertRaisesRegex(JevError, "serialized"):
-            await JevClient().ask({"state": "x" * 262145, "questions": {}})
-        spawn.assert_not_awaited()
+class APITransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_official_http_contract_without_cli_and_request_local_key(self):
+        import sys
+        from types import SimpleNamespace
 
-    async def test_true_native_cancellation_and_stream_caps(self):
-        native = asyncio.create_subprocess_exec
-        started = asyncio.Event()
-        processes = []
+        import httpx
 
-        async def spawn(*args, **kwargs):
-            process = await native("/usr/bin/tail", "-f", "/dev/null", **kwargs)
-            processes.append(process)
-            started.set()
-            return process
+        batch = prepare(snapshot())
+        sent = []
 
-        with patch("asyncio.create_subprocess_exec", side_effect=spawn):
-            task = asyncio.create_task(JevClient().ask(prepare(snapshot())))
-            await started.wait()
-            task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
-        self.assertIsNotNone(processes[0].returncode)
+        async def respond(request):
+            sent.append(request)
+            return httpx.Response(200, json=two_topic_answers(batch))
 
-        async def flood(*args, **kwargs):
-            process = await native("/usr/bin/yes", **kwargs)
-            processes.append(process)
-            return process
+        native = httpx.AsyncClient
+        secret = Mock(side_effect=["synthetic-atlas", "synthetic-birch"])
+        clients = []
+
+        def factory(**kwargs):
+            self.assertFalse(kwargs["follow_redirects"])
+            self.assertFalse(kwargs["trust_env"])
+            client = native(transport=httpx.MockTransport(respond), **kwargs)
+            clients.append(client)
+            return client
 
         with (
-            patch("asyncio.create_subprocess_exec", side_effect=flood),
-            self.assertRaisesRegex(JevError, "oversized"),
+            patch.dict(sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=secret)}),
+            patch("httpx.AsyncClient", side_effect=factory),
+            patch("asyncio.create_subprocess_exec", side_effect=AssertionError("local CLI forbidden")),
         ):
-            await JevClient().ask(prepare(snapshot()))
-        self.assertIsNotNone(processes[-1].returncode)
+            client = JevClient()
+            for _ in range(2):
+                self.assertEqual(await client.ask(batch), validate_answers(batch, two_topic_answers(batch)))
+        self.assertEqual(secret.call_args_list, [call("TYPESAFE_API_KEY")] * 2)
+        self.assertEqual(
+            [r.headers["Authorization"] for r in sent], ["Bearer synthetic-atlas", "Bearer synthetic-birch"]
+        )
+        for request in sent:
+            self.assertEqual(str(request.url), "https://api.typesafe.ai/v1/systemone")
+            self.assertEqual(request.method, "POST")
+            self.assertEqual(request.headers["Content-Type"], "application/json")
+            self.assertEqual(json.loads(request.content), {"model": "jev-latest", **batch})
+        self.assertTrue(all(client.is_closed for client in clients))
 
-    async def test_timeout_reaps(self):
-        process = AsyncMock()
-        process.kill = Mock()
-        process.returncode = None
-        process.stdin.write = Mock()
-        process.stdin.close = Mock()
-        process.stdout.read.side_effect = [TimeoutError(), b""]
-        process.stderr.read.return_value = b""
-        with patch("asyncio.create_subprocess_exec", return_value=process), self.assertRaises(JevError):
-            await JevClient().ask(prepare(snapshot()))
-        process.kill.assert_called_once()
-        process.wait.assert_awaited_once()
+    async def test_missing_or_inaccessible_scope_never_creates_transport(self):
+        import sys
+        from types import SimpleNamespace
+
+        for outcome in (None, "", RuntimeError("synthetic-private-scope-detail")):
+            resolver = (
+                Mock(side_effect=outcome) if isinstance(outcome, Exception) else Mock(return_value=outcome)
+            )
+            with (
+                self.subTest(outcome=type(outcome).__name__),
+                patch.dict(sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=resolver)}),
+                patch("httpx.AsyncClient") as transport,
+                patch("asyncio.create_subprocess_exec", side_effect=AssertionError("local CLI forbidden")),
+                self.assertRaises(JevError) as caught,
+            ):
+                await JevClient().ask(prepare(snapshot()))
+            transport.assert_not_called()
+            self.assertNotIn("synthetic-private", str(caught.exception))
+            self.assertIsNone(caught.exception.__cause__)
+
+
+class ProtocolTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        import sys
+        from types import SimpleNamespace
+
+        import httpx
+
+        self.requests, self.clients = [], []
+        native = httpx.AsyncClient
+
+        async def respond(request):
+            self.requests.append(request)
+            if isinstance(self.response, Exception):
+                raise self.response
+            return self.response
+
+        def factory(**kwargs):
+            client = native(transport=httpx.MockTransport(respond), **kwargs)
+            self.clients.append(client)
+            return client
+
+        for patcher in (
+            patch.dict(
+                sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=lambda name: "synthetic-key")}
+            ),
+            patch("httpx.AsyncClient", side_effect=factory),
+            patch("asyncio.create_subprocess_exec", side_effect=AssertionError("local CLI forbidden")),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def stream(self, chunks=(), *, block=False):
+        import httpx
+
+        class Stream(httpx.AsyncByteStream):
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.closed = False
+                self.reads = 0
+                self.cancelled = False
+
+            async def __aiter__(self):
+                self.started.set()
+                if block:
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        self.cancelled = True
+                        raise
+                for chunk in chunks:
+                    self.reads += 1
+                    yield chunk
+
+            async def aclose(self):
+                self.closed = True
+
+        return Stream()
+
+    async def test_oversized_or_nonfinite_request_never_connects(self):
+        for batch in ({"state": "x" * 262145, "questions": {}}, {"state": float("nan")}):
+            with self.assertRaisesRegex(JevError, "serialized"):
+                await JevClient().ask(batch)
+        self.assertEqual(self.clients, [])
+
+    async def test_status_redirect_errors_never_retry_forward_auth_or_read_body(self):
+        import httpx
+
+        for status in (301, 302, 307, 308, 400, 401, 413, 422, 429, 500, 503, 529):
+            with self.subTest(status=status):
+                stream = self.stream((b"synthetic-private-error-body",))
+                self.response = httpx.Response(
+                    status, headers={"Location": "https://other.invalid/steal"}, stream=stream
+                )
+                count = len(self.requests)
+                with self.assertRaises(JevError) as caught:
+                    await JevClient().ask(prepare(snapshot()))
+                self.assertEqual(len(self.requests), count + 1)
+                self.assertEqual(str(self.requests[-1].url), "https://api.typesafe.ai/v1/systemone")
+                self.assertEqual(stream.reads, 0)
+                self.assertTrue(stream.closed)
+                self.assertTrue(self.clients[-1].is_closed)
+                self.assertNotIn("synthetic", str(caught.exception))
+
+    async def test_malformed_oversized_and_compressed_answers_close(self):
+        import httpx
+
+        cases = (
+            ({}, (b"not JSON synthetic-private",)),
+            ({}, (b"\\xff",)),
+            ({}, (b"{}",)),
+            ({}, (b"[",)),
+            ({}, (b"x" * 131073, b"x" * 131073)),
+            ({"Content-Length": "262145"}, (b"never read",)),
+            ({"Content-Length": "garbage"}, (b"never read",)),
+            ({"Content-Encoding": "gzip"}, (b"never decompress",)),
+        )
+        for headers, chunks in cases:
+            with self.subTest(headers=headers, chunks=len(chunks)):
+                stream = self.stream(chunks)
+                self.response = httpx.Response(200, headers=headers, stream=stream)
+                with self.assertRaises(JevError) as caught:
+                    await JevClient().ask(prepare(snapshot()))
+                self.assertNotIn("synthetic-private", str(caught.exception))
+                self.assertTrue(stream.closed)
+                self.assertTrue(self.clients[-1].is_closed)
+                if headers:
+                    self.assertEqual(stream.reads, 0)
+
+    async def test_async_timeout_and_cancellation_close_stream_and_client(self):
+        import httpx
+
+        for cancel in (False, True):
+            stream = self.stream(block=True)
+            self.response = httpx.Response(200, stream=stream)
+            client = JevClient(timeout=0.05 if not cancel else 1.2)
+            started = time.monotonic()
+            task = asyncio.create_task(client.ask(prepare(snapshot())))
+            await asyncio.wait_for(stream.started.wait(), 1)
+            if cancel:
+                task.cancel()
+            with self.assertRaises(asyncio.CancelledError if cancel else JevError):
+                await task
+            self.assertTrue(task.done())
+            self.assertTrue(stream.cancelled)
+            self.assertTrue(stream.closed)
+            self.assertTrue(self.clients[-1].is_closed)
+            self.assertLess(time.monotonic() - started, 1)
+
+    async def test_outer_ingress_deadline_cancels_and_closes_before_subbudget(self):
+        import httpx
+
+        stream = self.stream(block=True)
+        self.response = httpx.Response(200, stream=stream)
+        with self.assertRaises(TimeoutError):
+            async with asyncio.timeout(0.02):
+                await JevClient().ask(prepare(snapshot()))
+        self.assertTrue(stream.cancelled and stream.closed)
+        self.assertTrue(self.clients[-1].is_closed)
+
+    async def test_safe_transport_errors_and_typed_invalid_replies(self):
+        import httpx
+
+        for error in (
+            httpx.ConnectError("synthetic-key/private"),
+            httpx.ReadError("synthetic-private"),
+            httpx.ReadTimeout("synthetic-private"),
+        ):
+            self.response = error
+            with self.assertRaises(JevError) as caught:
+                await JevClient().ask(prepare(snapshot()))
+            self.assertNotIn("synthetic", str(caught.exception))
+            self.assertIsNone(caught.exception.__cause__)
+            self.assertTrue(self.clients[-1].is_closed)
+        batch = prepare(snapshot())
+        for value in (float("nan"), float("inf"), 0.1):
+            invalid = two_topic_answers(batch)
+            invalid["answers"]["u0_kind"]["confidence"] = value
+            self.response = httpx.Response(200, content=json.dumps(invalid).encode())
+            with self.assertRaises(JevError):
+                await JevClient().ask(batch)
+
+
+class FictionalCanaries(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        if os.environ.get("JEV_FICTIONAL_CANARY_DIR"):
+            from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
+            from hermes_constants import get_hermes_home
+
+            home = get_hermes_home()
+            token = set_secret_scope(build_profile_secret_scope(home), profile_home=str(home))
+            self.addCleanup(reset_secret_scope, token)
 
     @unittest.skipUnless(os.environ.get("JEV_FICTIONAL_CANARY_DIR"), "explicit fictional external canary")
     async def test_real_fictional_semantic_journeys(self):

@@ -136,7 +136,9 @@ class Gate:
         )
         try:
             async with asyncio.timeout_at(deadline):
-                plan = assemble(source, await self.jev.ask(prepare(source)))
+                # The serving runtime may differ from the receiving adapter's profile.
+                async with adapter.gateway_runner._async_profile_scope_for_source(bound.source):
+                    plan = assemble(source, await self.jev.ask(prepare(source)))
         except (JevError, SemanticError, TimeoutError):
             return self.unresolved("classifier-failed")
         if plan.status != "ready":
