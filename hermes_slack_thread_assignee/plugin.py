@@ -3,13 +3,10 @@
 import asyncio
 import copy
 import logging
-import os
 import time
 from decimal import Decimal
-from pathlib import Path
 
-from .bridge import Bridge, Uncertain, canonical_text, composition
-from .config import Config, SemanticPolicy
+from .bridge import Bridge, TopologyError, Uncertain, canonical_text, composition
 from .jev import JevClient, JevError
 from .policy import Thread, identifier
 from .semantic import History, SemanticError, Snapshot, assemble, prepare
@@ -18,11 +15,8 @@ logger = logging.getLogger(__name__)
 
 
 class Gate:
-    def __init__(self, participants, *, monitoring=(), semantic=None):
-        self.participants = tuple(participants)
-        self.monitoring = frozenset(tuple(item) for item in monitoring)
+    def __init__(self):
         self.disposed = False
-        self.semantic = semantic if semantic is not None else SemanticPolicy()
         self.jev = JevClient()
 
     @staticmethod
@@ -57,14 +51,13 @@ class Gate:
             )
         )
 
-    async def project(self, body, bound, adapter, deadline):
+    async def project(self, body, bound, adapter, deadline, bridge, topology):
         event = copy.deepcopy(body["event"])
         if event.get("subtype") == "message_changed":
             event.update(event.get("message") or {})
             event.pop("message", None)
         thread = bound.event.thread
-        if not any(self.semantic.permits(thread, kind) for kind in ("fictional", "public-permitted")):
-            return self.unresolved("privacy-disabled")
+
         if bound.event.provenance == "file_shared" or event.get("files") or event.get("attachments"):
             return self.unresolved("unsupported-current-composition")
         try:
@@ -123,14 +116,15 @@ class Gate:
             return self.unresolved("incomplete-context")
         if thread.root != bound.source.message_id and thread.root not in history:
             return self.unresolved("missing-root-context")
+        if await bridge.participants(bound) != topology:
+            return self.unresolved("native-topology-changed")
         source = Snapshot(
             thread,
             bound.event.identity,
             bound.event.sender,
             text,
             tuple(history.values()),
-            tuple(r for r in self.participants if r.workspace == thread.workspace),
-            self.semantic.policy_revision,
+            topology[0],
             copy.deepcopy(body["event"]),
             provenance,
         )
@@ -141,6 +135,8 @@ class Gate:
                     plan = assemble(source, await self.jev.ask(prepare(source)))
         except (JevError, SemanticError, TimeoutError):
             return self.unresolved("classifier-failed")
+        if await bridge.participants(bound) != topology:
+            return self.unresolved("native-topology-changed")
         if plan.status != "ready":
             return self.unresolved("coverage-or-grounding-unresolved")
         text = plan.view(bound.recipient)
@@ -177,15 +173,13 @@ class Gate:
         async def evaluate(body, deadline):
             bound = await bridge.bind(body)
             key = bound.event.thread
-            exempt = (key.workspace, key.channel, bound.event.sender) in self.monitoring
-            if exempt or bridge.pending(bound):
+            if bridge.pending(bound):
                 return body
-            if bound.recipient not in self.participants:
-                raise Uncertain("unconfigured receiving runtime")
             if adapter._early_reject_unauthorized(bound.event.sender, key.channel, False, thread_id=key.root):
                 return None
             try:
-                projected = await self.project(body, bound, adapter, deadline)
+                topology = await bridge.participants(bound)
+                projected = await self.project(body, bound, adapter, deadline, bridge, topology)
             except (Exception, asyncio.CancelledError):
                 if bridge.pending(bound):
                     return body
@@ -193,7 +187,7 @@ class Gate:
             if self.disposed or bridge.pending(bound):
                 return body
             if adapter._team_bot_user_ids.get(key.workspace) != bound.recipient.bot_user:
-                raise Uncertain("native receiver changed")
+                return self.unresolved("native-receiver-changed")
             return projected
 
         async def middleware(body, next, req):
@@ -208,6 +202,9 @@ class Gate:
                 req.body = projected
             except Uncertain:
                 logger.debug("thread-assignee native exemption or unknown identity/control; pass-through")
+            except TopologyError:
+                self.unresolved("native-topology-unresolved")
+                return BoltResponse(status=200, body="")
             except Exception:  # noqa: BLE001 - fail closed at ingress without logging untrusted payloads
                 self.unresolved("ingress-failed")
                 return BoltResponse(status=200, body="")
@@ -229,13 +226,7 @@ def register(ctx):
     def wire(native, adapter):
         if disposed:
             return
-        path = os.environ.get("HERMES_THREAD_ASSIGNEE_CONFIG")
-        if not path or not Path(path).is_absolute():
-            raise ValueError(
-                "Set HERMES_THREAD_ASSIGNEE_CONFIG to an absolute participant/input-policy config; routing is not active"
-            )
-        config = Config.load(Path(path))
-        gate = Gate(config.participants, monitoring=config.monitoring, semantic=config.semantic)
+        gate = Gate()
         gates.append(gate)
         gate.wire(native, adapter)
 

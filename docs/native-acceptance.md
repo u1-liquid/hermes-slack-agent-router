@@ -1,105 +1,101 @@
-# Stateless native acceptance boundary
+# Testing
 
-## Host and candidate
+## Offline repository checks
 
-Pinned official Hermes v0.22.5, bf0203a794a07aac3ff764972ab9087baa4e4f4e;
-Python3.14, Slack Bolt1.30.0 and Slack SDK3.44.1 via tests/requirements-native.txt.
-The candidate uses request-local context/typed-Jev plans and private Bolt projection.
-There is no plugin assignment/decision/topic/transcript store, admin/init CLI or manual
-main bootstrap. Discovery and startup require only static participants/input policy.
-CI retains distinct required core/native jobs on Python3.14, not an interpreter matrix.
+Run from the repository root with Python 3.14, the CI interpreter:
 
-## Executed versus controlled boundaries
+```sh
+python -m pip install . ruff==0.17.3 build
+python -W error::ResourceWarning -m unittest discover -s tests -p test_core.py -v
+python -W error::ResourceWarning -m unittest discover -s tests -p test_semantic.py -v
+python -W error::ResourceWarning -m unittest discover -s tests -p test_boundaries.py -v
+ruff check hermes_slack_thread_assignee tests
+ruff format --check hermes_slack_thread_assignee tests
+python -m build
+```
 
-`tests/test_native.py` uses actual AsyncApp dispatch, SlackAdapter listeners and native
-GatewayRunner identity/session/pending/queue methods. Only external SDK I/O and the final
-model/busy receivers are controlled. Offline native tests control Jev answers too; they
-are not claimed as external model inference. Assertions inspect the receiver's actual
-CURRENT text, not just a classifier label.
+Core startup also invokes a fresh `-S` subprocess without optional host SDKs.
+It needs no plugin config file or bootstrap. Semantic tests exercise exact source
+spans, selected prior authors, topic groups, joint recipients, generic continuation,
+multilingual acknowledgement/new-work separation, atomic uncertainty and typed
+confidence. Controlled HTTP tests check official URL/authentication, missing-key
+no-egress, body caps, faults and async cancellation/resource closure.
 
-- Both recipients get disjoint assigned CURRENT spans and relevant labeled PRIOR sources.
-  Nonrecipients get empty200 before native model/chat/warning/queue/steering.
-- Rich/nested edited input is canonicalized with exact Unicode/source-field provenance;
-  private projection removes excluded blocks/files/attachments, preserving caller originals.
-- Native original/projected authorization and mention/wake admission intersect. A mention
-  in somebody else's action or rendered PRIOR text cannot manufacture wake permission.
-- Normal handling, legacy busy, shared native burst, runner FIFO/promotion/merge/replay
-  retain scope. This is not a separate deployed SessionAuthority persistence system.
-- Commands, bots/self, DMs/MPIMs and exact monitoring keep native handling. Genuine blocking
-  approval, clarification, slash confirmation and update controls bypass/recheck after awaits,
-  including SDK/Jev failure. Short control replies do not become new broad work.
-- Current timestamp is excluded. Root/current media and incomplete/foreign/future/conflicting
-  history are unresolved. Opposite receivers with reversed registry/history produce the
-  same canonical question batch. Edited input reclassifies rather than reuses stored state.
-- Native duplicate accepted-event suppression survives while plugin classification may
-  run again. A fresh Gate reconstructs prior references from native history without DB/init.
-- Socket Mode sends exact empty acknowledgement, unknown native identity is not guessed,
-  runtime/transport rebinding remains checked and disposed callbacks pass through.
+## Native integration
 
-`tests/test_semantic.py` exercises exact spans, selected source authors, current topic
-groups, joint recipients, multilingual ACK/new-work, quoted context, generic lead/source
-support without bootstrap, atomic uncertainty, typed distribution/key/confidence validation,
-request/response caps, actual async stream cancellation/closure, fixed official URL/Bearer/JSON,
-no subprocess dependency, safe redirect/HTTP/transport failures and missing-key no-egress.
-Native tests additionally exercise real Hermes multiplex secret isolation and serving-runtime
-scope versus receiving-profile scope. `test_boundaries.py`
-checks canonical inputs, edits and workspace/ambiguous-identity isolation. DB lock/schema/
-migration/CAS/audit/purge/election tests are intentionally removed with the rejected store.
+Use a separate official checkout at the pinned revision, never an installed/live
+Hermes home. `HERMES_TEST_SOURCE` must be an absolute path to that checkout.
+Install the test dependencies in an isolated environment:
 
-## Explicit real fictional inference
+```sh
+python -m pip install -r tests/requirements-native.txt . build
+export HERMES_TEST_SOURCE=/absolute/path/to/isolated/hermes-agent
+export HERMES_REQUIRE_NATIVE=1
+python -W error::ResourceWarning -m unittest discover -s tests -p test_native.py -v
+python -W error::ResourceWarning -m unittest discover -s tests -p test_plugin_surface.py -v
+```
 
-`JEV_FICTIONAL_CANARY_DIR` opts into the real official HTTPS API through the production
-prepare→JevClient.ask→assemble path, using the caller's existing Hermes native secret
-mapping before isolating fixture homes (never writing a real key to them). No Jev CLI or
-TypeSafe SDK is required. The semantic journey test requires READY/correct
-scopes for two topics, contextual unmentioned reply, ACK/new work, same-topic multiple
-recipients, quote/reference and a generic lead inferred from conversation; ambiguous
-addressee requires unresolved/no views. The native real-Jev test additionally drives
-actual AsyncApp→SlackAdapter input for both recipients of a multi-topic message, an
-unmentioned contextual reply and a generic continuation. SDK history and final model
-receiver remain controlled; inference is external and real, not replayed fixture answers.
+The target is Hermes v0.22.5, commit
+`bf0203a794a07aac3ff764972ab9087baa4e4f4e`. Tests isolate fixture homes and use
+actual Slack Bolt AsyncApp dispatch, SlackAdapter listeners, source/canonical
+identity builders, native transport maps and authority registry. Slack network I/O,
+socket observations and final model/busy receivers are controlled. Offline Jev
+answers are controlled too; these tests are not a live Slack or real inference test.
 
-Raw request/result/HTTP-outcome/latency, plan and native received-text artifacts belong only to
-the opt-in test harness. Production has no filesystem transcript/decision capture. No
-private Slack/customer/credential/reversible-private fixture or CI credential is used.
-Confidence0.8 is preserved, not tuned to make canaries pass. These are bounded fictional
-examples, not calibrated accuracy: uncertain answers remain no-work, not synthetic success.
-The current official-API fictional invocation returned READY for two topics, contextual
-reply, quote/reference and generic continuation, but abstained on ACK/new-work and
-same-topic joint references; that aggregate semantic assertion is FAILED, not relabeled
-PASS. The separate actual-API native four-scope delivery invocation passed. The earlier
-CLI-era failed quote invocation remains historical failed evidence, not API acceptance.
-No unchanged retry, confidence reduction or prompt retuning was used to obtain green.
+Assertions cover discovered multi-transport candidates, receiver-independent
+canonical inputs and recipient-specific received text. They also cover lost,
+foreign, ambiguous and changing topology, source grounding, original/projected
+native admission, pending controls, normal/busy/shared-burst/queue/merge/replay,
+empty acknowledgements and no model/warning/queue effects on rejected input.
+Native secret-scope tests distinguish the serving runtime from receiving context
+and verify missing-scope and concurrent multiplex isolation.
 
-## Packaging/startup and independent acceptance
+`test_plugin_surface.py` separately exercises real directory discovery,
+registration, factory activation with no configuration and Plugin Doctor.
+`test_installed.py` must run against a freshly built wheel installed into an empty
+separate target, outside the source checkout:
 
-`test_core.py` launches a fresh standard-library-only subprocess that parses DB-free
-config and registers the plugin without init/owner setup or routing files. It does not
-activate Slack SDK middleware in the SDK-free core lane. The separate required native
-`test_plugin_surface.py` runs real directory discovery, actual factory activation and isolated
-Plugin Doctor with no admin command. `test_installed.py` runs Python-I outside the source
-checkout against a fresh separate wheel target, verifies the real entry point and factory,
-and rejects stale Store/PlanStore/admin modules/console scripts. Source-suite wheel skips
-are not wheel proof; native CI explicitly requires the separate installed-wheel gate.
+```sh
+python -m build
+python -m pip install --target /absolute/path/to/empty-wheel-target dist/*.whl
+export HERMES_WHEEL_TARGET=/absolute/path/to/empty-wheel-target
+export HERMES_REQUIRE_WHEEL=1
+cd /absolute/path/outside/source
+python -I -W error::ResourceWarning -m unittest discover -s /absolute/path/to/repository/tests -p test_installed.py -v
+```
 
-The current source must pass complete local suites, Ruff/check-format/diff/build, fresh
-wheel/native gates, one consolidated independent review and exact-head hosted core/native.
-Implementation self-checks, prior persistent-product acceptance and scalar code-quality
-scores do not supply current independent stateless acceptance. Historical private evidence
-remains at its original source/behavior boundary, not relabeled as database-free proof.
+A source-suite wheel skip is not installed-package proof. CI's distinct `native`
+job requires native setup and the outside-checkout installed-wheel test; `core`
+requires deterministic suites, formatting, lint and build. Both use Python 3.14.
 
-## Limits and unperformed operations
+## Opt-in fictional API tests
 
-Context is a bounded complete short thread (root plus at most6 prior messages/6000characters).
-`has_more`, unsupported/inseparable composition, missing/ambiguous lead and failed Jev produce
-bounded fixed local diagnostics and empty ordinary acknowledgement, not durable recovery.
-Only request-local memory exists; repeated events/processes/restarts can classify again and
-independent stochastic plans may differ. Native history/dedup are not plugin consensus.
+Only use wholly fictional or explicitly public-permitted fixtures. Do not send
+private/customer/credential content or reversible derivatives. Use the caller's
+existing native Hermes `TYPESAFE_API_KEY` scope; do not put real keys in test homes
+or protocol artifacts. Offline CI does not run these tests or need a real key.
 
-Default semantic egress is off; exact fictional/public-permitted policy is required. Native
-auth/control/wake remains authoritative. No atomic native control lease or universal
-fail-closed coverage is claimed for disabled/broken plugins/unknown native mappings.
-Ingress target2.5s and Jev<=1.2s include bounded I/O and cancellation cleanup, not a hard
-OS scheduling SLA. Physical middleware unwiring is unsupported; replacement/re-enable
-needs an operator-managed restart. No live install/Slack probe, private egress, real DB
-file deletion, Gateway restart, merge/release or deployment is performed by these tests.
+```sh
+export JEV_FICTIONAL_CANARY_DIR=/absolute/path/to/private/fictional-evidence
+python -W error::ResourceWarning -m unittest discover -s tests -p test_semantic.py -k real_fictional -v
+python -W error::ResourceWarning -m unittest discover -s tests -p test_native.py -k real_jev -v
+```
+
+The native test also requires the isolated host setup above. The recording harness
+preserves fictional request/result/plan and received-input evidence; production
+writes none of those files. SDK history and final model receivers remain controlled
+while Jev inference uses the actual official HTTPS client.
+
+A confidence abstention is a no-work result, not successful delivery. Preserve
+failed assertions and inspect their actual source/answers; do not lower thresholds
+or retry an unchanged request solely to manufacture green. These examples measure
+bounded behavior, not calibrated classifier accuracy or deployment readiness.
+
+## Operational boundaries
+
+These tests do not install into a live gateway, process private Slack, restart a
+gateway or change production credentials. Discovery is runner-local, not a remote
+participant directory. Native socket observations and request-local revalidation
+are not a global topology transaction. Same-client unload/re-enable needs separate
+lifecycle handling because native factory deduplication can prevent replacement
+attachment. See [runtime design](design.md) for the supported boundaries.

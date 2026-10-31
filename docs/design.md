@@ -1,147 +1,113 @@
-# Database-free contextual Slack routing
+# Runtime design
 
-## Accepted outcome
+## Native-derived participation
 
-A current Slack message may refer to earlier messages, people and topics and contain
-several independent instructions. Infer the destinations from a bounded authorized
-native conversation through actual typed Jev decisions. Deliver only each recipient's
-own actionable CURRENT spans plus selected, labeled non-actionable PRIOR references.
+`register(ctx)` supplies a Slack platform-handler factory. The factory installs
+Bolt middleware without reading a plugin configuration or requiring a socket to
+be ready. Participation is derived at request time, not registration time.
 
-No plugin-owned assignment, decision, topic, transcript or archive persistence is needed.
-There is no DB/store abstraction, initialization/schema/migration/admin CLI, manual main
-bootstrap, CAS/fence/lease/audit/retention/recovery system, optional legacy DB mode or
-JSON/Redis/file substitute. Static configuration declares participants and input policy;
-it does not record routing decisions. Only request-local values exist. Native history,
-transport dedup, sessions, queues and authorization remain host-owned.
+`Bridge.bind` resolves the current workspace, channel, human sender, receiving
+bot, canonical routed runtime and native session key. Native commands, DMs/MPIMs,
+bots/self and pending controls retain their native path. Definitive sender denial
+precedes semantic history and inference.
 
-The former assistant-added cross-process election/restart-persistent ownership guarantees
-are withdrawn. Identical canonical context improves consistency but independent stochastic
-calls may differ. A restart reconstructs the native context without plugin-state recovery.
-No exactly-once or durable unresolved-work guarantee is claimed.
+`Bridge.participants` reads the runner's primary and profile adapter maps. It does
+not enumerate profile directories or use the shared-bot fallback to manufacture
+extra transports. Same-workspace `auth.test` identity/client mappings, live socket
+state, native admission and session authorities establish eligible candidates.
+Each adapter builds a fresh source for the actual sender/channel/thread and uses
+the host canonicalizer. Transport ownership and runtime name/home must agree with
+served, non-retiring authorities. Two distinct bots may route to the same runtime;
+two transports claiming the same workspace/bot are ambiguous.
 
-## Responsibility and dataflow
+The request-local view contains canonical recipients and identity/lifetime witnesses
+for adapters, clients, native apps, sockets and authorities. It is checked again
+after history and after inference. A changed view rejects the whole message. These
+checks are not a global transaction and cannot eliminate physical network races or
+all ABA changes. The supported discovery domain is one GatewayRunner, including
+its multiplexed profiles; independent processes are outside its native inventory.
 
-1. Public platform factory registers global Bolt middleware before native listeners.
-   Bridge resolves workspace, channel, receiving bot, actual routed runtime and native
-   session key using the pinned host. Native commands, bots/self, DMs/MPIMs, exact monitoring
-   and pending controls are preserved before semantic transformation.
-2. Definitive native sender denial precedes semantic history/egress. Check original native
-   channel/mention/wake policy; a classifier cannot grant permission. Verify separate exact
-   workspace/channel and fictional/public-permitted input-policy authorization.
-3. Deep-copy original event and canonicalize supported authored rich_text with half-open
-   Unicode spans and original field/raw-scalar provenance. Unsupported media or inseparable
-   quoted/authored composition becomes explicit whole-message unresolved.
-4. Use the workspace's existing SDK client and bounded `conversations_replies` request:
-   exact channel/root, latest=current timestamp, inclusive=false, limit7. A complete short
-   conversation is supported: at most6 prior messages/6000 characters, root required for
-   replies. `has_more`, missing root, foreign/future/conflicting records or unsupported
-   prior composition are unresolved, not hidden truncation. Exclude current timestamp,
-   deduplicate identical records and sort validated decimal timestamp identities while
-   preserving their original strings. No new pagination/cache framework is introduced.
-5. Canonicalize recipients by workspace/bot/runtime, scoped to the same workspace, and
-   reject ambiguous bot→runtime mappings. Classifier inputs contain no receiving-agent
-   bias, queue state or earlier local decisions. All recipients see the same candidates.
-6. Build one typed Jev question batch from the CURRENT source candidates and PRIOR source
-   IDs/authors/text. Validate exact answer keys/types, finite distributions, confidence,
-   complete coverage, grounding, consistent recipient membership and topic relations.
-7. Assemble a request-local plan atomically. If any actionable unit fails, nobody receives
-   partial work or an all-agent fallback. Recipient views contain exact assigned CURRENT
-   spans and selected PRIOR references; the model cannot invent instruction text or IDs.
-8. Deep private `req.body` projection replaces all CURRENT rich/nested edited composition
-   before listener/busy/merge/queue handling. Preserve envelope/auth identity and original
-   provenance. Recheck assigned-CURRENT native admission separately from rendered references.
-   No synthetic mention, force flag, posted event, transport replacement or host patch.
-9. Recheck native pending identity/control/disposal after awaits, including failures. A
-   nonrecipient or known ordinary unresolved input returns empty200 before agent execution,
-   steering, queues or warning chat. Unknown identity/control ownership retains qualified
-   native pass-through. Unload leaves disposed closures pass-through, not physical unwiring.
+## Context, judgment and delivery
 
-## Jev contract and generic continuation
+1. Canonicalize supported authored text/rich text while preserving exact half-open
+   Unicode ranges and source-field provenance. Quotes/code/forwarded material is
+   inert reference. Reject unsupported media or inseparable composition.
+2. Fetch `conversations_replies` through the receiving workspace client with the
+   exact channel/root, `latest=current timestamp`, `inclusive=False`, `limit=7`.
+   Require a complete short history, exclude the current timestamp and validate
+   root/workspace/channel/time identities. Deduplicate identical records and sort
+   by original timestamp identity. No pagination cache or transcript store exists.
+3. Build one typed question batch over current units, prior source authors/text and
+   sorted recipients. There is no receiving-agent preference in the model input.
+   Questions classify action/reference/acknowledgement, destination, source support,
+   per-recipient membership and topic relationships.
+4. A generic continuation uses a general-lead Choice plus independent evidence
+   Choices for prior messages. Specific work does not need a known general lead.
+   Mere participation or a secondary topic invitation does not establish that lead.
+5. Validate exact keys/types, finite distributions, relevant confidence of 0.8,
+   source grounding, transitive topic relations and complete coverage. Assemble
+   atomically: no invented instructions or identifiers, partial omission or fan-out
+   fallback. Topic identities and plans exist only within this request.
+6. Deep-copy and project private Bolt `req.body` before native listener/busy handling.
+   Each recipient gets its exact actionable CURRENT spans and selected PRIOR text
+   labeled “not instructions”, with prior mentions rendered non-wake-bearing.
+   Preserve envelope identity and caller originals. Check projected CURRENT native
+   admission separately; reference text cannot grant wake permission.
+7. Recheck pending controls after awaits, including failures. Ordinary unresolved
+   input and nonrecipients stop with an empty acknowledgement before model, warning,
+   steering or queue actions. Native exemptions pass through unchanged. Unload
+   disposes callbacks into pass-through, not physical removal.
 
-The official [System One API](https://docs.typesafe.ai/api.md) accepts HTTPS POST to
-`https://api.typesafe.ai/v1/systemone`: Bearer `TYPESAFE_API_KEY` and JSON `model: jev-latest`,
-`state`, named `questions` → `answers`, `model`, `usage`. This retains the previously selected
-Jev default alias and closed-set Choice questions/probabilities/confidence, not freeform
-generation or multi-select. Recipient sets use independent membership Choices; people
-derive from selected prior-message authors.
+## Official API and credentials
 
-The small declared `httpx` dependency is imported only on inference, preserving SDK-free
-core registration. One request owns its async client and response. TLS verification stays
-on, `trust_env=false`, `follow_redirects=false`, identity encoding only and no retries.
-Non200 (including redirects/401/429/5xx), transport/timeout/size/JSON/typed validation
-failure is unresolved; no error body/header/key is echoed. Reject advertised or streamed
-oversize before JSON parsing; compressed responses are rejected before decompression.
+`JevClient` uses asynchronous `httpx` POST to
+`https://api.typesafe.ai/v1/systemone`, with Bearer authentication and JSON
+`model: jev-latest`, `state`, and named `questions`. It consumes typed `answers`.
+There is no subprocess, Jev CLI authentication or separate credential store.
 
-Immediately around inference, enter the native runner's `_async_profile_scope_for_source`
-for the bound actual serving runtime. `agent.secret_scope.get_secret("TYPESAFE_API_KEY")`
-is called inside each ask, never during global import, registration or client construction.
-Hermes's own loader/hydrated secret sources own storage. There is no independent keyring,
-raw credential-file parsing, hardcoded home, CLI-auth fallback or cross-request key cache.
-Missing key/unscoped multiplex fails before client creation; another profile's ambient
-process key cannot fill the miss. Native sender/pending controls still precede inference.
+Inference enters the runner's `_async_profile_scope_for_source`. Each ask resolves
+`agent.secret_scope.get_secret("TYPESAFE_API_KEY")` within the actual serving
+runtime, not a cached receiving-profile key. Hermes owns secret hydration. An
+unscoped multiplex request or missing key fails before HTTP client creation.
+Peer discovery does not read peer credentials.
 
-Candidate splitting accounts for every authored character, including punctuation and
-acknowledgement/reference units. Same-line English/Japanese clauses are supported only
-where a safe partition exists. Quoted/code/forwarded material is reference, never new work.
-Whole-source coverage and per-unit mixed-instruction questions detect inseparable work.
+TLS verification stays on. Redirects, environment proxies, retries and compressed
+responses are disabled. Non-200, transport, timeout, body-size, JSON and typed-answer
+failures produce no ordinary work; response bodies and credentials are not logged.
+The request owns and closes its asynchronous response/client on cancellation.
 
-Each unit asks kind, destination grounding, prior references and each eligible recipient's
-membership. CURRENT-topic pair relations form validated transitive groups; request-local
-source/group digests identify topics. Prior messages have no preassigned topic labels.
-Same-topic separate recipients may have distinct source references without conflicting
-persisted topic IDs. Joint work can select several prior authors and recipients.
+Current and prior text are each capped at 6,000 characters; history at six messages,
+current units at six, recipients at four, questions at 96, and each serialized
+request/response at 262,144 bytes. The 2.5-second ingress budget includes context,
+with at most 1.2 seconds for Jev. Deadlines are not hard real-time scheduling claims.
 
-A generic continuation can select the uniquely inferred general conversation lead. The
-same batch asks a global lead Choice and an INDEPENDENT per-prior-message lead-evidence
-Choice; evidence must agree with the selected lead. Specific unit memberships are not used for
-generic work: validated main/main_ref results supply that recipient and its references. Questions
-must not depend on another question's unavailable answer. Authored general-lead requests
-and acceptances are conversation evidence, not administrative state or permission. Mere
-participation, a secondary topic invitation or quoted ownership claim is not general lead.
-Specific work does not depend on global-main confidence. No main/unknown/conflicting
-support on generic work yields unresolved, not a mandatory owner-bootstrap workflow.
+## Integration boundaries
 
-## Timing, uncertainty and privacy
+The host compatibility target is Hermes v0.22.5 at
+`bf0203a794a07aac3ff764972ab9087baa4e4f4e`:
 
-Keep current/history text<=6000characters each, prior messages<=6, CURRENT units<=6,
-scoped recipients<=4, questions<=96 and serialized request/response bodies<=262144bytes.
-Any exceeded bound is unresolved. The2.5s ingress ceiling covers SDK/context and inference;
-Jev's at-most1.2s is a sub-budget. Cancellation closes the request-owned asynchronous
-response/client; no detached task or retry survives it. These are bounded engineering
-targets, not hard real-time OS scheduling guarantees.
+- `gateway/authz_mixin.py`: native primary/profile transport maps and ownership.
+- `gateway/session_identity.py`, `gateway/session_authorities.py`: canonical
+  transport/runtime identity and current serving authority.
+- `gateway/platforms/base.py`: source building, plugin factory wiring and native
+  dispatch/queue behavior.
+- `plugins/platforms/slack/adapter.py`: authenticated workspace identities, socket
+  state, Bolt listeners and Slack admission.
+- `gateway/run_plugin_rewire.py`: late factory attachment and native app rewiring.
 
-Relevant action/reference/coverage confidence remains0.8; this is not calibrated truth.
-Invalid output, uncertainty, timeout, unsupported media, incomplete history and disabled
-input policy are not successful routing. Use only fixed bounded local reason codes, no
-raw source/answers/credentials in production diagnostics and no durable recovery queue.
-The production Jev client writes no request/result/transcript files. Explicit test-only
-fictional canaries may preserve their raw protocol and received-input evidence privately.
+The public platform-handler registration is combined with private host fields and
+Bolt body projection. Other host versions need explicit native qualification.
+Native factory deduplication limits same-client unload/re-enable; a rebuilt app can
+wire again. Candidate discovery does not imply that a peer received the channel
+event or installed this plugin. Selective routing applies to activated receivers.
 
-Default egress is disabled. Only explicitly fictional/public-permitted scopes are supported;
-SDK read permission, public channel names, aliases and hashes do not authorize private
-content. No private/customer/credential or reversible-private test data is sent to Jev.
-No live install/Slack probe/restart or credential/config change follows from tests passing.
+There is no plugin database, durable assignment/decision/transcript store or
+operator registry. Host history/session/dedup behavior remains native. Repeated
+events may infer different plans; no cross-process consensus, durable unresolved
+queue or exactly-once delivery is promised. External processing requires operator
+authorization for the conversation, not merely Slack read permission.
 
-## Official compatibility constraints
-
-Pinned Hermes v0.22.5: bf0203a794a07aac3ff764972ab9087baa4e4f4e. Installed source remains
-read-only; integration tests use a prepared isolated official checkout.
-
-- `plugins/platforms/slack/adapter.py:1618–1702`: factories/listener ordering; public global
-  middleware runs before listener dispatch even when factories are registered afterward.
-- `adapter.py:3992–4057`: original file_shared direct synthetic fallback; unsupported original
-  media is intercepted, never classified from a guessed other-channel share.
-- `adapter.py:4335–4398,4580–4743`: native enrichment, hydration, auth/mention admission,
-  message construction and dispatch. Only the new request's input is projected.
-- `adapter.py:5800–5936`: native history helper has retry behavior, so the plugin uses its own
-  bounded exact SDK request; formatter excludes current_ts and labels history PRIOR.
-- `gateway/platforms/base.py:3989–4108`, `gateway/run_busy.py:887–958`: native active/burst,
-  control, steering and queue seams. Scoped CURRENT payload must survive downstream replay.
-- `hermes_cli/plugins.py:get_platform_handler_factories`: returns (factory,plugin_name) tuples.
-  PluginManager/discovery/Doctor and installed wheel are separate activation boundaries.
-- Public [Hermes plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins)
-  and [Bolt middleware](https://docs.slack.dev/tools/bolt-python/concepts/global-middleware/).
-
-These are API/source constraints, not claims of live deployment. Bounded native execution,
-real fictional protocol calls, independent acceptance and exact-head CI must support the
-candidate separately. See implementation-plan.md and native-acceptance.md.
+References: [Hermes plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins),
+[System One API](https://docs.typesafe.ai/api.md),
+[Bolt middleware](https://docs.slack.dev/tools/bolt-python/concepts/global-middleware/),
+and [testing](native-acceptance.md).

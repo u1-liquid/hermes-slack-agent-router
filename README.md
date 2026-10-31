@@ -1,133 +1,119 @@
 # Hermes Slack Thread Assignee
 
-Stateless contextual Slack routing for Hermes. Bounded native conversation evidence
-and one typed Jev question batch determine which message/person/topic each instruction
-addresses. Each eligible recipient gets only its own CURRENT source spans and selected,
-explicitly non-actionable PRIOR references. One message can address several recipients
-with different work, or several people on the same topic.
+Contextual Slack routing for Hermes. Jev identifies which earlier message, person
+and topic each current instruction addresses. Each eligible agent receives only
+its own actionable CURRENT spans and selected, explicitly inert PRIOR references.
+A message can address several agents with different work.
 
-There is no assignment database, plugin transcript/decision/topic store, initialization,
-manual main-owner bootstrap, management CLI, migration or recovery service. The plugin
-holds only request-local values. It does not replace persistence with JSON/Redis/files.
-Native Hermes/Slack retain their own history, session, queue and dedup responsibilities.
+## Install and use
 
-## Installation and activation
+Requires Python 3.11+, Hermes v0.22.5 at
+`bf0203a794a07aac3ff764972ab9087baa4e4f4e`, and its working Slack integration.
+The native integration uses private host seams and is tested against that exact
+revision. Package metadata alone does not establish compatibility with other hosts.
 
-This is an unmerged feature candidate, not a live deployment or PyPI release. Python
-3.11+ is supported by package metadata; CI runs the distinct core/native gates on3.14.
-Install in the same environment as Hermes, selecting the explicit candidate branch:
+Install into the same Python environment that runs Hermes:
 
 ```sh
 python -m pip install 'git+https://github.com/u1-liquid/hermes-slack-thread-assignee.git@feat/stable-thread-assignee'
 hermes plugins enable slack-thread-assignee
+hermes plugins doctor slack-thread-assignee --ci
 ```
 
-The package supplies the official `hermes_agent.plugins` entry point and directory
-`plugin.yaml`. The native plugin installer does not accept arbitrary local package
-directories. Copy `examples/config.json`, replace the fictional participant identities
-and input-policy scope, and set `HERMES_THREAD_ASSIGNEE_CONFIG` to its absolute path in
-the gateway launch environment. No DB directory or init command is required. The config
-is static participant/input policy, not a routing-state file. Use the same participant
-registry and permitted conversation view for all agents; bot→runtime mappings must be
-unambiguous within each workspace. Participants are ordered canonically, never by the
-currently receiving agent. Missing/invalid config reports failed activation; discovery
-and Plugin Doctor alone do not prove active routing or delivery.
+Enable it for every receiving profile that should use selective routing. Use the
+normal Hermes secret setup to make `TYPESAFE_API_KEY` available to each profile
+that actually executes requests. The plugin resolves that key inside the serving
+runtime's native secret scope, which may differ from the receiving bot's profile.
+It does not use a Jev executable or a TypeSafe SDK.
 
-Disable with `hermes plugins disable slack-thread-assignee`. Retained callbacks become
-pass-through; physical callback unwiring is unavailable, so replacement/re-enable needs
-an operator-managed gateway restart. This documentation does not authorize a restart.
-Uninstall the distribution with `python -m pip uninstall hermes-slack-thread-assignee`;
-directory plugins use `hermes plugins remove slack-thread-assignee`. No data deletion
-or migration is performed, including deletion of any historical database from an older
-unreleased candidate.
+There is no plugin configuration file, participant list, input-policy registry,
+initialization command or manual thread-owner setup. After native activation,
+eligible messages use the connected Slack transports already owned by the gateway.
+Plugin Doctor checks registration; it does not prove socket readiness or delivery.
 
-## Input policy and real Jev
+For example, if native history establishes that Atlas prepared a summary and Birch
+prepared a diagram, “Atlas, revise the summary; Birch, check the diagram” can produce
+two different recipient inputs. “Please continue” needs unambiguous prior evidence
+of a general conversational lead. It does not establish a permanent owner.
 
-Semantic egress is disabled by default. The example permits ONLY fictional content in
-one fictional workspace/channel. A configured scope asserts authorization for the entire
-bounded current/history/identity input and its audience, not merely Slack read access.
-Only `fictional` and `public-permitted` data classes are supported. A public channel name,
-hash or alias is not permission to send private/customer/credential data. Do not deploy
-this candidate on private conversations using the example policy.
+## Participation and external processing
 
-The package declares `httpx` for direct asynchronous HTTPS to the official
-`https://api.typesafe.ai/v1/systemone` endpoint; no local Jev executable, CLI auth file
-or TypeSafe SDK is required. Every request resolves `TYPESAFE_API_KEY` through Hermes's
-native `agent.secret_scope.get_secret` inside the actual serving runtime's native profile
-scope, not the receiving adapter's cached credentials. Hermes owns `.env`/external secret
-source hydration. No key belongs in plugin configuration. Missing/inaccessible scope or
-key is unresolved before HTTP egress; multiplex mode never borrows process-global keys.
-The POST uses Bearer authentication and JSON `model: jev-latest`, `state`, `questions`;
-returned `answers` keep the same typed Choice validation. TLS verification is enabled;
-redirects, environment proxies, automatic retries and compressed responses are disabled.
-The client does not log headers, keys, transcripts or service error bodies.
+Candidates come from the current GatewayRunner's primary and multiplexed-profile
+Slack adapters. Each candidate needs authenticated identity in the same Slack
+workspace, a live native socket and a served runtime. Native source routing is
+resolved separately for each transport and this sender/channel/thread; configured
+profiles, display names, history authors and human allowlists are not participants.
 
-Validate exact answer keys, types, finite probabilities, coverage, source grounding and
-confidence0.8 for relevant judgments. No model-generated instructions or identifiers are
-accepted. People derive from selected source-message authors; topics are request-local
-groups, not permanently assigned IDs.
+Discovery is limited to one GatewayRunner. It does not discover agents in other
+processes or on other hosts. A shared bot contributes one event-specific native
+runtime, not one candidate per configured profile. A disconnected bot is not a
+candidate. Unknown or ambiguous identity, duplicate bot ownership, or a topology
+change during evaluation yields no ordinary work. There is no hidden all-agent
+or receiver-only fallback. Native policy still decides whether each receiver may act;
+a discovered peer is not proof of channel membership or delivery.
 
-A generic continuation can reach a uniquely inferred conversational lead supported by
-native history in the same Jev batch. That is not permanent ownership or permission.
-A secondary invitation does not automatically transfer the general conversation. Specific
-work does not require a known general lead. Missing/ambiguous lead, incomplete partition,
-conflicting evidence or any failed actionable unit makes the WHOLE message unresolved;
-no partial instruction is quietly omitted and no all-agent fallback is used.
+Eligible current text, bounded prior text, source authors and candidate bot/runtime
+identities are sent to `https://api.typesafe.ai/v1/systemone` using `jev-latest`.
+Enable this plugin only where you are authorized to send that conversation to
+TypeSafe. Slack read access is not external-processing consent. There is no plugin
+privacy classifier or per-channel egress-policy setting. Missing serving-profile
+credentials or invalid responses result in no ordinary work. Production does not
+log keys, transcripts or service error bodies, or store routing decisions.
 
-Unresolved ordinary input gets empty transport200 and fixed bounded local diagnostics
-such as `privacy-disabled`, `incomplete-context`, `classifier-failed` or
-`coverage-or-grounding-unresolved`. It does not invoke the main model, steer/queue work
-or post a silence warning. No durable unresolved queue, inspection/replay command or
-operator cache exists. Retrying is native transport behavior, not plugin recovery.
+## Behavior and limits
 
-## Native safety and supported bounds
+- Jev returns closed-set typed decisions, not executable text. Relevant confidence
+  must be at least 0.8; source grounding and complete instruction coverage are checked.
+  Uncertainty in any actionable unit rejects the whole message, not just one clause.
+- Replies need the root and a complete short history: at most six prior messages
+  and 6,000 prior characters. Pagination, missing roots and foreign/future/conflicting
+  records are unresolved, not silently truncated.
+- Current input is limited to 6,000 characters, six units, four recipients and
+  96 questions. Request and response bodies are each limited to 262,144 bytes.
+  Media and inseparable authored/reference composition are unsupported.
+- The ingress budget is 2.5 seconds, including context and the at-most-1.2-second
+  Jev request. These are engineering deadlines, not hard real-time guarantees.
+  TLS is verified; redirects, environment proxies and automatic retries are disabled.
+- Original and projected native sender/channel/mention/wake policy must permit the
+  request. Commands, DMs/MPIMs, bots/self and native pending approval, clarification,
+  confirmation and update controls retain native handling. Inferred recipients do
+  not grant authority. Monitoring bots follow native bot policy.
+- Normal, busy, queue, merge and replay paths receive scoped text. A nonrecipient or
+  unresolved ordinary message gets an empty transport acknowledgement, no main-model
+  call, queue/steering action or silence warning. Fixed local diagnostics explain
+  unresolved input without exposing its content.
+- The plugin keeps only request-local state. Hermes owns history, sessions, queues
+  and deduplication. Separate ingress events can classify again and stochastic
+  decisions can differ; there is no cross-process consensus or exactly-once promise.
 
-The plugin uses the public platform factory/global Bolt middleware and a deep private
-`req.body` projection before native listener/busy processing. Envelope identity and original
-provenance are preserved. Only assigned CURRENT composition survives; selected PRIOR
-references are labeled and their mentions rendered non-wake-bearing. Unsupported media,
-root files and inseparable authored/reference composition are explicit unresolved.
+## Troubleshooting and disabling
 
-Original AND projected native admission must permit. Classifier output never grants
-sender/channel/mention/wake permission or broadens a short approval. No fake mention,
-force flag, Slack post, core monkeypatch, provider rewrite or transcript surgery is used.
-Commands, DMs/MPIMs, bots/self and exact monitoring exemptions retain native handling.
-Pending approval/clarification/confirmation/update state is rechecked after awaits,
-including failures. Unknown identity/control mapping remains qualified native pass-through;
-a disabled/broken plugin is not a universal fail-closed enforcement boundary.
+If registration succeeds but routing does not, check the native Slack connection,
+served profile, serving-profile key and complete short history. Local codes such as
+`incomplete-context`, `native-topology-unresolved`, `native-topology-changed`, `classifier-failed` and
+`coverage-or-grounding-unresolved` distinguish bounded failures. `ingress-failed`
+can indicate unavailable native identity/lifecycle seams. Do not paste private input
+or credentials into diagnostics to investigate them.
 
-Context is deliberately bounded to a complete short thread: root required for replies,
-at most6 prior messages/6000 prior characters, with the triggering current timestamp
-excluded. History pagination/has_more, missing root, foreign/future/conflicting records
-or unsupported prior composition are unresolved rather than silently truncated. Canonical
-ordering uses original source IDs and sorted scoped recipients, not local agent preference.
-Current text is at most6000characters,6 units,4 recipients and96 questions. Serialized
-request and response bodies are each capped at262144bytes. Whole ingress target2.5s includes
-context and Jev (at most1.2s); cancellation closes the request-owned async response/client
-without detached local tasks or retry. This is not a hard real-time scheduling SLA or a
-guarantee that the remote service stops computing after client cancellation.
+New connected adapters are discovered on later requests. Reconnecting to a rebuilt
+native app rewires the factory. On this pinned host, disabling disposes retained
+callbacks into pass-through, but does not physically remove them. Same-client
+unload/re-enable is not a supported hot replacement: native factory deduplication
+can prevent a new callback from attaching. Use a normally managed fresh gateway
+lifecycle when activating a replacement; plugin commands alone do not prove it active.
+A disabled or broken plugin is not a universal fail-closed enforcement boundary.
 
-Normal input, legacy busy/steer, shared burst, runner FIFO/merge/replay and pending controls
-are exercised at pinned native boundaries. Native duplicate accepted-event suppression
-is retained, but separate ingress events/processes/restarts may classify again and may
-receive different stochastic results. Identical canonical inputs are not a cross-process
-consensus or exactly-once guarantee. Restart reconstructs context through the native
-history boundary, with no plugin-state restoration or manual owner setup.
+```sh
+hermes plugins disable slack-thread-assignee
+python -m pip uninstall hermes-slack-thread-assignee
+```
 
-## Verification
+## Development and verification
 
-CI has one Python3.14 `core` job (deterministic tests, Ruff, build) and a distinct required
-Python3.14 `native` job (pinned host, native dispatch, discovery/Doctor and freshly rebuilt
-wheel installed outside source). No external Jev credentials are used in CI.
-
-Local real canaries require wholly fictional/public-permitted fixtures and explicit
-`JEV_FICTIONAL_CANARY_DIR`. Select `test_real_fictional_semantic_journeys` in
-`tests/test_semantic.py` and `test_real_jev_contextual_generic_and_multitopic_native_inputs`
-in `tests/test_native.py` (the latter also needs `HERMES_TEST_SOURCE`). Raw protocol evidence
-is written ONLY by the opt-in test harness, never the production client. Controlled SDK
-I/O/final model receivers are distinct from actual external Jev inference. Passing these
-bounded cases is not calibrated classifier accuracy, private-input authorization or a
-live Slack/deployment check. See [design](docs/design.md), [implementation plan](docs/implementation-plan.md)
-and [native acceptance](docs/native-acceptance.md).
+See [design](docs/design.md) for data flow and native boundaries and
+[testing](docs/native-acceptance.md) for runnable offline and opt-in fictional tests.
+CI has distinct `core` and `native` jobs, both on Python 3.14. Offline tests require
+no real TypeSafe key. Passing controlled tests is not a live Slack deployment check
+or a guarantee of classifier accuracy.
 
 MIT license, copyright u1-liquid.

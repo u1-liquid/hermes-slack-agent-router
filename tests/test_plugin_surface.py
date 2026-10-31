@@ -1,6 +1,5 @@
 """Real directory discovery, registration and isolated Plugin Doctor."""
 
-import json
 import os
 import sys
 import tempfile
@@ -23,19 +22,8 @@ class PluginSurface(unittest.TestCase):
         package = Path(__file__).resolve().parents[1] / "hermes_slack_thread_assignee"
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
-            config = root / "operator.json"
-            config.write_text(
-                json.dumps(
-                    {
-                        "participants": [
-                            {"workspace": "TDEMO", "bot_user": "UBETA", "runtime_profile": "default"}
-                        ],
-                    }
-                )
-            )
-            with patch.dict(
-                os.environ, {"HERMES_HOME": str(root), "HERMES_THREAD_ASSIGNEE_CONFIG": str(config)}
-            ):
+            with patch.dict(os.environ, {"HERMES_HOME": str(root)}):
+                os.environ.pop("HERMES_THREAD_ASSIGNEE_CONFIG", None)
                 manager = PluginManager()
                 manifests = manager._scan_directory(package.parent, source="user", skip_names={".venv"})
                 matches = [m for m in manifests if m.name == "slack-thread-assignee"]
@@ -52,7 +40,9 @@ class PluginSurface(unittest.TestCase):
                 self.assertFalse((root / "db").exists())
                 report = doctor_plugin(package)
                 self.assertTrue(report.ok, report.format_text())
-                with patch.dict(os.environ, {"HERMES_THREAD_ASSIGNEE_CONFIG": ""}):
+                with patch.dict(os.environ, {"HERMES_THREAD_ASSIGNEE_CONFIG": "/nonexistent/rejected.json"}):
+                    other = Mock()
+                    manager.get_platform_handler_factories("slack")[0][0](other, Mock())
+                    other.use.assert_called_once()
                     report = doctor_plugin(package)
                     self.assertTrue(report.ok, report.format_text())
-                    # Discovery remains possible without activating native routing.

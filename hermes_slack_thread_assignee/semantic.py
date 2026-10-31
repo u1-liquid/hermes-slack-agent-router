@@ -32,7 +32,7 @@ class Snapshot:
     text: str
     history: tuple[History, ...]
     recipients: tuple[Recipient, ...]
-    policy_revision: str
+
     original: dict | None = None
     provenance: tuple[dict, ...] = ()
     protocol: str = "choice-stateless-context-v1"
@@ -159,7 +159,7 @@ def prepare(source: Snapshot):
         or any(h.identity == source.identity for h in source.history)
         or sum(len(h.text) for h in source.history) > 6000
     ):
-        raise SemanticError("source/context/registry bound violated")
+        raise SemanticError("source/context/recipient bound violated")
     spans = source_candidates(source)
     if not 1 <= len(spans) <= 6:
         raise SemanticError("candidate coverage exceeds unit bound")

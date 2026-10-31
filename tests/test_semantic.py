@@ -3,14 +3,12 @@
 import asyncio
 import json
 import os
-import tempfile
 import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
-from hermes_slack_thread_assignee.config import Config, ConfigError
 from hermes_slack_thread_assignee.jev import JevClient, JevError, validate_answers
 from hermes_slack_thread_assignee.policy import Recipient, Thread
 from hermes_slack_thread_assignee.semantic import History, Plan, SemanticError, Snapshot, assemble, prepare
@@ -31,7 +29,6 @@ def snapshot(text="Atlas, revise the summary; Birch, check the diagram."):
             History("2.0", "UBIRCH", "Birch prepared the diagram."),
         ),
         (A, B),
-        "public-fiction-v1",
     )
 
 
@@ -364,28 +361,7 @@ class SemanticTests(unittest.TestCase):
         with self.assertRaisesRegex(SemanticError, "inseparable"):
             prepare(replace(snapshot(text), provenance=provenance))
 
-    def test_exact_egress_policy_and_bounds(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "config.json"
-            raw = {
-                "participants": [A.as_dict(), B.as_dict()],
-                "semantic": {
-                    "enabled": True,
-                    "policy_revision": "fiction-v1",
-                    "scopes": [
-                        {"workspace": KEY.workspace, "channel": KEY.channel, "data_classes": ["fictional"]}
-                    ],
-                },
-            }
-            path.write_text(json.dumps(raw))
-            policy = Config.load(path).semantic
-            self.assertTrue(policy.permits(KEY, "fictional"))
-            self.assertFalse(policy.permits(KEY, "private"))
-            self.assertFalse(policy.permits(Thread("TOTHER", KEY.channel, KEY.root), "fictional"))
-            raw["semantic"]["scopes"][0]["data_classes"] = ["private"]
-            path.write_text(json.dumps(raw))
-            with self.assertRaises(ConfigError):
-                Config.load(path)
+    def test_context_and_recipient_bounds(self):
         for source in (
             replace(snapshot(), text="x" * 6001),
             replace(snapshot(), recipients=(A, A)),

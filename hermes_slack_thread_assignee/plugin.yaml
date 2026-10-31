@@ -8,5 +8,3 @@ license: MIT
 homepage: https://github.com/u1-liquid/hermes-slack-thread-assignee
 provides_tools: []
 provides_hooks: []
-optional_env:
-  - HERMES_THREAD_ASSIGNEE_CONFIG

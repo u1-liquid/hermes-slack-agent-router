@@ -14,7 +14,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 from hermes_slack_thread_assignee.policy import Recipient, Thread
 
@@ -81,6 +82,11 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.runner._profile_adapters = {}
         self.runner._sessions = {}
         self.runner.session_store = None
+        from gateway.session_authorities import SessionAuthorities
+
+        self.runner.session_authorities = SessionAuthorities(self.home)
+        self.authority = SimpleNamespace(profile_id=str(self.home), retiring=False)
+        self.runner.session_authorities.add(self.home, self.authority)
         self.adapter.gateway_runner = self.runner
         self.adapter._team_bot_user_ids = {"TDEMO": "UBETA"}
         self.adapter._bot_user_id = "UBETA"
@@ -109,10 +115,42 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             process_before_response=True,
         )
         self.adapter._app = self.app
+        self.adapter._running = True
+        self.adapter._socket_mode_task = asyncio.Future()
+        self.adapter._handler = SimpleNamespace(client=SimpleNamespace(is_connected=lambda: True))
+        self.peer = SlackAdapter(PlatformConfig(extra={"reply_in_thread": True}))
+        self.peer.gateway_runner = self.runner
+        self.peer._team_bot_user_ids = {"TDEMO": "UALPHA"}
+        self.peer._team_clients = {"TDEMO": self.client}
+        self.peer._running = True
+        self.peer._socket_mode_task = asyncio.Future()
+        self.peer._handler = SimpleNamespace(client=SimpleNamespace(is_connected=lambda: True))
+        self.peer._app = self.app
+        self.peer.set_message_handler(AsyncMock())
+        # Two independently authenticated transports can serve the same runtime.
+        # Production multiplex owns each via a profile map; the shared runtime is routed below.
+        self.peer_home = self.home / "profiles" / "peer"
+        self.peer_home.mkdir(parents=True)
+        (self.peer_home / "config.yaml").write_text("{}")
+        self.runner.config.multiplex_profiles = True
+        self.runner.config._runtime_profile_homes = [("default", self.home), ("peer", self.peer_home)]
+        self.runner.session_authorities.add(
+            self.peer_home, SimpleNamespace(profile_id=str(self.peer_home), retiring=False), name="peer"
+        )
+        from gateway.profile_routing import ProfileRoute
+
+        self.runner.config.profile_routes = [
+            ProfileRoute("peer-to-default", "slack", "default", bot_profile="peer", chat_id="CDEMO")
+        ]
+        self.peer.set_owner_profile("peer")
+        self.runner._profile_adapters = {"peer": {Platform.SLACK: self.peer}}
+        self.process_home = patch("hermes_constants.get_process_hermes_home", return_value=self.home)
+        self.process_home.start()
+        self.addCleanup(self.process_home.stop)
         # Register the actual core listener FIRST, matching the pinned host ordering.
         self.app.event("message")(self.adapter._handle_slack_message)
         self.app.event("app_mention")(self.adapter._handle_slack_message)
-        self.gate = Gate((self.a, self.b))
+        self.gate = Gate()
         self.gate.wire(self.app, self.adapter)
         self.downstream = []
 
@@ -183,6 +221,253 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(key, self.runner._session_key_for_source(source))
         return source, key
 
+    async def test_native_discovery_real_two_transports_and_receiver_specific_input(self):
+        from slack_bolt.async_app import AsyncApp
+        from slack_bolt.authorization import AuthorizeResult
+        from slack_bolt.request.async_request import AsyncBoltRequest
+
+        from hermes_slack_thread_assignee.bridge import Bridge
+        from hermes_slack_thread_assignee.plugin import Gate
+
+        self.enable_semantic()
+        body = self.message("<@UALPHA> revise SUMMARY_ONLY; <@UBETA> check DIAGRAM_ONLY.")
+        bridge = Bridge(self.adapter)
+        bound = await bridge.bind(body)
+        expected = await bridge.participants(bound)
+        self.assertEqual(expected[0], (self.a, self.b))
+
+        async def authorize(**kwargs):
+            return AuthorizeResult(enterprise_id=None, team_id="TDEMO", bot_user_id="UALPHA")
+
+        app = AsyncApp(
+            signing_secret="synthetic",
+            authorize=authorize,
+            request_verification_enabled=False,
+            process_before_response=True,
+        )
+        self.peer._app = app
+        self.peer._bot_user_id = "UALPHA"
+        self.peer._register_mentioned_thread("100.001", "TDEMO")
+        app.event("message")(self.peer._handle_slack_message)
+        gate = Gate()
+        gate.jev = self.gate.jev
+        gate.wire(app, self.peer)
+        self.addCleanup(gate.dispose)
+        self.addAsyncCleanup(self.peer.cancel_background_tasks)
+        peer_bridge = Bridge(self.peer)
+        peer_bound = await peer_bridge.bind(body)
+        self.assertEqual((await peer_bridge.participants(peer_bound))[0], expected[0])
+        await self.dispatch(body)
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        response = await app.async_dispatch(AsyncBoltRequest(body=json.dumps(body), mode="socket_mode"))
+        await asyncio.gather(*tuple(self.peer._session_tasks.values()))
+        self.assertEqual(response.status, 200)
+        self.model.assert_awaited_once()
+        self.peer._message_handler.assert_awaited_once()
+        self.assertIn("DIAGRAM_ONLY", self.model.await_args.args[0].text)
+        self.assertNotIn("SUMMARY_ONLY", self.model.await_args.args[0].text)
+        self.assertIn("SUMMARY_ONLY", self.peer._message_handler.await_args.args[0].text)
+        self.assertNotIn("DIAGRAM_ONLY", self.peer._message_handler.await_args.args[0].text)
+        self.assertEqual(self.gate.jev.ask.await_args_list[0], self.gate.jev.ask.await_args_list[1])
+
+    async def test_native_factory_no_config_late_rewire_unload_and_same_client_limit(self):
+        from hermes_slack_thread_assignee.plugin import register
+
+        self.enable_semantic()
+        self.gate.dispose()
+        ctx = Mock()
+        register(ctx)
+        factory = ctx.register_platform_handler.call_args.args[1]
+        manager = Mock()
+        manager.get_platform_handler_factories.return_value = [(factory, "slack-thread-assignee")]
+        with (
+            patch("hermes_cli.plugins.get_plugin_manager", return_value=manager),
+            patch("hermes_slack_thread_assignee.plugin.JevClient", return_value=self.gate.jev),
+        ):
+            # Native startup may attach before sockets or the live map are ready.
+            with patch.object(self.adapter, "_running", False):
+                self.adapter._wire_plugin_handlers(self.app)
+            self.adapter.rewire_plugin_handlers()
+            self.adapter.rewire_plugin_handlers()
+            await self.dispatch(self.message("<@UALPHA> summary; <@UBETA> diagram."))
+            await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+            self.gate.jev.ask.assert_awaited_once()
+            self.model.assert_awaited_once()
+            self.assertNotIn("summary", self.model.await_args.args[0].text)
+            ctx.on_unload.call_args.args[0]()
+            self.gate.jev.ask.reset_mock()
+            self.model.reset_mock()
+            # Native dedup still refers to the old factory on this SAME app.
+            replacement = Mock()
+            register(replacement)
+            manager.get_platform_handler_factories.return_value = [
+                (replacement.register_platform_handler.call_args.args[1], "slack-thread-assignee")
+            ]
+            self.adapter.rewire_plugin_handlers()
+            await self.dispatch(self.message("<@UBETA> native after unload"))
+            await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+            self.gate.jev.ask.assert_not_awaited()
+            self.model.assert_awaited_once()
+            replacement.on_unload.call_args.args[0]()
+
+    async def test_native_nondefault_primary_and_event_routed_secondary(self):
+        from gateway.profile_routing import ProfileRoute
+
+        from hermes_slack_thread_assignee.bridge import Bridge
+
+        self.runner._primary_profile_name = "captain"
+        self.runner.config._runtime_profile_homes = [("captain", self.home), ("peer", self.peer_home)]
+        self.runner.config.profile_routes = []
+        bridge = Bridge(self.adapter)
+        bound = await bridge.bind(self.message())
+        view = (await bridge.participants(bound))[0]
+        self.assertEqual(view, (Recipient("TDEMO", "UALPHA", "peer"), Recipient("TDEMO", "UBETA", "captain")))
+        self.runner.config.profile_routes = [
+            ProfileRoute("specific-sender", "slack", "peer", user_id="UHUMAN", thread_id="100.001")
+        ]
+        bound = await bridge.bind(self.message())
+        self.assertEqual(bound.recipient.runtime_profile, "peer")
+        self.assertEqual(
+            (await bridge.participants(bound))[0],
+            (Recipient("TDEMO", "UALPHA", "peer"), Recipient("TDEMO", "UBETA", "peer")),
+        )
+        self.runner.session_authorities.remove(self.peer_home)
+        from hermes_slack_thread_assignee.bridge import TopologyError
+
+        with self.assertRaises(TopologyError):
+            await bridge.participants(bound)
+
+    async def test_native_hot_removed_disconnected_foreign_and_incidental_participants(self):
+        from gateway.config import Platform
+
+        from hermes_slack_thread_assignee.bridge import Bridge
+
+        bridge = Bridge(self.adapter)
+        bound = await bridge.bind(self.message())
+        self.assertEqual((await bridge.participants(bound))[0], (self.a, self.b))
+        for change in ("removed", "disconnected", "foreign", "failed", "stale"):
+            with (
+                self.subTest(change=change),
+                patch.object(
+                    self.runner,
+                    "_profile_adapters",
+                    {} if change == "removed" else {"peer": {Platform.SLACK: self.peer}},
+                ),
+                patch.object(self.peer, "_running", change != "failed"),
+                patch.object(
+                    self.peer._handler.client,
+                    "is_connected",
+                    return_value=change != "disconnected",
+                    create=True,
+                ),
+                patch.object(self.peer, "_socket_ping_pong_stale", return_value=change == "stale"),
+                patch.object(
+                    self.peer,
+                    "_team_bot_user_ids",
+                    {"TOTHER": "UALPHA"} if change == "foreign" else {"TDEMO": "UALPHA"},
+                ),
+                patch.object(
+                    self.peer,
+                    "_team_clients",
+                    {"TOTHER": self.client} if change == "foreign" else {"TDEMO": self.client},
+                ),
+            ):
+                self.assertEqual((await bridge.participants(bound))[0], (self.b,))
+        # Native human/bot allowlists and history authors are not discovery inputs.
+        self.adapter.config.extra["allowed_users"] = ["UINCIDENTAL"]
+        self.client.conversations_replies.return_value = {
+            "ok": True,
+            "messages": [{"ts": "100.001", "user": "UINCIDENTAL", "text": "I am another agent"}],
+        }
+        self.assertEqual((await bridge.participants(bound))[0], (self.a, self.b))
+
+    async def test_native_ambiguous_unknown_and_unserved_participants_are_atomic(self):
+        self.enable_semantic()
+        for change in ("duplicate", "unknown", "retiring", "auth", "drain", "owner"):
+            with (
+                self.subTest(change=change),
+                patch.object(
+                    self.peer,
+                    "_team_bot_user_ids",
+                    {"TDEMO": "UBETA" if change == "duplicate" else "UALPHA"},
+                ),
+                patch.object(
+                    self.peer._handler.client,
+                    "is_connected",
+                    None if change == "unknown" else lambda: True,
+                ),
+                patch.object(
+                    self.runner.session_authorities.for_home(self.peer_home),
+                    "retiring",
+                    change == "retiring",
+                ),
+                patch.object(self.peer, "_team_clients", {} if change == "auth" else {"TDEMO": self.client}),
+                patch.object(self.runner, "_draining", change == "drain", create=True),
+                patch.object(self.peer, "_owner_profile", "missing" if change == "owner" else "peer"),
+            ):
+                await self.assert_rejected(self.message("<@UBETA> check diagram."))
+        self.gate.jev.ask.assert_not_awaited()
+        self.client.conversations_replies.assert_not_awaited()
+
+    async def test_native_topology_changes_across_history_and_classifier_awaits(self):
+        from gateway.config import Platform
+
+        self.enable_semantic()
+        normal = self.gate.jev.ask.side_effect
+        history = self.client.conversations_replies.return_value
+        maps = self.runner._profile_adapters
+
+        async def remove_peer(**kwargs):
+            self.runner._profile_adapters = {}
+            return history
+
+        self.client.conversations_replies.side_effect = remove_peer
+        await self.assert_rejected(self.message("<@UBETA> check diagram."))
+        self.gate.jev.ask.assert_not_awaited()
+        self.runner._profile_adapters = maps
+        self.client.conversations_replies.side_effect = None
+
+        for change in ("removed", "socket", "client", "route"):
+            self.model.reset_mock()
+
+            async def mutate(batch, change=change):
+                answer = await normal(batch)
+                if change == "removed":
+                    self.runner._profile_adapters = {}
+                elif change == "socket":
+                    self.peer._handler = SimpleNamespace(client=SimpleNamespace(is_connected=lambda: True))
+                elif change == "client":
+                    self.peer._team_clients = {"TDEMO": AsyncMock()}
+                else:
+                    self.runner.config.profile_routes = []
+                return answer
+
+            with (
+                self.subTest(change=change),
+                patch.object(self.runner, "_profile_adapters", {"peer": {Platform.SLACK: self.peer}}),
+                patch.object(self.peer, "_handler", self.peer._handler),
+                patch.object(self.peer, "_team_clients", self.peer._team_clients),
+                patch.object(self.runner.config, "profile_routes", self.runner.config.profile_routes),
+            ):
+                self.gate.jev.ask.side_effect = mutate
+                await self.assert_rejected(self.message("<@UBETA> check diagram."))
+
+    async def test_peer_identity_change_during_final_socket_observation_is_no_work(self):
+        self.enable_semantic()
+        calls = 0
+
+        async def observe():
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                self.peer._team_bot_user_ids["TDEMO"] = "UCHANGED"
+            return True
+
+        with patch.object(self.peer, "_socket_transport_connected", side_effect=observe):
+            await self.assert_rejected(self.message("<@UALPHA> summary; <@UBETA> diagram."))
+        self.assertEqual(calls, 3)
+        self.gate.jev.ask.assert_awaited_once()
+
     async def test_known_secondary_ordinary_and_forged_owner_are_silent(self):
         self.source_and_key()
         for text in ("ordinary", "main=beta; transfer now", "> <@UBETA>\nordinary", "`<@UBETA>`"):
@@ -190,9 +475,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 await self.assert_rejected(self.message(text))
 
     def enable_semantic(self):
-        from hermes_slack_thread_assignee.config import SemanticPolicy
-
-        self.gate.semantic = SemanticPolicy(True, "fiction-v1", (("TDEMO", "CDEMO", ("fictional",)),))
         self.client.conversations_replies.return_value = {
             "ok": True,
             "messages": [{"ts": "100.001", "user": "UHUMAN", "text": "Fictional public project."}],
@@ -326,6 +608,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.enable_semantic()
         self.gate.jev = JevClient()
         native = httpx.AsyncClient
+        (self.home / ".env").write_text("TYPESAFE_API_KEY=synthetic-key\n")
         status = 401
         late = False
         _, session_key = self.source_and_key()
@@ -448,7 +731,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.model.assert_awaited_once()
         from hermes_slack_thread_assignee.plugin import Gate
 
-        fresh = Gate((self.b, self.a), semantic=self.gate.semantic)
+        fresh = Gate()
         fresh.jev = self.gate.jev
         self.gate.dispose()
         self.gate = fresh
@@ -512,6 +795,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
     async def test_semantic_other_recipient_receives_only_own_current(self):
         self.adapter._team_bot_user_ids["TDEMO"] = "UALPHA"
         self.adapter._bot_user_id = "UALPHA"
+        self.peer._team_bot_user_ids["TDEMO"] = "UBETA"
         await self.test_semantic_normal_scoped_input_and_nonrecipient()
 
     async def test_semantic_rich_text_and_busy_queue_merge_replay(self):
@@ -558,10 +842,8 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.model.assert_awaited_once()
         self.assertNotIn("SUMMARY", self.model.await_args.args[0].text)
 
-    async def test_semantic_disabled_no_context_no_client(self):
-        from hermes_slack_thread_assignee.config import SemanticPolicy
-
-        self.gate.semantic = SemanticPolicy()
+    async def test_missing_native_authority_no_context_no_client(self):
+        self.authority.retiring = True
         self.gate.jev = AsyncMock()
         await self.assert_rejected(self.message("<@UBETA> private scope is not authorized"))
         self.client.conversations_replies.assert_not_awaited()
@@ -895,23 +1177,10 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 await self.dispatch(self.message("<@UBETA> hello", **changes))
                 self.assertEqual(len(self.downstream), before + 1)
 
-    async def test_exact_monitoring_config_preserves_native_input(self):
+    async def test_monitoring_bot_preserves_native_input(self):
         self.enable_semantic()
         self.addCleanup(self.gate.jev.ask.assert_not_awaited)
-        from hermes_slack_thread_assignee.config import Config
-
-        path = self.root / "config.json"
-        path.write_text(
-            json.dumps(
-                {
-                    "participants": [self.a.as_dict(), self.b.as_dict()],
-                    "monitoring": [{"workspace": "TDEMO", "channel": "CDEMO", "sender": "UHUMAN"}],
-                }
-            )
-        )
-        config = Config.load(path)
-        self.gate.monitoring = frozenset(config.monitoring)
-        await self.dispatch(self.message("monitoring sample"))
+        await self.dispatch(self.message("monitoring sample", bot_id="BMONITOR", user="UMONITOR"))
         self.assertEqual(len(self.downstream), 1)
 
     async def test_downstream_error_is_not_retried(self):
@@ -1076,10 +1345,11 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         beta_batch = self.gate.jev.ask.await_args.args[0]
         self.adapter._team_bot_user_ids["TDEMO"] = "UALPHA"
         self.adapter._bot_user_id = "UALPHA"
-        self.gate.participants = (self.b, self.a)
+        self.peer._team_bot_user_ids["TDEMO"] = "UBETA"
         self.client.conversations_replies.return_value["messages"] = history
         await self.dispatch(self.message(body["event"]["text"]))
         await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.assertEqual(self.gate.jev.ask.await_count, 2)
         self.assertEqual(beta_batch, self.gate.jev.ask.await_args.args[0])
         for mutation in (
             {"ok": True, "messages": history, "has_more": True},
@@ -1119,6 +1389,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         for bot, active in (("UBETA", False), ("UALPHA", False), ("UBETA", True)):
             self.adapter._team_bot_user_ids["TDEMO"] = bot
             self.adapter._bot_user_id = bot
+            self.peer._team_bot_user_ids["TDEMO"] = "UALPHA" if bot == "UBETA" else "UBETA"
             if active:
                 self.adapter._active_sessions[key] = asyncio.Event()
             await self.assert_rejected(
@@ -1154,6 +1425,11 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
 
         token = set_secret_scope(self.canary_secrets)
         self.addCleanup(reset_secret_scope, token)
+        # Only fixture hydration is injected: native per-source async scope and
+        # get_secret still execute. Never copy the real key into a fixture home.
+        hydration = patch("agent.secret_scope.build_profile_secret_scope", return_value=self.canary_secrets)
+        hydration.start()
+        self.addCleanup(hydration.stop)
         self.enable_semantic()
         root = Path(os.environ["JEV_FICTIONAL_CANARY_DIR"]) / "native"
         history = [
@@ -1198,6 +1474,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 self.model.reset_mock()
                 self.adapter._team_bot_user_ids["TDEMO"] = bot
                 self.adapter._bot_user_id = bot
+                self.peer._team_bot_user_ids["TDEMO"] = "UALPHA" if bot == "UBETA" else "UBETA"
                 self.client.conversations_replies.return_value = {
                     "ok": True,
                     "messages": history

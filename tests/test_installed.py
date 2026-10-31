@@ -2,7 +2,6 @@
 
 import importlib.metadata
 import importlib.util
-import json
 import os
 import sys
 import tempfile
@@ -32,7 +31,7 @@ class InstalledWheel(unittest.TestCase):
         self.assertEqual(entry.name, "slack-thread-assignee")
         self.assertTrue(callable(entry.load()))
         self.assertFalse(any(e.group == "console_scripts" for e in distribution.entry_points))
-        for module in ("store", "plans", "cli"):
+        for module in ("store", "plans", "cli", "config"):
             self.assertIsNone(importlib.util.find_spec("hermes_slack_thread_assignee." + module))
         source = os.environ["HERMES_TEST_SOURCE"]
         sys.path.append(source)
@@ -52,19 +51,8 @@ class InstalledWheel(unittest.TestCase):
             self.assertNotIn("thread-assignee", manager._cli_commands)
             from unittest.mock import Mock
 
-            config = Path(home) / "config.json"
-            config.write_text(
-                json.dumps(
-                    {
-                        "participants": [
-                            {"workspace": "TFICTION", "bot_user": "UATLAS", "runtime_profile": "atlas"}
-                        ]
-                    }
-                )
-            )
-            with patch.dict(os.environ, {"HERMES_THREAD_ASSIGNEE_CONFIG": str(config)}):
-                native = Mock()
-                manager.get_platform_handler_factories("slack")[0][0](native, Mock())
-                native.use.assert_called_once()
+            native = Mock()
+            manager.get_platform_handler_factories("slack")[0][0](native, Mock())
+            native.use.assert_called_once()
             report = doctor_plugin(Path(package.__file__).parent)
             self.assertTrue(report.ok, report.format_text())
