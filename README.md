@@ -111,7 +111,7 @@ retained tombstones prevent old retries from rehydrating forgotten payloads.
 Definitive native sender denial is checked before semantic context/Jev. Configured
 native wake patterns count only in original and assigned CURRENT text, never PRIOR.
 Bootstrap prior-message IDs are not distinct semantic topics: validated joint refs
-receive a stable local composite topic; exact retained earlier reference links can
+receive one stable source-message-scoped topic per validated CURRENT group; exact retained earlier reference links can
 restore a known topic. Conflicting established topics remain unresolved.
 
 ## Execution and uncertainty boundaries

@@ -324,18 +324,8 @@ def assemble(source: Snapshot, answers):
             )
         ):
             return unresolved("specific recipient has no source evidence")
-        # Bootstrap message identifiers are not established semantic topic boundaries.
-        topics = {h.topic for h in refs if not h.topic.startswith("prior-")}
-        if len(topics) > 1:
-            return unresolved("conflicting topic/person reference")
-        joint = (
-            "joint-"
-            + hashlib.sha256(
-                encode((asdict(source.thread), sorted(h.identity for h in refs))).encode()
-            ).hexdigest()
-        )
-        topic = next(iter(topics), joint if refs else f"current-u{i}")
-        units.append(Unit(start, end, kind, topic, refs, recipients, people))
+        # Assign semantic identities only after the validated CURRENT groups are complete.
+        units.append(Unit(start, end, kind, "", refs, recipients, people))
     groups = [{i} for i in range(len(units))]
     for i in range(len(units)):
         for j in range(i + 1, len(units)):
@@ -354,8 +344,27 @@ def assemble(source: Snapshot, answers):
         for j in group:
             if i < j and answers[f"same{i}_{j}"] != "yes":
                 return unresolved("nontransitive current-topic relation")
-        prior_topics = {units[j].topic for j in group if units[j].references}
+        if units[i].disposition != "action":
+            continue
+        prior_topics = {
+            ref.topic for j in group for ref in units[j].references if not ref.topic.startswith("prior-")
+        }
         if len(prior_topics) > 1:
             return unresolved("conflicting grounded current topics")
-        units[i] = replace(units[i], topic=next(iter(prior_topics), f"current-u{min(group)}"))
+        fallback = (
+            "current-"
+            + hashlib.sha256(
+                encode(
+                    (
+                        asdict(source.thread),
+                        source.identity,
+                        [
+                            (j, units[j].start, units[j].end, source.text[units[j].start : units[j].end])
+                            for j in sorted(group)
+                        ],
+                    )
+                ).encode()
+            ).hexdigest()
+        )
+        units[i] = replace(units[i], topic=next(iter(prior_topics), fallback))
     return Plan(source.binding, "ready", "semantic-resolved", source.text, tuple(units))

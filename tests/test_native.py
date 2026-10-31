@@ -236,6 +236,54 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.downstream[-1]["event"]["text"], "confirm")
         self.assertEqual(self.gate.jev.ask.await_count, 2)
 
+    async def test_semantic_separate_current_units_share_retained_prior_topic(self):
+        from hermes_slack_thread_assignee.plans import PlanStore
+
+        self.enable_semantic()
+        self.client.conversations_replies.return_value["messages"] += [
+            {"ts": "101.001", "user": "UALPHA", "text": "Legend proposal"},
+            {"ts": "102.001", "user": "UBETA", "text": "Arrows proposal"},
+        ]
+
+        async def grounded(batch):
+            answers = dict.fromkeys(batch["questions"], "no")
+            answers.update(
+                coverage="complete",
+                u0_kind="action",
+                u1_kind="action",
+                u0_destination="specific",
+                u1_destination="specific",
+                u0_ref1="yes",
+                u1_ref2="yes",
+                u0_to0="yes",
+                u1_to1="yes",
+                same0_1="yes",
+            )
+            return answers
+
+        self.gate.jev.ask.side_effect = grounded
+        body = self.message("<@UALPHA> add the legend; <@UBETA> add the arrows to the same diagram.")
+        await self.dispatch(body)
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        plans = PlanStore(self.store)
+        plan = plans.generation(plans.inspect()[0]["binding"])
+        self.assertEqual(plan.status, "ready", plan.reason)
+        topic = plan.units[0].topic
+        self.assertEqual(topic, plan.units[1].topic)
+        self.assertIn("add the arrows", self.model.await_args.args[0].text)
+        self.assertNotIn("add the legend", self.model.await_args.args[0].text)
+        await self.dispatch(body)
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.gate.jev.ask.assert_awaited_once()
+        for unit in plan.units:
+            ref = unit.references[0]
+            self.assertEqual(
+                PlanStore(self.store).prior_topic(self.key, ref.identity, ref.sender, ref.text), topic
+            )
+        await self.dispatch(self.message(body["event"]["text"]))
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.assertTrue(all(u.topic == topic for u in plans.generation(plans.inspect()[-1]["binding"]).units))
+
     async def test_semantic_joint_prior_refs_retain_topic_on_reopen(self):
         from hermes_slack_thread_assignee.plans import PlanStore
 

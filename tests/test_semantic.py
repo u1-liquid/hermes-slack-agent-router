@@ -88,6 +88,71 @@ def semantic_process_worker(path, barrier, counter, queue):
 
 
 class SemanticTests(unittest.TestCase):
+    def test_current_group_reconciles_actual_prior_topics_not_provisional_labels(self):
+        source = replace(
+            snapshot("Atlas, add the legend; Birch, add the arrows."),
+            history=(
+                History("1.0", "UATLAS", "Legend proposal", "prior-1.0"),
+                History("2.0", "UBIRCH", "Arrows proposal", "prior-2.0"),
+            ),
+        )
+        batch = prepare(source)
+        answers = validate_answers(batch, two_topic_answers(batch))
+        answers["same0_1"] = "yes"
+        plan = assemble(source, answers)
+        self.assertEqual(plan.status, "ready", plan.reason)
+        self.assertEqual(plan.units[0].topic, plan.units[1].topic)
+        self.assertEqual(tuple(u.people for u in plan.units), (("UATLAS",), ("UBIRCH",)))
+        self.assertNotIn("add the arrows", plan.view(A))
+        self.assertNotIn("add the legend", plan.view(B))
+        known = replace(source, history=tuple(replace(h, topic="diagram") for h in source.history))
+        self.assertEqual({u.topic for u in assemble(known, answers).units}, {"diagram"})
+        conflicting = replace(known, history=(known.history[0], replace(known.history[1], topic="summary")))
+        self.assertEqual(assemble(conflicting, answers).status, "unresolved")
+        answers["same0_1"] = "unknown"
+        self.assertEqual(assemble(source, answers).status, "unresolved")
+
+    def test_fallback_topic_namespaces_source_identity_and_group_stably(self):
+        source = replace(snapshot(), history=(), original={"type": "message", "text": snapshot().text})
+        answers = validate_answers(prepare(source), two_topic_answers(prepare(source)))
+        original = assemble(source, answers)
+        self.assertEqual(original.status, "ready")
+        self.assertNotEqual(original.units[0].topic, original.units[1].topic)
+        retry = replace(
+            source,
+            policy_revision="same-content-new-policy",
+            original={"type": "app_mention", "text": source.text},
+        )
+        self.assertEqual([u.topic for u in original.units], [u.topic for u in assemble(retry, answers).units])
+        distinct = assemble(replace(source, identity="4.0"), answers)
+        self.assertTrue({u.topic for u in original.units}.isdisjoint(u.topic for u in distinct.units))
+
+    def test_nontransitive_current_topic_group_stays_unresolved(self):
+        source = replace(snapshot("Atlas, add legend; Birch, add arrows; Atlas, review legend."), history=())
+        batch = prepare(source)
+        answers = validate_answers(
+            batch,
+            controlled_answers(
+                batch,
+                {
+                    "coverage": "complete",
+                    "u0_kind": "action",
+                    "u1_kind": "action",
+                    "u2_kind": "action",
+                    "u0_destination": "specific",
+                    "u1_destination": "specific",
+                    "u2_destination": "specific",
+                    "u0_to0": "yes",
+                    "u1_to1": "yes",
+                    "u2_to0": "yes",
+                    "same0_1": "yes",
+                    "same1_2": "yes",
+                    "same0_2": "no",
+                },
+            ),
+        )
+        self.assertEqual(assemble(source, answers).reason, "nontransitive current-topic relation")
+
     def test_archived_purge_fence_live_claim_pointer_and_retry(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
