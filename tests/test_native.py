@@ -322,6 +322,21 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
             self.assertEqual(len(self.downstream), before + 1)
 
+    async def test_inaccessible_database_parent_is_silent_and_preserves_state(self):
+        parent = self.root / "database-only"
+        parent.mkdir(mode=0o700)
+        destination = parent / "state.sqlite3"
+        self.store.path.rename(destination)
+        self.store.path = destination
+        original = destination.read_bytes()
+        parent.chmod(0o000)
+        try:
+            await self.assert_rejected(self.message("ordinary inaccessible storage"))
+        finally:
+            parent.chmod(0o700)
+        self.assertEqual(destination.read_bytes(), original)
+        self.assertEqual(self.store.show(self.key), (self.a, 1))
+
     async def test_missing_shared_store_is_silent_for_verified_ordinary(self):
         self.store.path.unlink()
         await self.assert_rejected(self.message("ordinary with unavailable store"))

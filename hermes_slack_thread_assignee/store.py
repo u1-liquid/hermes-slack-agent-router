@@ -51,6 +51,8 @@ class Store:
                 if not directory and missing:
                     continue
                 raise StoreError("database must be explicitly initialized") from None
+            except OSError as exc:
+                raise StoreError(str(exc)) from exc
             if stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
                 raise StoreError("database and parent must be owner-only, owned, non-symlink paths")
             if directory != stat.S_ISDIR(info.st_mode) or (not directory and not stat.S_ISREG(info.st_mode)):
@@ -68,7 +70,7 @@ class Store:
             if row is None or row[0] != encode(self.metadata):
                 raise StoreError("database/registry identity mismatch")
             yield db
-        except (sqlite3.Error, ValueError, TypeError) as exc:
+        except (sqlite3.Error, OSError, ValueError, TypeError) as exc:
             raise StoreError(str(exc)) from exc
         finally:
             if db is not None:
@@ -81,9 +83,9 @@ class Store:
             return {"initialized": False, "dry_run": dry_run}
         if dry_run:
             return {"initialized": False, "dry_run": True}
-        fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-        os.close(fd)
         try:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+            os.close(fd)
             with closing(sqlite3.connect(self.path)) as db, db:
                 db.executescript("""
                     CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -98,7 +100,7 @@ class Store:
                     PRAGMA user_version=1;
                 """)
                 db.execute("INSERT INTO metadata VALUES (?,?)", ("identity", encode(self.metadata)))
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, OSError) as exc:
             # Preserve failed initialization for explicit operator diagnosis; never reset it.
             raise StoreError(str(exc)) from exc
         return {"initialized": True, "dry_run": False}
