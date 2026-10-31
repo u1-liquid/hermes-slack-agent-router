@@ -265,6 +265,137 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(invocations[-1].kwargs["cursor"], "fictional-next")
         self.assertNotIn("SUMMARY_ONLY", self.model.await_args.args[0].text)
 
+    async def test_ordinary_reply_after_native_bot_markdown_reaches_assigned_model(self):
+        from slack_sdk.web.async_slack_response import AsyncSlackResponse
+
+        self.enable_semantic()
+        root = {"ts": "100.001", "user": "UHUMAN", "text": "Beta, lead this whole thread."}
+        prior = {
+            "type": "message",
+            "ts": "101.001",
+            "user": "UBETA",
+            "bot_id": "BDEMO",
+            "app_id": "ADEMO",
+            "text": "Fictional native response.",
+            # Actual pinned adapter output, not an all-human hand-written history.
+            "blocks": self.adapter._markdown_block_payload("Fictional native response."),
+        }
+        self.client.conversations_replies.return_value = AsyncSlackResponse(
+            client=self.client,
+            http_verb="GET",
+            api_url="https://slack.com/api/conversations.replies",
+            req_args={},
+            data={"ok": True, "messages": [root, prior], "has_more": False},
+            headers={},
+            status_code=200,
+        )
+
+        async def generic(batch):
+            result = native_answers(batch)
+            result.update(
+                coverage="complete",
+                main_fact0="assign:r1",
+                u0_kind="action",
+                u0_destination="generic",
+                u0_to1="yes",
+            )
+            return result
+
+        self.gate.jev.ask.side_effect = generic
+        await self.dispatch(self.message("Please continue."))
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.model.assert_awaited_once()
+        self.assertIn("Please continue.", self.model.await_args.args[0].text)
+        prior_state = self.gate.jev.ask.await_args.args[0]["state"]["prior"]
+        self.assertEqual(prior_state["h1"]["text"], prior["blocks"][0]["text"])
+        self.client.chat_postMessage.assert_not_awaited()
+        self.assertFalse(self.adapter._pending_messages)
+
+    async def test_prior_bot_section_preserves_leaf_provenance_and_scoped_delivery(self):
+        self.enable_semantic()
+        prior = {
+            "type": "message",
+            "ts": "101.001",
+            "user": "UBETA",
+            "bot_id": "BDEMO",
+            "text": "Notification fallback must not replace the visible diagram.",
+            "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "DIAGRAM_REFERENCE"}}],
+        }
+        self.client.conversations_replies.return_value["messages"].append(prior)
+        classify = self.gate.jev.ask.side_effect
+
+        async def referenced(batch):
+            answer = await classify(batch)
+            answer["u1_link1"] = "yes"
+            return answer
+
+        self.gate.jev.ask.side_effect = referenced
+        await self.dispatch(self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY."))
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.model.assert_awaited_once()
+        received = self.model.await_args.args[0].text
+        self.assertIn("DIAGRAM_ONLY", received)
+        self.assertIn("DIAGRAM_REFERENCE", received)
+        self.assertNotIn("SUMMARY_ONLY", received)
+        self.assertNotIn("Notification fallback", received)
+
+    async def test_history_api_failures_are_distinguished_without_private_error_text(self):
+        from slack_sdk.errors import SlackApiError
+
+        self.enable_semantic()
+        for code, expected in (
+            ("missing_scope", "context-fetch-not-permitted"),
+            ("not_allowed_token_type", "context-fetch-not-permitted"),
+            ("ratelimited", "context-fetch-rate-limited"),
+            ("private-unrecognized-error", "context-fetch-api-failed"),
+        ):
+            self.client.conversations_replies.side_effect = SlackApiError(
+                "private error body", {"ok": False, "error": code}
+            )
+            with (
+                self.subTest(code=code),
+                self.assertLogs("hermes_slack_agent_router.plugin", level="WARNING") as logs,
+            ):
+                await self.assert_rejected(self.message("<@UBETA> continue fictional work"))
+            self.assertIn(expected, logs.output[0])
+            self.assertNotIn("private", "".join(logs.output))
+        self.client.conversations_replies.side_effect = TimeoutError("private transport detail")
+        with self.assertLogs("hermes_slack_agent_router.plugin", level="WARNING") as logs:
+            await self.assert_rejected(self.message("<@UBETA> continue fictional work"))
+        self.assertIn("context-fetch-timeout", logs.output[0])
+        self.gate.jev.ask.assert_not_awaited()
+
+    async def test_prior_block_support_does_not_relax_current_or_skip_unknown_content(self):
+        self.enable_semantic()
+        for block in (
+            {"type": "markdown", "text": "<@UBETA> current hidden content"},
+            {"type": "section", "text": {"type": "mrkdwn", "text": "<@UBETA> current hidden content"}},
+        ):
+            await self.assert_rejected(self.message("fallback", blocks=[block]))
+        root = self.client.conversations_replies.return_value["messages"][0]
+        for prior in (
+            {
+                "ts": "101.001",
+                "user": "UBETA",
+                "blocks": [{"type": "image", "image_url": "https://example.com/a.png"}],
+            },
+            {"ts": "101.001", "bot_id": "BDEMO", "text": "No verified user identity"},
+            {
+                "ts": "101.001",
+                "user": "UBETA",
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": "note"},
+                        "fields": [{"type": "mrkdwn", "text": "must not be dropped"}],
+                    }
+                ],
+            },
+        ):
+            self.client.conversations_replies.return_value = {"ok": True, "messages": [root, prior]}
+            await self.assert_rejected(self.message("<@UBETA> continue"))
+        self.gate.jev.ask.assert_not_awaited()
+
     async def test_history_deadline_cancels_native_fetch(self):
         import time
 
@@ -494,6 +625,67 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.client.chat_postMessage.assert_not_awaited()
         self.assertFalse(self.adapter._session_tasks)
         self.assertFalse(self.peer._session_tasks)
+
+    @unittest.skipUnless(os.environ.get("HERMES_NATIVE_PLUGIN_DIR"), "explicit native Git installation")
+    async def test_installed_git_root_factory_delivers_only_recipient_input(self):
+        import importlib
+
+        from hermes_cli.plugin_dev import doctor_plugin
+        from hermes_cli.plugins import PluginManager
+
+        installed = Path(os.environ["HERMES_NATIVE_PLUGIN_DIR"]).resolve()
+        self.enable_semantic()
+        self.gate.dispose()
+        self.client.conversations_replies.return_value["messages"].append(
+            {
+                "ts": "101.001",
+                "user": "UBETA",
+                "bot_id": "BDEMO",
+                "text": "Native bot prior",
+                "blocks": self.adapter._markdown_block_payload("Native bot prior"),
+            }
+        )
+        manager = PluginManager()
+        manifests = manager._scan_directory(installed.parent, source="user")
+        matches = [m for m in manifests if m.key == "slack-agent-router"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(Path(matches[0].path).resolve(), installed)
+        manager._load_plugin(matches[0])
+        loaded = manager._plugins["slack-agent-router"]
+        self.assertIsNone(loaded.error)
+        registration = loaded.module.register
+        package = importlib.import_module(registration.__module__)
+        self.assertTrue(Path(package.__file__).resolve().is_relative_to(installed))
+        plugin = importlib.import_module(registration.__module__ + ".plugin")
+        factory, identity = manager.get_platform_handler_factories("slack")[0]
+        self.assertEqual(identity, "slack-agent-router")
+        self.assertTrue(Path(factory.__code__.co_filename).resolve().is_relative_to(installed))
+        with patch.object(plugin, "JevClient", return_value=self.gate.jev):
+            factory(self.app, self.adapter)
+        await self.dispatch(self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY."))
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.model.assert_awaited_once()
+        received = self.model.await_args.args[0].text
+        self.assertIn("DIAGRAM_ONLY", received)
+        self.assertNotIn("SUMMARY_ONLY", received)
+        self.model.reset_mock()
+        await self.assert_rejected(self.message("<@UALPHA> SUMMARY_ONLY."))
+        (installed.parent.parent / "router-native-delivery.json").write_text(
+            json.dumps(
+                {
+                    "plugin_id": identity,
+                    "package_path": package.__file__,
+                    "factory_path": factory.__code__.co_filename,
+                    "received_text": received,
+                    "nonrecipient_model_calls": self.model.await_count,
+                    "slack_io": "controlled fictional SDK responses",
+                    "classifier": "controlled finite answers",
+                },
+                indent=2,
+            )
+        )
+        report = doctor_plugin(installed)
+        self.assertTrue(report.ok, report.format_text())
 
     async def test_native_factory_no_config_late_rewire_unload_and_same_client_limit(self):
         from hermes_slack_agent_router.plugin import register

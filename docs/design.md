@@ -42,7 +42,11 @@ its multiplexed profiles; independent processes are outside its native inventory
    current even if returned; root-trigger input has no prior self-reference or fetch.
    Keep at most one page, eight bodies and 400 ID/fingerprint witnesses. Canonicalize
    selected root/recent bodies with original authors/IDs/field provenance; evicted
-   older media does not veto the selected view. No pagination cache/store exists.
+   older media does not veto the selected view. Historical native bot `markdown`
+   and text-only `section` blocks retain their actual visible leaf text and source
+   paths; notification fallback never overrides them. Unknown composition and
+   missing authors still fail closed. CURRENT rich-text admission is unchanged.
+   No pagination cache/store exists.
 3. Build one typed question batch over current units, prior source authors/text and
    sorted recipients. There is no receiving-agent preference in the model input.
    Questions classify action/reference/acknowledgement, destination, CURRENT-only

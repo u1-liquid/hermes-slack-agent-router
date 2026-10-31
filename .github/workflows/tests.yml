@@ -19,8 +19,8 @@ jobs:
           python -W error::ResourceWarning -m unittest discover -s tests -p test_semantic.py -v
           python -W error::ResourceWarning -m unittest discover -s tests -p test_boundaries.py -v
       # Only fixed source/config values enter commands; no PR/event text interpolation.
-      - run: ruff check hermes_slack_agent_router tests
-      - run: ruff format --check hermes_slack_agent_router tests
+      - run: ruff check __init__.py hermes_slack_agent_router tests
+      - run: ruff format --check __init__.py hermes_slack_agent_router tests
       - run: python -m build
   native:
     runs-on: ubuntu-latest

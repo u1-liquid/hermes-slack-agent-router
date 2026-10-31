@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-slack-agent-router"
-version = "0.1.0"
+version = "0.1.1"
 description = "Context-aware multi-agent Slack message routing for Hermes, powered by Jev."
 readme = "README.md"
 keywords = ["hermes-agent", "slack", "multi-agent", "message-routing", "context-aware", "jev", "typesafe-ai"]
@@ -29,3 +29,7 @@ include = ["hermes_slack_agent_router*"]
 
 [tool.ruff]
 line-length = 110
+
+[tool.ruff.lint.per-file-ignores]
+# The Git-root loader assigns a valid synthetic module name, not the hyphenated checkout basename.
+"__init__.py" = ["N999"]

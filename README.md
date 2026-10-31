@@ -13,17 +13,26 @@ Requires Python 3.11+, Hermes v0.22.5 at
 The native integration uses private host seams and is tested against that exact
 revision. Package metadata alone does not establish compatibility with other hosts.
 
-Install into the same Python environment that runs Hermes:
+Use Hermes's native plugin manager from the repository root, pinned to a reviewed
+full 40-character commit. Replace `REVIEWED_COMMIT_SHA` below with that immutable
+revision (not a branch or tag):
 
 ```sh
-python -m pip install 'git+https://github.com/u1-liquid/hermes-slack-agent-router.git@feat/stable-thread-assignee'
-hermes plugins enable slack-agent-router
+hermes plugins install https://github.com/u1-liquid/hermes-slack-agent-router.git --ref REVIEWED_COMMIT_SHA --yes-deps --no-enable
+hermes plugins enable slack-agent-router --no-allow-tool-override
+hermes plugins list
 hermes plugins doctor slack-agent-router --ci
 ```
 
+The Git checkout root contains the native manifest and a registration re-export;
+all routing implementation remains in the existing Python package. The adjacent
+`pyproject.toml` supplies dependencies to Hermes PM. Do not inject packages into a
+PM-selected environment with pip/uv. A wheel entry point remains available for
+installation owners that supply their own Python environment; it is not the managed
+installation recipe. Both layouts register the sole ID `slack-agent-router`.
+
 The distribution is `hermes-slack-agent-router`, the Python package is
 `hermes_slack_agent_router`, and the native plugin/entry point is `slack-agent-router`.
-The installation ref above is the existing Git branch, not a package identifier.
 No legacy package or plugin alias is installed.
 
 Enable it for every receiving profile that should use selective routing. Use the
@@ -93,6 +102,11 @@ log keys, transcripts or service error bodies, or store routing decisions.
   (48,000 aggregate), with a 64 KiB retained original-record limit. The Jev request
   limit is 524,288 bytes; its response limit is 262,144 bytes. Nothing is silently
   truncated. Selected media and inseparable authored/reference composition are unsupported.
+  Prior bot responses support native `markdown` and text-only `section` blocks,
+  retaining their visible text and exact leaf provenance rather than replacing them
+  with notification fallback text. Unknown blocks, section fields/accessories and
+  missing user identities still reject the view. Human CURRENT block support is
+  unchanged (`rich_text` only); prior block support grants no current admission.
 - The ingress budget is 2.5 seconds, including context and the at-most-1.2-second
   Jev request. These are engineering deadlines, not hard real-time guarantees.
   Jev TLS is verified; redirects, environment proxies and automatic Jev retries are disabled.
@@ -112,8 +126,16 @@ log keys, transcripts or service error bodies, or store routing decisions.
 
 If registration succeeds but routing does not, check the native Slack connection,
 served profile, serving-profile key and bounded cursor-complete root/recent view. Local codes such as
+`context-page-limit`, `missing-root-context`, `unsupported-prior-composition`,
 `incomplete-context`, `native-topology-unresolved`, `native-topology-changed`, `classifier-failed` and
-`coverage-or-grounding-unresolved` distinguish bounded failures. `ingress-failed`
+`coverage-or-grounding-unresolved` distinguish bounded failures. Fetch diagnostics
+separate `context-fetch-not-permitted` (including unavailable channel access),
+`context-fetch-rate-limited`, `context-fetch-timeout`, `context-fetch-api-failed`
+and `context-fetch-failed` (SDK/transport). They never print raw API error bodies.
+The pinned adapter uses its authenticated workspace client for history; there is no
+separate native user/history client. Resolve access failures through the existing
+Slack integration, not a plugin credential store or borrowed integration token.
+`ingress-failed`
 can indicate unavailable native identity/lifecycle seams. Do not paste private input
 or credentials into diagnostics to investigate them.
 
@@ -127,7 +149,7 @@ A disabled or broken plugin is not a universal fail-closed enforcement boundary.
 
 ```sh
 hermes plugins disable slack-agent-router
-python -m pip uninstall hermes-slack-agent-router
+hermes plugins remove slack-agent-router
 ```
 
 ## Development and verification

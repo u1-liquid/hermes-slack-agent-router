@@ -1,6 +1,6 @@
 """Hermes Slack Agent Router: context-aware multi-agent routing powered by Jev."""
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 def register(ctx):

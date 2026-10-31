@@ -15,8 +15,13 @@ class TopologyError(ValueError):
     """An ordinary request lacks a stable, authoritative native candidate view."""
 
 
-def canonical_text(event):
-    """Flatten supported authored rich_text; retain exact leaf paths/ranges and kinds."""
+def canonical_text(event, *, prior=False):
+    """Flatten supported source fields, preserving exact leaf paths and ranges.
+
+    Human CURRENT composition remains rich_text-only. Prior Slack bot responses
+    also use native markdown and text-only section blocks; their notification
+    fallback is not a substitute for the visible authored source.
+    """
     from .semantic import SemanticError
 
     if not event.get("blocks"):
@@ -89,11 +94,24 @@ def canonical_text(event):
             raise SemanticError("unsupported authored rich_text element")
 
     for i, block in enumerate(event["blocks"]):
-        if block.get("type") != "rich_text":
-            raise SemanticError("unsupported current block")
+        path = f"blocks[{i}]"
         if i:
             append("\n", "blocks", "separator")
-        visit(block, f"blocks[{i}]")
+        if block.get("type") == "rich_text":
+            visit(block, path)
+        elif prior and block.get("type") == "markdown" and isinstance(block.get("text"), str):
+            append(block["text"], path + ".text", "authored")
+        elif (
+            prior
+            and block.get("type") == "section"
+            and not (set(block) - {"type", "block_id", "text", "expand"})
+            and isinstance(block.get("text"), dict)
+            and block["text"].get("type") in ("mrkdwn", "plain_text")
+            and isinstance(block["text"].get("text"), str)
+        ):
+            append(block["text"]["text"], path + ".text.text", "authored")
+        else:
+            raise SemanticError("unsupported prior block" if prior else "unsupported current block")
     result = "".join(pieces)
     for part in provenance:
         mapping = part["mapping"]

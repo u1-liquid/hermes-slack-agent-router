@@ -1,6 +1,6 @@
 manifest_version: 2
 name: slack-agent-router
-version: 0.1.0
+version: 0.1.1
 description: "Hermes Slack Agent Router: context-aware multi-agent routing powered by Jev"
 kind: standalone
 author: u1-liquid

@@ -9,8 +9,8 @@ python -m pip install . ruff==0.17.3 build
 python -W error::ResourceWarning -m unittest discover -s tests -p test_core.py -v
 python -W error::ResourceWarning -m unittest discover -s tests -p test_semantic.py -v
 python -W error::ResourceWarning -m unittest discover -s tests -p test_boundaries.py -v
-ruff check hermes_slack_agent_router tests
-ruff format --check hermes_slack_agent_router tests
+ruff check __init__.py hermes_slack_agent_router tests
+ruff format --check __init__.py hermes_slack_agent_router tests
 python -m build
 ```
 

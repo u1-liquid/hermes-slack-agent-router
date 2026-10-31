@@ -140,7 +140,7 @@ class Gate:
                 cursors.add(next_cursor)
                 cursor = next_cursor
             else:
-                raise SemanticError("incomplete-context")
+                raise SemanticError("context-page-limit")
         if root is None:
             raise SemanticError("missing-root-context")
         selected = {m["ts"]: m for m in (root, *recent)}
@@ -151,7 +151,7 @@ class Gate:
             if len(json.dumps(message, ensure_ascii=False).encode()) > 65536:
                 raise SemanticError("oversized-prior-context")
             sender = identifier(message["user"])
-            text, provenance = canonical_text(message)
+            text, provenance = canonical_text(message, prior=True)
             if not isinstance(text, str) or len(text) > 6000:
                 raise SemanticError("oversized-prior-context")
             history.append(History(message["ts"], sender, text, copy.deepcopy(message), provenance))
@@ -173,12 +173,51 @@ class Gate:
         if not self.native_policy(adapter, event, bound.recipient.bot_user):
             return None
         client = adapter._team_clients[thread.workspace]
-        from slack_sdk.errors import SlackClientError
+        from slack_sdk.errors import SlackApiError, SlackClientError
 
         try:
             history = await self.history(client, thread, bound.source.message_id, deadline)
-        except (SlackClientError, OSError, TimeoutError):
+        except SlackApiError as exc:
+            code = exc.response.get("error")
+            if code in {
+                "missing_scope",
+                "not_allowed_token_type",
+                "no_permission",
+                "access_denied",
+                "not_authed",
+                "invalid_auth",
+                "token_expired",
+                "token_revoked",
+                "account_inactive",
+                "channel_not_found",
+                "team_access_not_granted",
+            }:
+                return self.unresolved("context-fetch-not-permitted")
+            if code in {"ratelimited", "rate_limited"}:
+                return self.unresolved("context-fetch-rate-limited")
+            return self.unresolved("context-fetch-api-failed")
+        except TimeoutError:
+            return self.unresolved("context-fetch-timeout")
+        except (SlackClientError, OSError):
             return self.unresolved("context-fetch-failed")
+        except SemanticError as exc:
+            # Never log arbitrary exceptions/SDK bodies. Only these source-owned codes.
+            code = str(exc)
+            return self.unresolved(
+                code
+                if code
+                in {
+                    "incomplete-context",
+                    "foreign-or-future-context",
+                    "conflicting-context",
+                    "unordered-context",
+                    "missing-root-context",
+                    "oversized-prior-context",
+                    "unsupported-prior-media-or-identity",
+                    "context-page-limit",
+                }
+                else "unsupported-prior-composition"
+            )
         except (ValueError, KeyError, TypeError, AttributeError):
             return self.unresolved("incomplete-context")
         if await bridge.participants(bound) != topology:
