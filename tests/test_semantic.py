@@ -645,6 +645,43 @@ class SourceLocalProof(unittest.TestCase):
         self.assertEqual(plan.status, "ready", plan.reason)
         self.assertEqual(plan.units[0].recipients, (B,))
 
+    @unittest.skipUnless(
+        os.environ.get("JEV_SOURCE_LOCAL_RECORDED_DIR"), "explicit immutable source-local recording bridge"
+    )
+    def test_recorded_source_local_request_binding_and_retained_abstentions(self):
+        root = Path(os.environ["JEV_SOURCE_LOCAL_RECORDED_DIR"])
+        for name in ("root-generic", "recent-handoff", "root-topic", "recent-topic"):
+            with self.subTest(case=name):
+                directory = root / name
+                request = json.loads((directory / "jev-request.json").read_text())
+                state = request["state"]
+                root_id = state["prior"][state["root"]]["source_id"]
+                source = Snapshot(
+                    Thread("TDEMO", "CDEMO", root_id),
+                    "999.001",
+                    "UHUMAN",
+                    state["current"],
+                    tuple(
+                        History(h["source_id"], h["sender"], h["text"], provenance=tuple(h["provenance"]))
+                        for h in state["prior"].values()
+                    ),
+                    tuple(
+                        Recipient("TDEMO", r["source_user"], r["name"]) for r in state["recipients"].values()
+                    ),
+                )
+                batch = prepare(source)
+                self.assertEqual(json.loads(json.dumps({"model": JevClient.model, **batch})), request)
+                raw = json.loads((directory / "jev-result.json").read_text())
+                received = (directory / "native-received.txt").read_text()
+                if name in ("root-topic", "recent-topic"):
+                    with self.assertRaisesRegex(JevError, "uncertain relevant answer: u0_address"):
+                        validate_answers(batch, raw)
+                    self.assertEqual(received, "")  # Preserved failed delivery, not a passing journey.
+                else:
+                    plan = assemble(source, validate_answers(batch, raw))
+                    self.assertEqual(plan.status, "ready", plan.reason)
+                    self.assertEqual([plan.view(r) for r in source.recipients if plan.view(r)], [received])
+
     def test_source_local_plain_conflict_dispute_and_unknown_are_atomic(self):
         source = self.source(recent="Birch will prepare the summary.")
         for fact in ("assign:r1", "disputes", "unknown", "mixed", "outside", "assign:r0+r1"):

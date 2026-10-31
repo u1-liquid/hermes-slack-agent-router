@@ -116,6 +116,12 @@ requires exact equality with each saved request, validates its typed response,
 executes native scoped delivery and compares the received text. It does not modify
 the recordings or establish a fresh external-service result.
 
+For a source-local four-case recording, set `JEV_SOURCE_LOCAL_RECORDED_DIR` and run
+`test_semantic.py -k recorded_source_local`. This checks exact generated requests,
+validates typed answers and compares assembled text with the saved native input.
+Recorded confidence abstentions remain failed deliveries; the bridge verifies
+that those failures are preserved rather than claiming the journeys passed.
+
 ## Operational boundaries
 
 These tests do not install into a live gateway, process private Slack, restart a
