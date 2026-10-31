@@ -1,5 +1,4 @@
 {
-
   "participants": [
     {"workspace": "TDEMO", "bot_user": "UALPHA", "runtime_profile": "alpha"},
     {"workspace": "TDEMO", "bot_user": "UBETA", "runtime_profile": "beta"}

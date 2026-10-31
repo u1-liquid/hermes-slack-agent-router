@@ -1,4 +1,4 @@
-"""Stable Slack recipient policy and local administrative storage."""
+"""Stateless contextual Slack recipient routing through Jev."""
 
 __version__ = "0.1.0"
 
