@@ -1,0 +1,53 @@
+name: tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install . ruff==0.17.3 build
+      - name: Core suites only (native job is separate and mandatory)
+        run: |
+          python -W error::ResourceWarning -m unittest discover -s tests -p test_core.py -v
+          python -W error::ResourceWarning -m unittest discover -s tests -p test_boundaries.py -v
+          python -W error::ResourceWarning -m unittest discover -s tests -p test_storage_corruption.py -v
+      # Only fixed source/config values enter commands; no PR/event text interpolation.
+      - run: ruff check hermes_slack_thread_assignee tests
+      - run: ruff format --check hermes_slack_thread_assignee tests
+      - run: python -m build
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Pinned official host (not an installed/live profile)
+        uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: bf0203a794a07aac3ff764972ab9087baa4e4f4e
+          path: .native-host
+          persist-credentials: false
+      - name: Isolated test home and dependencies
+        run: |
+          mkdir -m 700 "$RUNNER_TEMP/native-home"
+          python -m pip install -e '.native-host[slack]' .
+      - name: Required native acceptance (missing setup/imports must fail)
+        env:
+          HERMES_REQUIRE_NATIVE: '1'
+          HERMES_TEST_SOURCE: ${{ github.workspace }}/.native-host
+          HERMES_HOME: ${{ runner.temp }}/native-home
+        run: python -W error::ResourceWarning -m unittest discover -s tests -p test_native.py -v
