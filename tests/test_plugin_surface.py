@@ -1,13 +1,34 @@
 """Real directory discovery, registration and isolated Plugin Doctor."""
 
+import importlib
+import importlib.util
 import os
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 SOURCE = os.environ.get("HERMES_TEST_SOURCE")
+
+
+class NamespaceIdentity(unittest.TestCase):
+    def test_project_distribution_and_only_new_entrypoint(self):
+        root = Path(__file__).resolve().parents[1]
+        metadata = tomllib.loads((root / "pyproject.toml").read_text())
+        self.assertEqual(metadata["project"]["name"], "hermes-slack-agent-router")
+        self.assertEqual(metadata["project"]["entry-points"]["hermes_agent.plugins"],
+                         {"slack-agent-router": "hermes_slack_agent_router:register"})
+
+    def test_new_package_is_real_and_no_legacy_import_alias(self):
+        root = Path(__file__).resolve().parents[1]
+        self.assertTrue((root / "hermes_slack_agent_router").is_dir())
+        package = importlib.import_module("hermes_slack_agent_router")
+        self.assertTrue(Path(package.__file__).resolve().is_relative_to(root / "hermes_slack_agent_router"))
+        self.assertTrue(callable(package.register))
+        self.assertIsNone(importlib.util.find_spec("hermes_slack_" + "thread_assignee"))
+        self.assertFalse((root / ("hermes_slack_" + "thread_assignee")).exists())
 
 
 @unittest.skipUnless(SOURCE, "requires isolated official host")
@@ -26,10 +47,10 @@ class PluginSurface(unittest.TestCase):
                 os.environ.pop("HERMES_THREAD_ASSIGNEE_CONFIG", None)
                 manager = PluginManager()
                 manifests = manager._scan_directory(package.parent, source="user", skip_names={".venv"})
-                matches = [m for m in manifests if m.name == "slack-thread-assignee"]
+                matches = [m for m in manifests if m.name == "slack-agent-router"]
                 self.assertEqual(len(matches), 1)
                 manager._load_plugin(matches[0])
-                self.assertIsNone(manager._plugins["slack-thread-assignee"].error)
+                self.assertIsNone(manager._plugins["slack-agent-router"].error)
                 self.assertEqual(len(manager.get_platform_handler_factories("slack")), 1)
                 from unittest.mock import Mock
 
