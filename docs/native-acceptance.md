@@ -35,23 +35,25 @@ API-human overrides are tested against positive native-compatible user evidence.
 `tests/test_plugin_surface.py` exercises real PluginManager directory scanning,
 registration, registered CLI parser/handler and isolated Plugin Doctor, including
 missing-config discovery. Doctor uses the official temporary-home/network-denied
-sandbox. Wheel metadata is configured; final rebuilt-wheel/entry-point import
-inspection is still required.
+sandbox. A rebuilt wheel has been installed into an isolated target and exercised
+outside the source cwd with isolated Python imports: package metadata, entry-point
+loading, directory discovery, host CLI registration and Doctor all passed.
 
-## Unresolved fixture and remaining checks
+## Routed identity and execution boundary
 
-The routed-runtime fixture currently fails its safety precondition: the native
-profile resolver does not place the profile under the fixture's temporary home.
-The assertion fires before any profile directory is written. Resolve the native
-default-root binding under a disposable home; never relax the assertion or write
-a live profile to make it pass. Routed-profile acceptance remains unverified and
-the full local suite therefore is not currently a passing release gate.
+The routed-runtime fixture binds both supported HOME and HERMES_HOME variables:
+runtime TMPDIR may itself be under the actual account's Hermes cache, so changing
+only HERMES_HOME does not move the native default root. The test retains an
+assertion that the resolved profile is inside its temporary home before writing.
+Actual native profile routes, registered temporary profile, runtime/transport
+identity, native session-key agreement and receiver removal now pass.
 
-A true shared-authority FIFO/mixed photo burst, complete native authorization
-refusal, receiver-map replacement during awaited work and in-flight lifecycle
-replacement still need proportionate validation. Rejected originals never reach
-those downstream paths in tested early-gate cases; that is not a claim that all
-downstream gateway systems were exercised.
+The ordinary/busy/pending tests prove early exclusion before downstream merge,
+queue or model execution, alongside admitted native-handler examples. They do not
+claim to run a production shared-authority FIFO, every native authorization path,
+or a real Slack service. Those systems remain host-owned, not reimplemented here.
+Receiver-map replacement during an awaited operation and in-flight callback
+replacement remain compatibility races; the limits below apply.
 
 ## Operational limits
 

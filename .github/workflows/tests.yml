@@ -44,7 +44,7 @@ jobs:
       - name: Isolated test home and dependencies
         run: |
           mkdir -m 700 "$RUNNER_TEMP/native-home"
-          python -m pip install -e '.native-host[slack]' .
+          python -m pip install -e '.native-host[slack]' . build
       - name: Required native acceptance (missing setup/imports must fail)
         env:
           HERMES_REQUIRE_NATIVE: '1'
@@ -53,3 +53,14 @@ jobs:
         run: |
           python -W error::ResourceWarning -m unittest discover -s tests -p test_native.py -v
           python -W error::ResourceWarning -m unittest discover -s tests -p test_plugin_surface.py -v
+      - name: Build and install wheel into a separate target
+        run: |
+          python -m build
+          python -m pip install --target "$RUNNER_TEMP/wheel-target" dist/*.whl
+      - name: Installed wheel only (outside source cwd)
+        working-directory: ${{ runner.temp }}
+        env:
+          HERMES_TEST_SOURCE: ${{ github.workspace }}/.native-host
+          HERMES_WHEEL_TARGET: ${{ runner.temp }}/wheel-target
+          HERMES_REQUIRE_WHEEL: '1'
+        run: python -I -W error::ResourceWarning -m unittest discover -s "$GITHUB_WORKSPACE/tests" -p test_installed.py -v

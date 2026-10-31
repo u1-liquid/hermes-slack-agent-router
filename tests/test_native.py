@@ -1,4 +1,4 @@
-"""Prepared, UNEXECUTED pinned-host acceptance tests; never run against a live home.
+"""Pinned-host acceptance tests; never run against a live home.
 
 HERMES_TEST_SOURCE selects the isolated official checkout. HERMES_REQUIRE_NATIVE=1
 makes absence of that checkout fatal in the required integration CI job.
@@ -32,7 +32,19 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.tmp.name)
         self.home = self.root / "home"
         self.home.mkdir(mode=0o700)
-        self.env = patch.dict(os.environ, {"HERMES_HOME": str(self.home)})
+        bundled = self.root / "empty-bundled"
+        bundled.mkdir()
+        self.env = patch.dict(
+            os.environ,
+            {
+                # TMPDIR may itself be inside the real ~/.hermes cache. Bind both
+                # platform default and explicit custom root, using supported env.
+                "HOME": str(self.root),
+                "HERMES_HOME": str(self.home),
+                "HERMES_BUNDLED_PLUGINS": str(bundled),
+                "HERMES_ENABLE_PROJECT_PLUGINS": "0",
+            },
+        )
         self.env.start()
         self.addCleanup(self.env.stop)
         assert SOURCE is not None
@@ -314,6 +326,161 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.store.path.unlink()
         await self.assert_rejected(self.message("ordinary with unavailable store"))
         self.assertFalse(self.store.path.exists())
+
+    async def test_actual_routed_runtime_and_receiver_rebind(self):
+        from gateway.profile_routing import ProfileRoute
+        from hermes_cli.profiles import get_profile_dir
+
+        from hermes_slack_thread_assignee.bridge import Bridge, Uncertain
+
+        profile = get_profile_dir("demo-routed")
+        self.assertTrue(profile.is_relative_to(self.home), "test must never write a live profile")
+        profile.mkdir(parents=True)
+        (profile / "config.yaml").write_text("{}")
+        self.runner.config.multiplex_profiles = True
+        self.runner.config._runtime_profile_homes = [("default", self.home), ("demo-routed", profile)]
+        self.runner.config.profile_routes = [
+            ProfileRoute("demo-route", "slack", "demo-routed", chat_id="CDEMO")
+        ]
+        bound = await Bridge(self.adapter).bind(self.message("routed ordinary"))
+        self.assertEqual(bound.recipient, Recipient("TDEMO", "UBETA", "demo-routed"))
+        self.assertEqual(bound.identity.transport_profile, "default")
+        self.assertEqual(bound.identity.runtime_home, profile)
+        self.assertEqual(bound.session_key, self.runner._session_key_for_source(bound.source))
+        self.adapter._team_bot_user_ids.clear()
+        with self.assertRaises(Uncertain):
+            await Bridge(self.adapter).bind(self.message("receiver removed"))
+
+    async def test_socket_mode_handler_sends_exact_empty_ack(self):
+        import logging
+
+        from slack_bolt.adapter.socket_mode.aiohttp import AsyncSocketModeHandler
+        from slack_sdk.socket_mode.request import SocketModeRequest
+
+        handler = AsyncSocketModeHandler.__new__(AsyncSocketModeHandler)
+        handler.app = self.app
+        socket = AsyncMock()
+        socket.logger = logging.getLogger("synthetic-socket")
+        request = SocketModeRequest(
+            type="events_api", envelope_id="envelope-demo", payload=self.message("ordinary socket input")
+        )
+        await handler.handle(socket, request)
+        socket.send_socket_mode_response.assert_awaited_once()
+        response = socket.send_socket_mode_response.await_args.args[0]
+        self.assertEqual(response.envelope_id, "envelope-demo")
+        self.assertIsNone(response.payload)
+        self.assertFalse(self.downstream)
+        self.model.assert_not_awaited()
+
+    async def test_genuine_blocking_approval_preserves_input_and_retires(self):
+        from tools import approval
+        from tools.approval_gateway_wait import _await_gateway_decision
+
+        _, key = self.source_and_key()
+        ready = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def notify(_data):
+            loop.call_soon_threadsafe(ready.set)
+
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                _await_gateway_decision,
+                key,
+                notify,
+                {"command": "synthetic command", "description": "test", "pattern_key": "synthetic"},
+                surface="test",
+            )
+        )
+        try:
+            await asyncio.wait_for(ready.wait(), 3)
+            self.assertTrue(approval.has_blocking_approval(key))
+            await self.dispatch(self.message("yes"))
+            self.assertTrue(self.downstream)
+        finally:
+            approval.resolve_gateway_approval(key, "deny")
+            await asyncio.wait_for(task, 3)
+        self.assertFalse(approval.has_blocking_approval(key))
+
+    async def test_pending_rechecked_after_real_sqlite_decision(self):
+        import sqlite3
+
+        from tools import clarify_gateway
+
+        _, key = self.source_and_key()
+        original = sqlite3.connect
+
+        def connection(*args, **kwargs):
+            db = original(*args, **kwargs)
+
+            def trace(statement):
+                if "SELECT evidence,recipients,revision" in statement:
+                    clarify_gateway.register("during-store", key, "Choose", ["One", "Two"])
+
+            db.set_trace_callback(trace)
+            return db
+
+        self.addCleanup(clarify_gateway.clear_session, key)
+        with patch("sqlite3.connect", side_effect=connection):
+            await self.dispatch(self.message("late pending reply"))
+        self.assertTrue(self.downstream)
+        self.assertIsNotNone(clarify_gateway.get_pending_for_session(key, include_choice_prompts=True))
+
+    async def test_api_human_override_retains_verified_human_policy(self):
+        self.adapter.config.extra["api_human_users"] = ["UHUMAN"]
+        await self.assert_rejected(self.message("ordinary API input", app_id="ADEMO", client_msg_id=""))
+        self.assertEqual(self.store.show(self.key), (self.a, 1))
+
+    async def test_file_metadata_ambiguity_timeout_and_order(self):
+        from hermes_slack_thread_assignee.bridge import Bridge, Uncertain
+
+        bridge = Bridge(self.adapter)
+        body = {
+            "type": "event_callback",
+            "team_id": "TDEMO",
+            "event": {
+                "type": "file_shared",
+                "channel_id": "CDEMO",
+                "channel_type": "channel",
+                "file_id": "FDEMO",
+                "user_id": "UHUMAN",
+            },
+        }
+        for file in (
+            {"mimetype": "video/mp4", "shares": {"public": {"COTHER": [{"ts": "220.001"}]}}},
+            {
+                "mimetype": "video/mp4",
+                "shares": {"public": {"CDEMO": [{"ts": "220.001"}, {"ts": "221.001"}]}},
+            },
+            {"mimetype": "image/png"},
+            {"mimetype": "video/mp4", "user": "UOTHER", "shares": {"public": {"CDEMO": [{"ts": "220.001"}]}}},
+        ):
+            self.client.files_info.return_value = {"ok": True, "file": file}
+            with self.subTest(file=file), self.assertRaises(Uncertain):
+                await bridge.bind(body)
+        self.client.files_info.side_effect = TimeoutError("synthetic SDK timeout")
+        with self.assertRaises(TimeoutError):
+            await bridge.bind(body)
+        self.client.files_info.side_effect = None
+        self.client.files_info.return_value = {
+            "ok": True,
+            "file": {
+                "mimetype": "video/mp4",
+                "user": "UHUMAN",
+                "shares": {"public": {"CDEMO": [{"ts": "220.001", "thread_ts": "100.001"}]}},
+            },
+        }
+        rich = self.message("<@UBETA> explicit", ts="220.001")
+        normal = await bridge.bind(rich)
+        fallback = await bridge.bind(body)
+        for first, second in ((normal, fallback), (fallback, normal)):
+            # Provenance differs, so either arrival order keeps its own evidence.
+            a = self.store.decide(first.event, first.recipient)
+            b = self.store.decide(second.event, second.recipient)
+            self.assertEqual(
+                {first.event.provenance: a.action, second.event.provenance: b.action},
+                {"message": "allow", "file_shared": "drop"},
+            )
 
     async def test_original_video_rejects_before_native_fallback(self):
         self.client.files_info.return_value = {

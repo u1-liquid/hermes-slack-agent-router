@@ -30,11 +30,11 @@
 ## Coherent implementation batch
 - [x] Write meaningful policy/store tests first, execute RED before implementation. Detect stable main, secondary then main, multi-address, quote/code, unknown, collision, restart, CAS/concurrency, evidence mismatch, lock/corruption.
 - [x] Implement minimal policy/config/store/admin and run focused GREEN. Record actual failures/passes in private result, not public logs.
-- [ ] Write early native gate tests RED; implement official factory/middleware and pinned bridge; test actual AsyncApp dispatch and native Hermes methods in an isolated copy/environment. External I/O only is mocked; no live APIs, profiles or source writes.
+- [x] Write early native gate tests RED; implement official factory/middleware and pinned bridge; test actual AsyncApp dispatch and native Hermes methods in an isolated copy/environment. External I/O only is mocked; no live APIs, profiles or source writes.
 - [ ] Exercise normal, busy/steer/queue, mixed burst, pending controls, commands, bot/self/DM/monitoring, routed profile and file fallback with model/steer/queue/outbound counters. Verify empty 200 transport ack separately. Include callback fail-through honestly.
-- [ ] Add manifest/entry point, unload handling, MIT, fictional config, README install/uninstall/bootstrap/limitations, and CI for Python 3.11–3.14 tests + lint/build + pinned official-host integration.
-- [ ] Build wheel/sdist, discover/register through isolated target/home, execute checks and record exact revisions. No live installation.
-- [ ] Commit coherent candidate on feature branch; return self-check and uncovered criteria. No push/publication by builder.
+- [x] Add manifest/entry point, unload handling, MIT, fictional config, README install/uninstall/bootstrap/limitations, and CI for Python 3.11–3.14 tests + lint/build + pinned official-host integration.
+- [x] Build wheel/sdist, discover/register through isolated target/home, execute checks and record exact revisions. No live installation.
+- [x] Commit coherent candidate on feature branch; return self-check and uncovered criteria. No push/publication by builder.
 
 ## Independent review and publication (owner)
 - [ ] Freeze exact candidate; independent Ritsuko/Sol-high executes required acceptance checks and reports defects, not shipping edits. Return necessary fixes to same writer, retain good evidence.
