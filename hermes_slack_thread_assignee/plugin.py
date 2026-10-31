@@ -49,10 +49,30 @@ class Gate:
 
 
 def register(ctx):
-    path = os.environ.get("HERMES_THREAD_ASSIGNEE_CONFIG")
-    if not path:
-        raise ValueError("HERMES_THREAD_ASSIGNEE_CONFIG is required")
-    config = Config.load(Path(path))
-    gate = Gate(config.store(), monitoring=config.monitoring)
-    ctx.register_platform_handler("slack", gate.wire)
-    ctx.on_unload(gate.dispose)
+    from .cli import parser, run
+
+    ctx.register_cli_command("thread-assignee", "Inspect or administer shared Slack assignments", parser, run)
+    gates = []
+    disposed = False
+
+    def dispose():
+        nonlocal disposed
+        disposed = True
+        for gate in gates:
+            gate.dispose()
+
+    def wire(native, adapter):
+        if disposed:
+            return
+        path = os.environ.get("HERMES_THREAD_ASSIGNEE_CONFIG")
+        if not path:
+            raise ValueError(
+                "Set HERMES_THREAD_ASSIGNEE_CONFIG to an absolute shared JSON config; routing is not active"
+            )
+        config = Config.load(Path(path))
+        gate = Gate(config.store(), monitoring=config.monitoring)
+        gates.append(gate)
+        gate.wire(native, adapter)
+
+    ctx.register_platform_handler("slack", wire)
+    ctx.on_unload(dispose)

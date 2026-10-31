@@ -4,13 +4,11 @@ Stable main-recipient policy for multi-agent Slack channel threads.
 
 ## Development status
 
-The local policy, shared SQLite store, terminal administrator and initial native
-Gate/bridge are implemented. Actual pinned-host AsyncApp/native-method tests cover
-the first integration boundary. Plugin discovery/manifest and host CLI activation
-are not finished: installing this candidate does not automatically activate routing.
-See [native acceptance](docs/native-acceptance.md), [design](docs/design.md) and
-[implementation plan](docs/implementation-plan.md) for the remaining acceptance
-criteria and the source-pinned integration boundary.
+The local policy, shared SQLite store, terminal administrator and native Gate/bridge
+are implemented. Directory plugin metadata, installed entry point and host CLI are
+provided. Actual pinned-host PluginManager discovery, CLI init and isolated Plugin
+Doctor have been exercised. Broader routed-runtime validation is still incomplete;
+see the exact boundary in [native acceptance](docs/native-acceptance.md).
 
 ## Local core installation
 
@@ -26,6 +24,33 @@ This installs only the local command. Do not install it into a live Hermes profi
 as if it were an activated plugin. Remove the package with the environment's
 package manager when no longer needed; removing it does not delete the database.
 No Slack credentials, remote classifier or external service are used by the core.
+
+## Directory plugin installation
+
+Before this branch is published, use a local checkout; do not assume the code is
+already on main. Once published, the candidate ref is `feat/stable-thread-assignee`:
+
+```sh
+git clone --branch feat/stable-thread-assignee https://github.com/u1-liquid/hermes-slack-thread-assignee.git
+hermes plugins install ./hermes-slack-thread-assignee/hermes_slack_thread_assignee
+hermes plugins enable slack-thread-assignee
+```
+
+Use the official Hermes plugin manager for the intended isolated or operator-owned
+profile. Set `HERMES_THREAD_ASSIGNEE_CONFIG` to an absolute operator JSON path in
+the Gateway's launch environment before starting Slack. Bootstrap the shared store
+with the terminal CLI first. `hermes thread-assignee` exposes the same arguments as
+`hermes-thread-assignee` below. Without config the plugin can be discovered and the
+CLI used; native wiring reports an actionable error and routing is not active.
+Do not interpret successful discovery/Doctor alone as active middleware.
+
+Disable/remove through `hermes plugins disable slack-thread-assignee` and
+`hermes plugins remove slack-thread-assignee`. Disabling disposes retained
+middleware to pass-through. A Gateway restart is needed for re-enable/replacement;
+the extension cannot physically remove callbacks. These are operator instructions,
+not permission for automated live installation or restart. Preserve the shared
+database when removing the package. Pip distributions also expose the official
+`hermes_agent.plugins` entry point and include `plugin.yaml`.
 
 ## Trusted local bootstrap and transfer
 

@@ -13,6 +13,12 @@ authors = [{name = "u1-liquid"}]
 [project.scripts]
 hermes-thread-assignee = "hermes_slack_thread_assignee.cli:main"
 
+[project.entry-points."hermes_agent.plugins"]
+slack-thread-assignee = "hermes_slack_thread_assignee:register"
+
+[tool.setuptools.package-data]
+hermes_slack_thread_assignee = ["plugin.yaml"]
+
 [tool.setuptools.packages.find]
 include = ["hermes_slack_thread_assignee*"]
 

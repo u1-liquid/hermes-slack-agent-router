@@ -50,4 +50,6 @@ jobs:
           HERMES_REQUIRE_NATIVE: '1'
           HERMES_TEST_SOURCE: ${{ github.workspace }}/.native-host
           HERMES_HOME: ${{ runner.temp }}/native-home
-        run: python -W error::ResourceWarning -m unittest discover -s tests -p test_native.py -v
+        run: |
+          python -W error::ResourceWarning -m unittest discover -s tests -p test_native.py -v
+          python -W error::ResourceWarning -m unittest discover -s tests -p test_plugin_surface.py -v

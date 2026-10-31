@@ -11,8 +11,9 @@ from .policy import Thread
 from .store import StoreError
 
 
-def parser():
-    result = argparse.ArgumentParser(description=__doc__)
+def parser(result=None):
+    if result is None:
+        result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--config", type=Path, default=os.environ.get("HERMES_THREAD_ASSIGNEE_CONFIG"))
     sub = result.add_subparsers(dest="command", required=True)
     for command in ("init", "status", "check", "show", "establish", "transfer", "clear"):
@@ -33,7 +34,10 @@ def parser():
 
 
 def main(argv=None):
-    args = parser().parse_args(argv)
+    return run(parser().parse_args(argv))
+
+
+def run(args):
     try:
         if args.config is None:
             raise ConfigError("explicit --config or HERMES_THREAD_ASSIGNEE_CONFIG required")

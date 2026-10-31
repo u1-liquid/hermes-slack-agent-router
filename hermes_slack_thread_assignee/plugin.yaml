@@ -1,0 +1,12 @@
+manifest_version: 2
+name: slack-thread-assignee
+version: 0.1.0
+description: Stable shared Slack thread recipient eligibility
+kind: standalone
+author: u1-liquid
+license: MIT
+homepage: https://github.com/u1-liquid/hermes-slack-thread-assignee
+provides_tools: []
+provides_hooks: []
+optional_env:
+  - HERMES_THREAD_ASSIGNEE_CONFIG
