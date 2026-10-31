@@ -74,7 +74,9 @@ log keys, transcripts or service error bodies, or store routing decisions.
   used only when recent messages provide no relevant assignee support. A newer clear
   handoff overrides an older assignment; unresolved conflict or failed retrieval does
   not become root fallback. A human root author or first mention is not automatically
-  the owner. Current explicit specific instructions retain priority.
+  the owner. Current explicit specific instructions retain priority. Topic-only recent
+  context does not erase a supported root assignee. Historical joint assignments
+  preserve their exact recipient set, rather than becoming an all-agent fallback.
 - Retrieval is bounded to four SDK calls of at most 100 records and one second,
   ending before the ingress deadline minus 1.3 seconds. Missing roots, malformed,
   foreign/future/conflicting records, cursor loops or unexhausted pages yield no work.
@@ -82,7 +84,7 @@ log keys, transcripts or service error bodies, or store routing decisions.
   not pre-download memory caps. Native SDK retries may add wire attempts. Slack does
   not provide an atomic history snapshot; unseen concurrent edits/deletions can race.
 - Current input is limited to 6,000 characters, six units, four recipients and
-  128 questions. Up to eight distinct prior records have 6,000 characters each
+  168 questions. Up to eight distinct prior records have 6,000 characters each
   (48,000 aggregate), with a 64 KiB retained original-record limit. The Jev request
   limit is 524,288 bytes; its response limit is 262,144 bytes. Nothing is silently
   truncated. Selected media and inseparable authored/reference composition are unsupported.

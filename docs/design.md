@@ -45,16 +45,25 @@ its multiplexed profiles; independent processes are outside its native inventory
    older media does not veto the selected view. No pagination cache/store exists.
 3. Build one typed question batch over current units, prior source authors/text and
    sorted recipients. There is no receiving-agent preference in the model input.
-   Questions classify action/reference/acknowledgement, destination, source support,
-   per-recipient membership and topic relationships.
-4. State identifies root and recent source keys. Specific-unit basis Choices and
-   generic general-lead/basis/controlling-source Choices express current explicit
-   instruction → informative recent support → root-only fallback. Independent raw
-   lead Choices qualify cited support. A later authored explicit handoff can supersede
-   old assignments; mere recency does not resolve conflict. Root fallback requires no
-   relevant recent support, not a failed fetch or unresolved conflicting evidence.
-   Human root authorship, first mention and participation are not ownership rules.
-   Specific/joint work does not depend on irrelevant general-lead uncertainty.
+   Questions classify action/reference/acknowledgement, destination, CURRENT-only
+   addressing/membership, local source context links and task/lead assignment facts.
+   Each historical fact describes only that message's own assignment, acceptance,
+   proposal author or explicit takeover. It never judges later supersession or a
+   globally selected recipient. Closed-set labels encode complete recipient subsets,
+   including historical joint assignments; outside/mixed/disputed/unknown facts cannot
+   silently become a partial registered set. Context links do not create membership.
+4. Code derives precedence from validated local facts in timestamp order: matching
+   ordinary assignments establish/confirm a recipient set; a different plain set
+   creates conflict. An explicit complete takeover replaces the set and resolves a
+   known preceding conflict/dispute, but cannot conceal an unknown/unsafe fact.
+   Topic-only context does not change the assignee, so root fallback remains available
+   when recent text does not identify/reassign/dispute it. Complete explicit CURRENT
+   assignments control specific work, with local name/ID grounding. Generic work uses
+   the same fold over whole-thread lead facts, independently of specific-task facts.
+   Superseded incompatible assignment references are excluded deterministically;
+   linked topic context stays inert. Human root authorship, first mention and mere
+   participation are not ownership rules. Specific/joint work is independent of
+   irrelevant general-lead uncertainty. No separate global tier/source verdict is asked.
 5. Validate exact keys/types, finite distributions, relevant confidence of 0.8,
    source grounding, transitive topic relations and complete coverage. Assemble
    atomically: no invented instructions or identifiers, partial omission or fan-out
@@ -89,7 +98,7 @@ The request owns and closes its asynchronous response/client on cancellation.
 
 Current text is capped at 6,000 characters; selected history at eight distinct
 records/6,000 characters each/48,000 total; current units at six, recipients at four,
-questions at 128 (maximum supported shape uses 123). Serialized Jev request and
+questions at 168 (the maximum six-unit/eight-prior/four-recipient shape). Serialized Jev request and
 response limits are 524,288 and 262,144 bytes respectively. Retained original records
 are capped at 64 KiB; decoded Slack pages at 1 MiB each/4 MiB total. SDK JSON buffering
 precedes those checks: they are acceptance limits, not hard socket/RSS limits. Native

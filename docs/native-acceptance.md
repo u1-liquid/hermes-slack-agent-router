@@ -24,6 +24,11 @@ Root/recent tests cover root outside the latest seven, ascending old-first curso
 pages, pinned cutoff/current exclusion, overlap/dedup, edits/field provenance,
 malformed/foreign/missing/failed retrieval, bounds, fallback and explicit handoff
 precedence. Incomplete retrieval never becomes semantically unhelpful context.
+Source-local proof tests cover historical joint sets, recent topic-only context
+with a root assignee, swapped users with identical runtime names, plain assignment
+conflicts versus explicit takeovers, disputes/unsafe facts and current partial-outside
+joint rejection. Every relevant positive and negative fact/link/address decision
+retains the same confidence gate; controlled facts are not real-model evidence.
 
 ## Native integration
 
@@ -93,6 +98,11 @@ To run only the changed root/recent native examples, use `-k real_jev_root` with
 that native command. They exercise a human-authored root outside seven recent
 messages, generic/topic root fallback, newer general-lead/topic handoff priority
 and actual native received input. Slack SDK history and final model remain controlled.
+For an authorized changed-protocol qualification against retained recordings, set
+`JEV_SAME_INPUTS_DIR` to the original four-case evidence directory. The recording
+harness checks exact original input-state equality, excluding only removed internal
+precedence instructions, before contacting Jev. Use a fresh output directory;
+never overwrite or relabel an earlier failed recording.
 
 A confidence abstention is a no-work result, not successful delivery. Preserve
 failed assertions and inspect their actual source/answers; do not lower thresholds

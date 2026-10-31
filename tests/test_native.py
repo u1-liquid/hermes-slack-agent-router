@@ -24,6 +24,12 @@ if os.environ.get("HERMES_REQUIRE_NATIVE") == "1" and not SOURCE:
     raise RuntimeError("required native suite needs HERMES_TEST_SOURCE")
 
 
+def native_answers(batch):
+    from test_semantic import controlled_answers
+
+    return {name: value["choice"] for name, value in controlled_answers(batch, {})["answers"].items()}
+
+
 @unittest.skipUnless(SOURCE, "optional local native suite; CI requires it explicitly")
 class NativeDispatch(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -727,15 +733,14 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         }
 
         async def classify(batch):
-            answers = {}
+            answers = native_answers(batch)
             for name in batch["questions"]:
-                answers[name] = "no"
                 if name == "coverage":
                     answers[name] = "complete"
                 elif name.endswith("_kind"):
                     answers[name] = "action"
-                elif name.endswith("_basis"):
-                    answers[name] = "current"
+                elif name.endswith("_address"):
+                    answers[name] = "explicit"
                 elif name.endswith("_destination"):
                     answers[name] = "specific"
                 elif name.endswith("_person"):
@@ -773,6 +778,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                         "u0_kind": "action",
                         "u0_destination": "specific",
                         "u0_to1": "yes",
+                        "u0_address": "explicit",
                     },
                 ),
             )
@@ -920,17 +926,17 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         ]
 
         async def grounded(batch):
-            answers = dict.fromkeys(batch["questions"], "no")
+            answers = native_answers(batch)
             answers.update(
                 coverage="complete",
                 u0_kind="action",
                 u1_kind="action",
                 u0_destination="specific",
-                u0_basis="current",
+                u0_address="explicit",
                 u1_destination="specific",
-                u1_basis="current",
-                u0_ref1="yes",
-                u1_ref2="yes",
+                u1_address="explicit",
+                u0_link1="yes",
+                u1_link2="yes",
                 u0_to0="yes",
                 u1_to1="yes",
                 same0_1="yes",
@@ -951,7 +957,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
         self.model.assert_awaited_once()
 
-    async def test_semantic_joint_prior_refs_reconstructed_on_new_gate(self):
+    async def test_semantic_joint_prior_links_reconstructed_on_new_gate(self):
 
         self.enable_semantic()
         self.client.conversations_replies.return_value["messages"] += [
@@ -960,14 +966,14 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         ]
 
         async def grounded(batch):
-            answers = dict.fromkeys(batch["questions"], "no")
+            answers = native_answers(batch)
             answers.update(
                 coverage="complete",
                 u0_kind="action",
                 u0_destination="specific",
-                u0_basis="current",
-                u0_ref1="yes",
-                u0_ref2="yes",
+                u0_address="explicit",
+                u0_link1="yes",
+                u0_link2="yes",
                 u0_to0="yes",
                 u0_to1="yes",
             )
@@ -1004,24 +1010,25 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         )
 
         async def grounded(batch):
-            answers = dict.fromkeys(batch["questions"], "no")
+            answers = native_answers(batch)
             answers.update(
                 coverage="complete",
                 u0_kind="action",
                 u0_destination="specific",
-                u0_basis="root",
-                u0_ref0="yes",
-                u0_to1="yes",
+                u0_address="absent",
+                u0_link0="yes",
+                u0_fact0="assign:r1",
             )
             if "u1_kind" in answers:
                 answers.update(
                     u0_to1="no",
                     u0_to0="yes",
-                    u0_basis="current",
+                    u0_address="explicit",
+                    u0_fact0="none",
                     u1_kind="action",
                     u1_destination="specific",
-                    u1_basis="current",
-                    u1_ref0="yes",
+                    u1_address="explicit",
+                    u1_link0="yes",
                     u1_to1="yes",
                 )
             return answers
@@ -1175,7 +1182,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
 
         async def grounded(batch):
             result = await classify(batch)
-            result["u1_ref0"] = "yes"
+            result["u1_link0"] = "yes"
             return result
 
         self.gate.jev.ask.side_effect = grounded
@@ -1207,7 +1214,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
 
         async def referenced(batch):
             answer = await classify(batch)
-            answer["u1_ref0"] = "yes"
+            answer["u1_link0"] = "yes"
             return answer
 
         self.gate.jev.ask.side_effect = referenced
@@ -1303,12 +1310,12 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.enable_semantic()
 
         async def secondary(batch):
-            result = dict.fromkeys(batch["questions"], "no")
+            result = native_answers(batch)
             result.update(
                 coverage="complete",
                 u0_kind="action",
                 u0_destination="specific",
-                u0_basis="current",
+                u0_address="explicit",
                 u0_to1="yes",
             )
             return result
@@ -1321,11 +1328,10 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.model.reset_mock()
 
         async def generic(batch):
-            result = dict.fromkeys(batch["questions"], "no")
+            result = native_answers(batch)
             result.update(
                 coverage="complete",
-                main="r0",
-                main_ref0="r0",
+                main_fact0="assign:r0",
                 u0_kind="action",
                 u0_destination="generic",
                 u0_to0="yes",
@@ -1380,12 +1386,12 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.enable_semantic()
 
         async def joint(batch):
-            result = dict.fromkeys(batch["questions"], "no")
+            result = native_answers(batch)
             result.update(
                 coverage="complete",
                 u0_kind="action",
                 u0_destination="specific",
-                u0_basis="current",
+                u0_address="explicit",
                 u0_to0="yes",
                 u0_to1="yes",
             )
@@ -1404,13 +1410,10 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         )
 
         async def generic(batch):
-            result = dict.fromkeys(batch["questions"], "no")
+            result = native_answers(batch)
             result.update(
                 coverage="complete",
-                main="r1",
-                main_ref0="r1",
-                main_basis="root",
-                main_source="h0",
+                main_fact0="assign:r1",
                 u0_kind="action",
                 u0_destination="generic",
                 u0_to1="yes",
@@ -1639,18 +1642,18 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.enable_semantic()
 
         async def contradictory(batch):
-            answer = dict.fromkeys(batch["questions"], "no")
+            answer = native_answers(batch)
             answer.update(
                 coverage="complete",
                 u0_kind="ack",
                 u0_mixed="yes",
                 u0_destination="specific",
-                u0_basis="current",
-                u0_ref0="yes",
+                u0_address="explicit",
+                u0_link0="yes",
                 u0_to0="yes",
                 u1_kind="action",
                 u1_destination="specific",
-                u1_basis="current",
+                u1_address="explicit",
                 u1_to1="yes",
             )
             return answer

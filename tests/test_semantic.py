@@ -33,45 +33,18 @@ def snapshot(text="Atlas, revise the summary; Birch, check the diagram."):
 
 
 def controlled_answers(batch, choices):
-    choices = dict(choices)
-    state = batch["state"]
-    for name in batch["questions"]:
-        if name.endswith("_basis") and name != "main_basis":
-            unit = name.removesuffix("_basis")
-            refs = [key for key in state["prior"] if choices.get(f"{unit}_ref{key[1:]}") == "yes"]
-            recipients = [
-                r for key, r in state["recipients"].items() if choices.get(f"{unit}_to{key[1:]}") == "yes"
-            ]
-            text = state["units"][unit]["text"]
-            explicit = recipients and all(
-                r["name"].casefold() in text.casefold() or f"<@{r['source_user']}>" in text
-                for r in recipients
-            )
-            choices.setdefault(
-                name,
-                "current"
-                if explicit
-                else "recent"
-                if any(key != state["root"] for key in refs)
-                else "root"
-                if refs
-                else "none",
-            )
-    support = [key for key in state["prior"] if choices.get(f"main_ref{key[1:]}") == choices.get("main")]
-    selected = next(
-        (key for key in reversed(support) if key != state["root"]), support[-1] if support else "none"
-    )
-    choices.setdefault("main_source", selected)
-    choices.setdefault("main_basis", "root" if selected == state["root"] else "recent" if support else "none")
+    # Explicit local facts supplied by each fixture; no inferred tier/witness oracle.
+    defaults = {
+        name: "absent" if name.endswith("_address") else "none" if "none" in q["criteria"] else "no"
+        for name, q in batch["questions"].items()
+    }
+    defaults.update(choices)
     return {
         "answers": {
             name: {
                 "type": "choice",
-                "choice": choices.get(name, "none" if name.startswith("main") else "no"),
-                "probabilities": {
-                    key: float(key == choices.get(name, "none" if name.startswith("main") else "no"))
-                    for key in q["criteria"]
-                },
+                "choice": defaults[name],
+                "probabilities": {key: float(key == defaults[name]) for key in q["criteria"]},
                 "confidence": 1.0,
             }
             for name, q in batch["questions"].items()
@@ -84,13 +57,14 @@ def two_topic_answers(batch):
         batch,
         {
             "coverage": "complete",
-            "main": "unknown",
             "u0_kind": "action",
             "u1_kind": "action",
             "u0_destination": "specific",
             "u1_destination": "specific",
-            "u0_ref0": "yes",
-            "u1_ref1": "yes",
+            "u0_address": "explicit",
+            "u1_address": "explicit",
+            "u0_link0": "yes",
+            "u1_link1": "yes",
             "u0_to0": "yes",
             "u1_to1": "yes",
         },
@@ -107,6 +81,18 @@ class RecordingJev(JevClient):
 
     async def _exchange(self, raw, key):
         (self.directory / "jev-request.json").write_bytes(raw)
+        if os.environ.get("JEV_SAME_INPUTS_DIR"):
+            previous = json.loads(
+                (
+                    Path(os.environ["JEV_SAME_INPUTS_DIR"]) / self.directory.name / "jev-request.json"
+                ).read_text()
+            )
+            expected = {k: v for k, v in previous["state"].items() if k != "precedence"}
+            if json.loads(raw)["state"] != expected:
+                raise AssertionError("changed-protocol qualification must preserve the original input state")
+            (self.directory / "same-inputs.txt").write_text(
+                "Exact original state equality excluding removed internal precedence instructions: PASS\n"
+            )
         started = time.monotonic()
         outcome = "failed"
         try:
@@ -144,10 +130,7 @@ class SemanticTests(unittest.TestCase):
         )
         choices = {
             "coverage": "complete",
-            "main": "r0",
-            "main_ref0": "r0",
-            "main_basis": "root",
-            "main_source": "h0",
+            "main_fact0": "assign:r0",
             "u0_kind": "action",
             "u0_destination": "generic",
         }
@@ -163,20 +146,17 @@ class SemanticTests(unittest.TestCase):
         )
         takeover = {
             **choices,
-            "main": "r1",
-            "main_ref7": "r1",
-            "main_basis": "recent-handoff",
-            "main_source": "h7",
+            "main_fact7": "takeover:r1",
         }
         plan = self.plan(changed, takeover)
         self.assertEqual(plan.status, "ready", plan.reason)
         self.assertEqual(plan.units[0].recipients, (B,))
         self.assertEqual([h.identity for h in plan.units[0].references], ["8.0"])
         for delta in (
-            {"main_basis": "root"},
-            {"main_basis": "conflict"},
-            {"main_source": "h0"},
-            {"main_basis": "recent"},
+            {"main_fact7": "assign:r1"},
+            {"main_fact7": "disputes"},
+            {"main_fact7": "unknown"},
+            {"main_fact7": "mixed"},
         ):
             with self.subTest(delta=delta):
                 self.assertEqual(self.plan(changed, {**takeover, **delta}).status, "unresolved")
@@ -190,7 +170,7 @@ class SemanticTests(unittest.TestCase):
             history=tuple(History(f"{i}.0", "UFABLE", "x" * 6000) for i in range(1, 9)),
         )
         batch = prepare(source)
-        self.assertEqual(len(batch["questions"]), 123)
+        self.assertEqual(len(batch["questions"]), 168)
         self.assertEqual(batch["state"]["recent"], [f"h{i}" for i in range(1, 8)])
         self.assertEqual(batch["state"]["root"], "h0")
         self.assertLess(
@@ -214,12 +194,10 @@ class SemanticTests(unittest.TestCase):
         )
         choices = {
             "coverage": "complete",
-            "main": "unknown",
             "u0_kind": "action",
             "u0_destination": "specific",
-            "u0_basis": "root",
-            "u0_ref0": "yes",
-            "u0_to0": "yes",
+            "u0_fact0": "assign:r0",
+            "u0_link0": "yes",
         }
         plan = self.plan(source, choices)
         self.assertEqual(plan.status, "ready", plan.reason)
@@ -233,24 +211,21 @@ class SemanticTests(unittest.TestCase):
         )
         priority = {
             **choices,
-            "u0_basis": "recent-handoff",
-            "u0_ref0": "no",
-            "u0_ref7": "yes",
-            "u0_to0": "no",
-            "u0_to1": "yes",
+            "u0_fact7": "takeover:r1",
+            "u0_link7": "yes",
         }
         self.assertEqual(self.plan(changed, priority).units[0].recipients, (B,))
         for delta in (
-            {"u0_basis": "conflict"},
-            {"u0_basis": "unknown"},
-            {"u0_basis": "root"},
-            {"u0_ref7": "unknown"},
+            {"u0_fact7": "assign:r1"},
+            {"u0_fact7": "unknown"},
+            {"u0_fact7": "disputes"},
+            {"u0_link7": "unknown"},
         ):
             self.assertEqual(self.plan(changed, {**priority, **delta}).status, "unresolved")
-        # Main/basis/source uncertainty is irrelevant to wholly specific work.
+        # General-lead facts are irrelevant to wholly specific work.
         batch = prepare(changed)
         raw = controlled_answers(batch, priority)
-        for name in ("main", "main_basis", "main_source"):
+        for name in ("main_fact0", "main_fact7"):
             raw["answers"][name]["confidence"] = 0.1
         self.assertEqual(assemble(changed, validate_answers(batch, raw)).status, "ready")
 
@@ -276,19 +251,21 @@ class SemanticTests(unittest.TestCase):
         )
         choices = {
             "coverage": "complete",
-            "main": "r0",
-            "main_ref0": "r0",
-            "main_ref1": "r0",
+            "main_fact0": "assign:r0",
+            "main_fact1": "assign:r0",
             "u0_kind": "action",
             "u0_destination": "generic",
-            "u0_to0": "yes",
         }
         plan = self.plan(source, choices)
         self.assertEqual(plan.status, "ready", plan.reason)
         self.assertIn("Please continue.", plan.view(A))
         self.assertIn("coordinate", plan.view(A))
         self.assertEqual(plan.view(B), "")
-        for delta in ({"main": "unknown"}, {"main_ref0": "none", "main_ref1": "none"}, {"main_ref1": "r1"}):
+        for delta in (
+            {"main_fact0": "unknown"},
+            {"main_fact0": "none", "main_fact1": "none"},
+            {"main_fact1": "assign:r1"},
+        ):
             uncertain = self.plan(source, {**choices, **delta})
             self.assertEqual(uncertain.status, "unresolved")
             self.assertFalse(uncertain.view(A) or uncertain.view(B))
@@ -296,8 +273,7 @@ class SemanticTests(unittest.TestCase):
     def test_specific_work_does_not_require_global_main_confidence(self):
         batch = prepare(snapshot())
         raw = two_topic_answers(batch)
-        raw["answers"]["main"]["confidence"] = 0.2
-        raw["answers"]["main_ref0"]["confidence"] = 0.2
+        raw["answers"]["main_fact0"]["confidence"] = 0.2
         plan = assemble(snapshot(), validate_answers(batch, raw))
         self.assertEqual(plan.status, "ready")
 
@@ -315,11 +291,11 @@ class SemanticTests(unittest.TestCase):
             snapshot("Atlas and Birch, jointly review the diagram."),
             {
                 "coverage": "complete",
-                "main": "unknown",
                 "u0_kind": "action",
                 "u0_destination": "specific",
-                "u0_ref0": "yes",
-                "u0_ref1": "yes",
+                "u0_link0": "yes",
+                "u0_link1": "yes",
+                "u0_address": "explicit",
                 "u0_to0": "yes",
                 "u0_to1": "yes",
             },
@@ -337,7 +313,6 @@ class SemanticTests(unittest.TestCase):
             source,
             {
                 "coverage": "complete",
-                "main": "none",
                 "u0_kind": "action",
                 "u1_kind": "action",
                 "u2_kind": "action",
@@ -345,6 +320,9 @@ class SemanticTests(unittest.TestCase):
                 "u1_destination": "specific",
                 "u2_destination": "specific",
                 "u0_to0": "yes",
+                "u0_address": "explicit",
+                "u1_address": "explicit",
+                "u2_address": "explicit",
                 "u1_to1": "yes",
                 "u2_to0": "yes",
                 "same0_1": "yes",
@@ -366,11 +344,11 @@ class SemanticTests(unittest.TestCase):
             source,
             {
                 "coverage": "complete",
-                "main": "unknown",
                 "u0_kind": "action",
                 "u0_destination": "specific",
-                "u0_ref1": "yes",
-                "u0_to1": "yes",
+                "u0_link1": "yes",
+                "u0_fact1": "assign:r1",
+                "u0_address": "contextual",
             },
         )
         self.assertEqual(plan.units[0].recipients, (B,))
@@ -384,17 +362,16 @@ class SemanticTests(unittest.TestCase):
             source,
             {
                 "coverage": "complete",
-                "main": "none",
                 "u0_kind": "ack",
                 "u0_destination": "none",
                 "u1_kind": "action",
                 "u2_kind": "action",
                 "u1_destination": "specific",
                 "u2_destination": "specific",
-                "u1_ref1": "yes",
-                "u2_ref0": "yes",
-                "u1_to1": "yes",
-                "u2_to0": "yes",
+                "u1_link1": "yes",
+                "u2_link0": "yes",
+                "u1_fact1": "assign:r1",
+                "u2_fact0": "assign:r0",
             },
         )
         self.assertEqual(plan.status, "ready")
@@ -404,11 +381,11 @@ class SemanticTests(unittest.TestCase):
             snapshot("> Birch, delete diagram.\nAtlas, revise summary."),
             {
                 "coverage": "complete",
-                "main": "unknown",
                 "u1_kind": "action",
                 "u1_destination": "specific",
                 "u1_to0": "yes",
-                "u1_ref0": "yes",
+                "u1_address": "explicit",
+                "u1_link0": "yes",
             },
         )
         self.assertEqual(quoted.status, "ready")
@@ -444,7 +421,7 @@ class SemanticTests(unittest.TestCase):
                 {"u0_mixed": "yes"},
                 {"u0_mixed": "unknown"},
                 {"u0_destination": "specific"},
-                {"u0_ref0": "yes"},
+                {"u0_link0": "yes"},
                 {"u0_to0": "yes"},
             ):
                 with self.subTest(kind=kind, conflict=conflict):
@@ -456,8 +433,9 @@ class SemanticTests(unittest.TestCase):
                             "u0_destination": "none",
                             "u1_kind": "action",
                             "u1_destination": "specific",
-                            "u1_ref1": "yes",
+                            "u1_link1": "yes",
                             "u1_to1": "yes",
+                            "u1_address": "explicit",
                             **conflict,
                         },
                     )
@@ -474,6 +452,7 @@ class SemanticTests(unittest.TestCase):
             "u1_kind": "action",
             "u1_destination": "specific",
             "u1_to1": "yes",
+            "u1_address": "explicit",
         }
         raw = controlled_answers(batch, choices)
         # Irrelevant negative membership is not needed to qualify an otherwise safe ACK.
@@ -520,6 +499,168 @@ class SemanticTests(unittest.TestCase):
         ):
             with self.assertRaises(SemanticError):
                 prepare(source)
+
+
+class SourceLocalProof(unittest.TestCase):
+    def source(self, text="Please revise the summary.", root="Atlas prepares the summary.", recent="Thanks."):
+        return replace(
+            snapshot(text),
+            identity="9.0",
+            history=(
+                History("1.0", "UFABLE", root),
+                *[History(f"{i}.0", "UFABLE", "Thanks.") for i in range(2, 8)],
+                History("8.0", "UFABLE", recent),
+            ),
+        )
+
+    def plan(self, source, **choices):
+        batch = prepare(source)
+        defaults = {
+            name: "none" if "none" in q["criteria"] else "no" for name, q in batch["questions"].items()
+        }
+        defaults.update(coverage="complete", u0_kind="action", u0_destination="specific", u0_address="absent")
+        defaults.update(choices)
+        answers = {name: defaults[name] for name in batch["questions"]}
+        return assemble(source, answers)
+
+    def test_source_local_original_root_and_takeover_paths(self):
+        source = self.source(root="Birch reviews diagrams; Atlas leads this thread and prepares the summary.")
+        for generic in (False, True):
+            current = replace(source, text="Please continue." if generic else source.text)
+            facts = {"main_fact0": "assign:r0"} if generic else {"u0_fact0": "assign:r0", "u0_link0": "yes"}
+            if generic:
+                facts["u0_destination"] = "generic"
+            plan = self.plan(current, **facts)
+            self.assertEqual(plan.status, "ready", plan.reason)
+            self.assertEqual(plan.units[0].recipients, (A,))
+            changed = replace(
+                current,
+                history=(*current.history[:-1], History("8.0", "UFABLE", "Birch takes over from Atlas.")),
+            )
+            facts.update(
+                {"main_fact7": "takeover:r1"} if generic else {"u0_fact7": "takeover:r1", "u0_link7": "yes"}
+            )
+            plan = self.plan(changed, **facts)
+            self.assertEqual(plan.status, "ready", plan.reason)
+            self.assertEqual(plan.units[0].recipients, (B,))
+            self.assertEqual([h.identity for h in plan.units[0].references], ["8.0"])
+
+    def test_source_local_topic_only_does_not_erase_root_assignee(self):
+        source = self.source(recent="The summary needs a clearer title.")
+        plan = self.plan(source, u0_fact0="assign:r0", u0_link0="yes", u0_fact7="none", u0_link7="yes")
+        self.assertEqual(plan.status, "ready", plan.reason)
+        self.assertEqual(plan.units[0].recipients, (A,))
+        self.assertEqual([h.identity for h in plan.units[0].references], ["1.0", "8.0"])
+
+    def test_source_local_historical_joint_and_recent_joint_are_preserved(self):
+        source = self.source(root="Atlas and Birch jointly prepare the summary.")
+        plan = self.plan(source, u0_fact0="assign:r0+r1", u0_link0="yes")
+        self.assertEqual(plan.status, "ready", plan.reason)
+        self.assertEqual(plan.units[0].recipients, (A, B))
+        self.assertTrue(plan.view(A) and plan.view(B))
+        source = replace(
+            source,
+            history=(
+                *source.history[:-1],
+                History("8.0", "UFABLE", "Atlas and Birch jointly take over the summary."),
+            ),
+        )
+        plan = self.plan(
+            source, u0_fact0="assign:r0", u0_link0="yes", u0_fact7="takeover:r0+r1", u0_link7="yes"
+        )
+        self.assertEqual(plan.units[0].recipients, (A, B))
+        self.assertEqual([h.identity for h in plan.units[0].references], ["8.0"])
+
+    def test_source_local_swapped_assignments_with_identical_runtime_names(self):
+        source = replace(
+            self.source(root="<@UBIRCH> prepares the summary; <@UATLAS> reviews diagrams."),
+            recipients=(replace(A, runtime_profile="same"), replace(B, runtime_profile="same")),
+        )
+        plan = self.plan(source, u0_fact0="assign:r1", u0_link0="yes")
+        self.assertEqual(plan.status, "ready", plan.reason)
+        self.assertEqual(plan.units[0].recipients, (source.recipients[1],))
+
+    def test_source_local_confident_negatives_and_unsafe_facts_remain_required(self):
+        source = self.source()
+        batch = prepare(source)
+        choices = {
+            "coverage": "complete",
+            "u0_kind": "action",
+            "u0_destination": "specific",
+            "u0_fact0": "assign:r0",
+            "u0_link0": "yes",
+        }
+        for name in ("u0_fact7", "u0_link7", "u0_to1", "u0_address"):
+            raw = controlled_answers(batch, choices)
+            raw["answers"][name]["confidence"] = 0.79
+            with self.subTest(name=name), self.assertRaises(JevError):
+                validate_answers(batch, raw)
+        generic = replace(source, text="Please continue.")
+        batch = prepare(generic)
+        raw = controlled_answers(
+            batch,
+            {
+                "coverage": "complete",
+                "u0_kind": "action",
+                "u0_destination": "generic",
+                "main_fact0": "assign:r0",
+            },
+        )
+        raw["answers"]["main_fact7"]["confidence"] = 0.79
+        with self.assertRaises(JevError):
+            validate_answers(batch, raw)
+        for unsafe in ("unknown", "outside", "mixed"):
+            self.assertEqual(
+                self.plan(
+                    source, u0_fact0=unsafe, u0_link0="yes", u0_fact7="takeover:r1", u0_link7="yes"
+                ).status,
+                "unresolved",
+            )
+
+    def test_source_local_known_dispute_requires_explicit_resolution(self):
+        source = self.source(recent="Not sure who owns the summary.")
+        self.assertEqual(
+            self.plan(
+                source, u0_fact0="assign:r0", u0_link0="yes", u0_fact7="disputes", u0_link7="yes"
+            ).status,
+            "unresolved",
+        )
+        source = replace(
+            source,
+            history=(
+                *source.history[:-2],
+                History("7.0", "UFABLE", "Not sure who owns the summary."),
+                History("8.0", "UFABLE", "Birch explicitly takes over now."),
+            ),
+        )
+        plan = self.plan(
+            source,
+            u0_fact0="assign:r0",
+            u0_link0="yes",
+            u0_fact6="disputes",
+            u0_link6="yes",
+            u0_fact7="takeover:r1",
+            u0_link7="yes",
+        )
+        self.assertEqual(plan.status, "ready", plan.reason)
+        self.assertEqual(plan.units[0].recipients, (B,))
+
+    def test_source_local_plain_conflict_dispute_and_unknown_are_atomic(self):
+        source = self.source(recent="Birch will prepare the summary.")
+        for fact in ("assign:r1", "disputes", "unknown", "mixed", "outside", "assign:r0+r1"):
+            plan = self.plan(source, u0_fact0="assign:r0", u0_link0="yes", u0_fact7=fact, u0_link7="yes")
+            self.assertEqual(plan.status, "unresolved", fact)
+            self.assertFalse(plan.view(A) or plan.view(B))
+
+    def test_source_local_explicit_current_joint_controls_and_partial_outside_rejects(self):
+        source = self.source(text="Atlas and Birch, revise the summary.")
+        plan = self.plan(
+            source, u0_address="explicit", u0_to0="yes", u0_to1="yes", u0_fact0="assign:r0", u0_link0="yes"
+        )
+        self.assertEqual(plan.status, "ready", plan.reason)
+        self.assertEqual(plan.units[0].recipients, (A, B))
+        for address in ("outside", "mixed", "unknown"):
+            self.assertEqual(self.plan(source, u0_address=address, u0_to0="yes").status, "unresolved")
 
 
 class APITransportTests(unittest.IsolatedAsyncioTestCase):
