@@ -127,8 +127,17 @@ python -m pip uninstall hermes-slack-thread-assignee
 
 See [design](docs/design.md) for data flow and native boundaries and
 [testing](docs/native-acceptance.md) for runnable offline and opt-in fictional tests.
-CI has distinct `core` and `native` jobs, both on Python 3.14. Offline tests require
+CI has distinct `core` and `native` jobs, both on Python 3.14, using
+`actions/checkout@v7` and `actions/setup-python@v7`. Offline tests require
 no real TypeSafe key. Passing controlled tests is not a live Slack deployment check
 or a guarantee of classifier accuracy.
+
+The Dependabot configuration groups version-update proposals by ecosystem, with
+separate security-update groups. It checks Actions and Python dependencies weekly
+on Monday at 09:00 Asia/Tokyo. The root Python updater covers `pyproject.toml` and
+`tests/requirements-native.txt`; arbitrary version strings in shell commands are
+not Python manifest coverage. Dependabot reads this configuration from the default
+branch: a feature-branch file alone is not activation or proof of updater execution.
+There is no automatic merge policy.
 
 MIT license, copyright u1-liquid.

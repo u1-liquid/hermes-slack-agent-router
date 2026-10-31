@@ -284,9 +284,17 @@ def prepare(source: Snapshot):
             continue
         choice(
             prefix + "_basis",
-            precedence + f"For actionable {prefix}, which tier determines its "
-            "specific recipients? Evaluate relevant evidence and conflict, not unrelated general-lead "
-            "uncertainty. For generic, ack or reference select none; separate main questions handle generic.",
+            {
+                "task": f"Locate the assignment evidence for the SPECIFIC task in state.units.{prefix}.text. "
+                "Read current and prior sources directly; no other question's answer is available.",
+                "order": "Current explicit assignee first; otherwise a matching recent task assignment; "
+                "otherwise root task assignment ONLY if recent messages contain no relevant assignment. "
+                "An acknowledgement without task or assignee details is not assignment evidence. "
+                "Use recent-handoff for an explicit newer takeover of this task, not root or ordinary recent. "
+                "A human author can assign a named bot; authorship is not task ownership.",
+                "exclude": "A whole-thread lead is not necessarily this task's assignee. "
+                "Unresolved conflicting assignments mean conflict. Generic continuation/ack/reference means none.",
+            },
             bases,
         )
         choice(
@@ -331,27 +339,36 @@ def prepare(source: Snapshot):
         for j in range(len(source.history)):
             choice(
                 f"{prefix}_ref{j}",
-                precedence + f"Does {prefix} specifically refer to prior h{j} or its topic as controlling "
-                "support for the chosen recipients? A root message assigning this specific artifact/task "
-                "IS a relevant reference even when that same message also assigns the general lead. "
-                "A recent explicit reassignment of this task IS controlling support. "
-                "Do not select superseded conflicting assignments. "
-                "Generic continuations have NO specific references here: general-lead evidence is "
-                "handled separately by main_ref questions. Do not select a general project/lead "
-                "message merely because it is in history. No action means no active references.",
+                {
+                    "task": f"Does prior h{j} contain concrete source evidence for the specific task in "
+                    f"state.units.{prefix}.text? Evaluate these texts directly, independently of other answers.",
+                    "yes": "This prior text names or describes the matching artifact, work proposal, "
+                    "referenced person or task assignment and has not been superseded by a conflicting "
+                    "explicit later assignment. A root task assignment counts even if it also names the general lead.",
+                    "no": "Acknowledgement-only text without task/assignee details (thanks, received, OK) "
+                    "does not supply evidence, even in the same thread. An unrelated task, mere general-lead "
+                    "message, or superseded conflicting task assignment is no. Generic current continuations, "
+                    "acknowledgements and quoted instructions need no specific-task references.",
+                    "conflict": "Do not resolve genuine ambiguous assignment by guessing; unknown is available.",
+                },
                 yes,
             )
         for j in range(len(source.recipients)):
             choice(
                 f"{prefix}_to{j}",
-                precedence + f"Is r{j} (Slack source_user {source.recipients[j].bot_user}, runtime profile "
-                f"{source.recipients[j].runtime_profile}) a grounded recipient of actionable {prefix}? "
-                "Answer membership ONLY for SPECIFIC actionable requests; generic continuations "
-                "say no here because the separate main/main_ref decision supplies their recipient. "
-                "Independent yes/no membership permits same-topic multiple recipients. "
-                "A contextual 'you' referring to a uniquely matching prior "
-                "message addresses its author when that author maps to this recipient. For ack/reference "
-                "say no. Never guess all recipients.",
+                {
+                    "task": f"Is the task in state.units.{prefix}.text assigned to Slack user "
+                    f"{source.recipients[j].bot_user} (r{j})? Determine membership directly from source texts, "
+                    "not from another question's answer. Different recipients may both be assigned one joint task.",
+                    "evidence": "A current explicit assignee controls. Otherwise use the matching recent "
+                    "task assignment or explicit takeover; if recent messages have no relevant support, "
+                    "use the ROOT task assignment. A human prior author naming a bot assigns that bot, NOT "
+                    "the human. Match source_user IDs: runtime names may be identical. A contextual 'you' "
+                    "can identify the author of the uniquely referenced work proposal.",
+                    "no": "Say no when this user only has another task, was explicitly replaced on this task, "
+                    "is merely mentioned, or current is generic/ack/reference. Whole-thread leadership alone "
+                    "does not assign a specific task. Never guess all recipients; genuine ambiguity is unknown.",
+                },
                 yes,
             )
     for i in range(len(spans)):
