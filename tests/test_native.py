@@ -669,7 +669,16 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertIn("DIAGRAM_ONLY", received)
         self.assertNotIn("SUMMARY_ONLY", received)
         self.model.reset_mock()
-        await self.assert_rejected(self.message("<@UALPHA> SUMMARY_ONLY."))
+        # This factory is attached after the fixture's observer middleware. Observe
+        # the real listener/model/queue boundary, not that earlier test observer.
+        response = await self.dispatch(self.message("<@UALPHA> SUMMARY_ONLY."))
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.assertEqual((response.status, response.body), (200, ""))
+        self.model.assert_not_awaited()
+        self.assertFalse(self.adapter._pending_messages)
+        self.assertFalse(self.adapter._pending_text_batches)
+        self.client.chat_postMessage.assert_not_awaited()
+        self.client.chat_postEphemeral.assert_not_awaited()
         (installed.parent.parent / "router-native-delivery.json").write_text(
             json.dumps(
                 {
