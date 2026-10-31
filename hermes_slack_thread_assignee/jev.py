@@ -39,7 +39,10 @@ def validate_answers(batch, result, confidence=0.8):
             relevant = True
             if name.startswith("u") and "_" in name:
                 unit, field = name.split("_", 1)
-                relevant = field == "kind" or selected.get(unit + "_kind") not in ("ack", "reference")
+                relevant = field in ("kind", "mixed", "destination") or selected.get(unit + "_kind") not in (
+                    "ack",
+                    "reference",
+                )
                 if selected.get(unit + "_destination") == "generic" and field.startswith(("ref", "to")):
                     relevant = False  # Generic routing uses main/main_ref instead of these answers.
             elif name.startswith("same"):

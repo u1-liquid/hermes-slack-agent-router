@@ -327,8 +327,17 @@ def assemble(source: Snapshot, answers):
         if quoted:
             units.append(Unit(start, end, "reference", f"current-u{i}", (), (), ()))
             continue
-        if answers[prefix + "_kind"] in ("ack", "reference"):
-            units.append(Unit(start, end, answers[prefix + "_kind"], f"current-u{i}", (), (), ()))
+        kind = answers[prefix + "_kind"]
+        if kind in ("ack", "reference"):
+            # Nonaction is safe only when no independent answer signals omitted work.
+            if (
+                answers[prefix + "_mixed"] != "no"
+                or answers[prefix + "_destination"] != "none"
+                or any(answers[f"{prefix}_ref{j}"] != "no" for j in range(len(source.history)))
+                or any(answers[f"{prefix}_to{j}"] != "no" for j in range(len(source.recipients)))
+            ):
+                return unresolved("nonaction contradiction")
+            units.append(Unit(start, end, kind, f"current-u{i}", (), (), ()))
             continue
         destination = answers[prefix + "_destination"]
         fields = {
@@ -342,16 +351,10 @@ def assemble(source: Snapshot, answers):
         }
         if "unknown" in fields.values() or answers[prefix + "_mixed"] != "no":
             return unresolved("uncertain or inseparable unit")
-        kind = answers[prefix + "_kind"]
         refs = tuple(h for j, h in enumerate(source.history) if answers[f"{prefix}_ref{j}"] == "yes")
         recipients = tuple(r for j, r in enumerate(source.recipients) if answers[f"{prefix}_to{j}"] == "yes")
 
-        if quoted and kind != "reference":
-            return unresolved("quoted instruction cannot become actionable")
-        if kind != "action":
-            if recipients or refs or destination != "none":
-                return unresolved("nonaction recipient/reference contradiction")
-        elif destination not in ("specific", "generic"):
+        if kind != "action" or destination not in ("specific", "generic"):
             return unresolved("action has no grounded recipient")
         elif destination == "generic":
             main = next((r for j, r in enumerate(source.recipients) if answers["main"] == f"r{j}"), None)
@@ -392,8 +395,6 @@ def assemble(source: Snapshot, answers):
             if relation == "unknown":
                 return unresolved("uncertain current-topic relation")
             if relation == "yes":
-                if units[i].disposition != "action" or units[j].disposition != "action":
-                    return unresolved("nonaction current-topic contradiction")
                 merged = groups[i] | groups[j]
                 for member in merged:
                     groups[member] = merged

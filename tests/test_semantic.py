@@ -288,6 +288,54 @@ class SemanticTests(unittest.TestCase):
             with self.assertRaises(JevError):
                 validate_answers(batch, raw)
 
+    def test_contradictory_nonaction_cannot_erase_work_while_sibling_proceeds(self):
+        source = snapshot("Thanks and revise the summary; Birch, check the diagram.")
+        for kind in ("ack", "reference"):
+            for conflict in (
+                {"u0_mixed": "yes"},
+                {"u0_mixed": "unknown"},
+                {"u0_destination": "specific"},
+                {"u0_ref0": "yes"},
+                {"u0_to0": "yes"},
+            ):
+                with self.subTest(kind=kind, conflict=conflict):
+                    plan = self.plan(
+                        source,
+                        {
+                            "coverage": "complete",
+                            "u0_kind": kind,
+                            "u0_destination": "none",
+                            "u1_kind": "action",
+                            "u1_destination": "specific",
+                            "u1_ref1": "yes",
+                            "u1_to1": "yes",
+                            **conflict,
+                        },
+                    )
+                    self.assertEqual(plan.status, "unresolved")
+                    self.assertFalse(plan.view(A) or plan.view(B))
+
+    def test_nonaction_safety_confidence_cannot_be_waived_by_kind(self):
+        source = snapshot("Thanks; Birch, check the diagram.")
+        batch = prepare(source)
+        choices = {
+            "coverage": "complete",
+            "u0_kind": "ack",
+            "u0_destination": "none",
+            "u1_kind": "action",
+            "u1_destination": "specific",
+            "u1_to1": "yes",
+        }
+        raw = controlled_answers(batch, choices)
+        # Irrelevant negative membership is not needed to qualify an otherwise safe ACK.
+        raw["answers"]["u0_to0"]["confidence"] = 0.2
+        self.assertEqual(assemble(source, validate_answers(batch, raw)).status, "ready")
+        for field in ("mixed", "destination"):
+            raw = controlled_answers(batch, choices)
+            raw["answers"][f"u0_{field}"]["confidence"] = 0.2
+            with self.assertRaises(JevError):
+                validate_answers(batch, raw)
+
     def test_composition_provenance_and_inseparable_code(self):
         from hermes_slack_thread_assignee.bridge import canonical_text
 

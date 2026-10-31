@@ -944,6 +944,38 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             await self.assert_rejected(self.message(body["event"]["text"]))
             self.gate.jev.ask.assert_not_awaited()
 
+    async def test_contradictory_ack_atomic_empty_ack_before_model_busy_or_queue(self):
+        self.enable_semantic()
+
+        async def contradictory(batch):
+            answer = dict.fromkeys(batch["questions"], "no")
+            answer.update(
+                coverage="complete",
+                u0_kind="ack",
+                u0_mixed="yes",
+                u0_destination="specific",
+                u0_ref0="yes",
+                u0_to0="yes",
+                u1_kind="action",
+                u1_destination="specific",
+                u1_to1="yes",
+            )
+            return answer
+
+        self.gate.jev.ask.side_effect = contradictory
+        _, key = self.source_and_key()
+        busy = AsyncMock(return_value=True)
+        self.adapter.set_busy_session_handler(busy)
+        for bot, active in (("UBETA", False), ("UALPHA", False), ("UBETA", True)):
+            self.adapter._team_bot_user_ids["TDEMO"] = bot
+            self.adapter._bot_user_id = bot
+            if active:
+                self.adapter._active_sessions[key] = asyncio.Event()
+            await self.assert_rejected(
+                self.message("Thanks and <@UALPHA> revise summary; <@UBETA> check diagram.")
+            )
+        busy.assert_not_awaited()
+
     async def test_jev_failure_and_late_pending_no_invented_work_or_control_loss(self):
         from hermes_slack_thread_assignee.jev import JevError
 
