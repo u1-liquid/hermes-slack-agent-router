@@ -11,6 +11,99 @@ class Uncertain(ValueError):
     """Insufficient evidence: preserve native processing, never guess."""
 
 
+def canonical_text(event):
+    """Flatten supported authored rich_text; retain exact leaf paths/ranges and kinds."""
+    from .semantic import SemanticError
+
+    if not event.get("blocks"):
+        text = event.get("text", "")
+        return text, (
+            {
+                "field": "text",
+                "start": 0,
+                "end": len(text),
+                "kind": "authored",
+                "raw": text,
+                "source_start": 0,
+                "source_end": len(text),
+                "mapping": "literal",
+            },
+        )
+    pieces, provenance = [], []
+    offset = 0
+
+    def append(text, path, kind, *, raw=None, mapping="literal"):
+        nonlocal offset
+        structural = kind == "separator"
+        raw = text if raw is None and not structural else raw
+        pieces.append(text)
+        provenance.append(
+            {
+                "field": None if structural else path,
+                "start": offset,
+                "end": offset + len(text),
+                "kind": kind,
+                "raw": raw,
+                "mapping": "separator" if structural else mapping,
+                "source_start": None if structural else 0,
+                "source_end": None if structural else len(raw),
+            }
+        )
+        offset += len(text)
+
+    def visit(node, path, kind="authored"):
+        tag = node.get("type")
+        if tag in (
+            "rich_text",
+            "rich_text_section",
+            "rich_text_list",
+            "rich_text_quote",
+            "rich_text_preformatted",
+        ):
+            if tag in ("rich_text_quote", "rich_text_preformatted"):
+                kind = "reference"
+            children = node.get("elements", [])
+            for i, child in enumerate(children):
+                if i and tag in ("rich_text", "rich_text_list"):
+                    append("\n", path, "separator")
+                visit(child, f"{path}.elements[{i}]", kind)
+        elif tag == "text":
+            append(node["text"], path + ".text", "reference" if node.get("style", {}).get("code") else kind)
+        elif tag == "user":
+            append(
+                "<@" + node["user_id"] + ">",
+                path + ".user_id",
+                kind,
+                raw=node["user_id"],
+                mapping="slack-user",
+            )
+        elif tag == "link":
+            append(node.get("text") or node["url"], path + (".text" if node.get("text") else ".url"), kind)
+        elif tag == "emoji":
+            append(":" + node["name"] + ":", path + ".name", kind, raw=node["name"], mapping="emoji")
+        else:
+            raise SemanticError("unsupported authored rich_text element")
+
+    for i, block in enumerate(event["blocks"]):
+        if block.get("type") != "rich_text":
+            raise SemanticError("unsupported current block")
+        if i:
+            append("\n", "blocks", "separator")
+        visit(block, f"blocks[{i}]")
+    result = "".join(pieces)
+    for part in provenance:
+        mapping = part["mapping"]
+        if mapping == "separator":
+            continue
+        raw = part["raw"]
+        rendered = (
+            "<@" + raw + ">" if mapping == "slack-user" else ":" + raw + ":" if mapping == "emoji" else raw
+        )
+        if result[part["start"] : part["end"]] != rendered:
+            raise SemanticError("canonical source provenance does not roundtrip")
+    return result, tuple(provenance)
+
+
 def composition(event):
     direct = set() if event.get("blocks") else set(addresses(event.get("text", "")))
 
@@ -157,8 +250,14 @@ class Bridge:
         session_key = adapter._source_session_key(source)
         recipient = Recipient(team, bot, identity.runtime_profile)
         event_id = ts + (":" + event["edited"]["ts"] if provenance == "edit" else "")
+        try:
+            direct = composition(event)
+        except Uncertain:
+            # A verified ordinary human with unknown composition is not a native control exemption.
+            # The semantic ingress validates it and persists unresolved before any native listener.
+            direct = addresses(event.get("text", ""))
         return Bound(
-            Event(thread, event_id, sender, composition(event), provenance=provenance),
+            Event(thread, event_id, sender, direct, provenance=provenance),
             recipient,
             source,
             identity,

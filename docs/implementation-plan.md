@@ -1,46 +1,48 @@
-# Slack Thread Assignee Implementation Plan
+# Contextual Multi-Topic Routing Implementation Plan
 
-> **For agentic workers:** Use the already-selected native finite Roco/Sol-high execution method and TDD. Independent Ritsuko review follows the coherent implementation, not every test. The accepted packet delegates engineering decisions; no repeated user plan gate.
+Current implementation progress: source-grounded v2 people sets, semantic ingress/private
+request projection, normal/busy/merge/runner-FIFO/replay, native admission/control checks,
+streaming Jev caps/cancellation, shared immutable generations and operational CLI are coded.
+Six real fictional journeys passed at the v2 question boundary; a fresh streaming client
+canary passed separately. Retention/recovery CLI, purge tombstone/no rehydration, prior-rich
+body, canonical duplicate call-count, oversized no-egress and pending-on-SDK-failure controls
+passed. Full source collection: 76 tests, 73 passed and three explicit skips (two local external
+canaries and the separate wheel job). The isolated rebuilt-wheel job passed separately;
+offline Ruff and build passed. These are builder checks, not expanded independent acceptance.
 
-**Goal:** Persist a stable main for Slack human thread continuations while preserving message-local explicit secondary/multiple recipients and native controls.
+> Use the selected sequential Roco/Sol-high native method with tests-first development and one consolidated independent Ritsuko review. Engineering choices are delegated; no repeated questionnaire or plan gate.
 
-**Architecture:** Original-request Bolt global middleware via official native factory; a pinned read-only Hermes identity/pending bridge; shared local SQLite with atomic decisions and CAS administrative mutation. Core transport/listeners/auth remain untouched.
+**Goal:** Real Jev contextual reference/topic decisions, one durable multi-unit plan, and only each recipient's assigned CURRENT instructions at the native input boundary.
 
-**Tech stack:** Python >=3.11, standard-library policy/storage/admin; host-provided Slack Bolt/PyYAML at integration, pytest/ruff/build for development. No remote classifier.
+**Spec:** [design.md](design.md), Astra/high delta plus fresh independent builder correction. Prior stable-main-only/no-classifier assumptions are superseded. Existing package/storage/native tests are compatible baseline evidence, not semantic acceptance.
 
-**Spec:** [design.md](design.md), independently produced Astra/high and corrected following fresh builder contract check.
+**Architecture:** Original-request public Bolt middleware; positive human/native identity/control bridge; bounded allowed conversation snapshot; native `jev ask` closed-set questions; shared SQLite fenced plan; request-local `req.body` projection before listener/merge/busy/queue. Main remains trusted administrative fallback. No provider/transcript rewriting or new transport/broker.
 
-## Decisions and scope
-- Public package `hermes_slack_thread_assignee`; plugin ID `slack-thread-assignee`; console command `hermes-thread-assignee`, also host CLI `hermes thread-assignee`.
-- Files: `policy.py` (direct address parsing and eligibility), `store.py` (SQLite/CAS/event snapshot), `config.py` (validated explicit shared DB + participant registry/exemptions), `bridge.py` (pinned native receiver/runtime/pending normalization), `plugin.py` (native middleware/factory/unload), `cli.py` (trusted OS admin). Split only if responsibilities justify it.
-- Native factory signatures/CLI hooks follow actual official API, not guessed signatures. No importing unrelated plugin implementations.
-- Explicit operator config file path via `HERMES_THREAD_ASSIGNEE_CONFIG` for both CLI and plugin; use fictional example only. All participants use one DB and registry. Store initialization explicit through admin; startup never repairs corruption.
-- `init`, `status`, `check`, `show`, `establish`, `transfer`, `clear` provide machine-readable output; mutations support dry-run; establish insert-only, transfer/clear CAS. Local administrator OS trust, not Slack/LLM text.
-- Thread `(workspace,channel,root)` and recipient `(workspace,bot_user,runtime_profile)`; event keys distinguish edits and file fallback provenance. Persistent tombstone revision prevents ABA after clear.
-- Corrected design's exact early-file metadata checks and pending recheck are required. No blanket busy bypass, guessed first bot/profile, quote/unfurl routing or ignored-channel grant.
-- No private paths/IDs/logs/evidence in public repo. MIT u1-liquid. No public claim of universal/fail-closed gating; list actual framework race/lifecycle limits.
+## Engineering decisions
+- Keep existing package/CLI/plugin identity and canonical shared database. Preserve original main/CAS/audit and old tests. Add semantic tables through explicit idempotent local administration (`init`/upgrade), never automatic destructive repair.
+- `jev.py`: actual native CLI client, stdin `state`+Choice questions, strict typed answers and deadline/process cleanup; default executable `jev` resolves through normal PATH/config. Never embed credentials or use a fake response as real Jev execution.
+- `semantic.py`: exact source candidates, typed question construction, validation and deterministic plan/projection. `plans.py`: common source/evidence-bound claim/lease/fence/result/unresolved store. Reuse existing Store permissions/normalization. Add modules only for these coherent responsibilities.
+- Units use Unicode-code-point half-open spans in unchanged original authored text/field. Candidate boundaries account for every character (including punctuation/ack/reference); bounded same-line English/Japanese clauses supported. Mixed/unpartitionable/quoted/forwarded/media/size-limit cases are visible unresolved, never silently omitted or all-agent fan-out.
+- One batch asks disposition, message/topic/person references and per-recipient membership, plus a whole-source coverage/mixed audit. Choices include explicit unknown. Locally validate exact answer keys/types, finite distribution/confidence, references, allowed recipient IDs, unit coverage and consistency before constructing the plan. No model-generated instruction text/IDs or owner transfers.
+- Initial engineering ceilings: current text6000characters, history6messages, units6, recipients4, total typed questions96, semantic ingress budget2.5s and Jev sub-budget at most1.2s of remaining budget. Exceeding limits is unresolved. Conservative confidence0.8 is configurable evaluation policy, not calibrated truth. Tune only from permitted canaries, not private input.
+- Config `semantic` is explicitly enabled with exact workspace/channel/data-policy declarations. Default egress disabled; SDK read access is not egress consent. Real runtime content permission is an operator deployment boundary, not implied by fictional tests or aliases. Only wholly fictional/public-permitted development calls.
+- Source/context/registry/policy/main revisions and digests bind cache/plan. One claimant performs Jev, followers consume the same accepted plan with bounded waiting; crash takeover is fenced. No SQLite transaction across external work, no detached inference; timeout/invalid/stale/uncertain yields visible durable unresolved and empty ACK, not a generic-main success.
+- Internal native projection uses a deep original snapshot and replaces `req.body` with a private event copy. Preserve IDs/auth context and only existing own source mentions in assigned units. Remove excluded CURRENT blocks/unfurls/files; nested edit fields also projected. Original and projected native gates both must permit, so removing another mention cannot widen admission. No fake mention/force-process/posting.
+- Native history excludes current_ts and labels PRIOR context. Preserve accepted prefixes. Explicitly test current message in fetched history, rich duplicates and media uncertainty; do not build a general LLM firewall or rewrite history/tool pairs.
 
-## Review focus
-1. Native routed runtime identity/pending key mismatch: preserve controls, surface degradation, never guess.
-2. Retry/edit/file paths with differing address evidence: no cached wrong recipient, no ownership changes.
-3. Shared processes/admin races: stable decision snapshots, CAS/tombstones, safe corrupt/locked state.
-4. Original mixed busy bursts and video fallback: rejected input never reaches model/steer/queue/chat.
-5. Unload/re-enable: retained native closure becomes pass-through; restart requirement explicit.
+## Coherent tests-first batch
+- [x] Write semantic protocol/plan tests RED before implementation: two topics/two recipients, context-only reply, mixed ack+action, same-topic multiple recipients, quote/forward, same-line English/Japanese clauses, unknown/mixed/incomplete coverage, invalid/stale/error/timeout.
+- [x] Implement real client/validated plans and shared persistence; verify restart, two-process agreement/one accepted generation, cross-workspace, source/context changes, registry/main revisions, failed claimant/lease/fence and explicit unresolved inspection. Preserve main/audit and compatible baseline behavior.
+- [x] Execute real fictional/public fixture(s) through the actual product Jev client. Preserve exact request/result/protocol/exit receipts privately; distinguish real canary from deterministic replay/unit fixtures. A prior recipient-choice canary or scalar code review does not satisfy this step.
+- [x] Add actual native request projection tests RED: both recipients receive disjoint assigned action strings, references separately labeled, no current whole-message copy in blocks/history; no nonrecipient model/chat/warning. Inspect real native normal, active busy/steer, merged and queued/replayed input, not only labels.
+- [x] Preserve commands, pending control owner and post-await recheck, bots/self/DM/monitoring/auth/native mention gates. Controls bypass Jev entirely. Verify original payload/provenance unchanged outside private request view and no implicit administrative main mutation.
+- [x] Revise README/config/native acceptance to current semantic status, public-permitted input policy, retention/recovery/unresolved inspection and bounded limitations. Keep package/MIT/discovery/unload/isolated wheel and CI; required semantic tests cannot silently skip. Actual external Jev canary uses existing authentication only locally, not secrets in public CI.
+- [x] Run relevant complete tests/lint/build, real local canary and isolated native/wheel checks; commit one coherent candidate with all remaining actual gaps explicit. No public push by builder.
 
-## Coherent implementation batch
-- [x] Write meaningful policy/store tests first, execute RED before implementation. Detect stable main, secondary then main, multi-address, quote/code, unknown, collision, restart, CAS/concurrency, evidence mismatch, lock/corruption.
-- [x] Implement minimal policy/config/store/admin and run focused GREEN. Record actual failures/passes in private result, not public logs.
-- [x] Write early native gate tests RED; implement official factory/middleware and pinned bridge; test actual AsyncApp dispatch and native Hermes methods in an isolated copy/environment. External I/O only is mocked; no live APIs, profiles or source writes.
-- [ ] Exercise normal, busy/steer/queue, mixed burst, pending controls, commands, bot/self/DM/monitoring, routed profile and file fallback with model/steer/queue/outbound counters. Verify empty 200 transport ack separately. Include callback fail-through honestly.
-- [x] Add manifest/entry point, unload handling, MIT, fictional config, README install/uninstall/bootstrap/limitations, and CI for Python 3.11–3.14 tests + lint/build + pinned official-host integration.
-- [x] Build wheel/sdist, discover/register through isolated target/home, execute checks and record exact revisions. No live installation.
-- [x] Commit coherent candidate on feature branch; return self-check and uncovered criteria. No push/publication by builder.
+## Independent review and publication
+- [ ] Freeze candidate; independent Ritsuko maps CURRENT ten outcomes and actual Jev/native received text, exercises required checks, reports necessary corrections rather than editing. Jev code-quality review is separate from runtime Jev routing.
+- [ ] Remediate confirmed in-scope defects as a batch, validate and independently bridge exact corrected source.
+- [ ] Update the SAME authorized feature PR only after expanded local acceptance; no main/force push/merge. Read back exact source/tree/complete changed paths, PR and all declared exact-head CI. Preserve baseline receipts at their original boundary, not relabel old8criteria as current10acceptance.
 
-## Independent review and publication (owner)
-- [ ] Freeze exact candidate; independent Ritsuko/Sol-high executes required acceptance checks and reports defects, not shipping edits. Return necessary fixes to same writer, retain good evidence.
-- [ ] Apply current Jev code review policy after relevant checks; it does not replace independent review.
-- [ ] Verify hosted repo/public nonfork/main, exact complete changed paths and sanitized contents. Publish ordinary feature branch/PR, read back exact target/head/base; no main/force push or merge.
-- [ ] Execute declared exact-head CI, read all job/check results including required checks, record private criterion matrix and resources. README must reference existing feature branch while unmerged.
-
-## Verification boundary
-Native integration uses official Hermes revision `bf0203a794a07aac3ff764972ab9087baa4e4f4e` in an isolated checkout outside any Hermes home. SDK/host source revisions and mocks must be reported. Host-owned queued/replay work, permission refusal, pending/metadata races and no-unwire lifecycle are disclosed limitations, not fabricated enforcement. Initial packet remains the whole-product acceptance contract.
+## Safety and completion
+No live Hermes/source/config/profile/skill changes, live plugin install, real Slack probes/private Jev input, Gateway restart, merge/auto-merge, release/PyPI or unrelated repositories. Official host remains source-pinned/read-only in an isolated checkout. Native finite12GiB members must preserve evidence and really return; no orphan children. Card remains running until the whole expanded product+independent review+same-PR/exact-head CI outcome is delivered. Shiori sends the single final requester report.

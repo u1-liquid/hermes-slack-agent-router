@@ -12,19 +12,58 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
+class SemanticPolicy:
+    enabled: bool = False
+    policy_revision: str = "disabled"
+    scopes: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
+
+    def permits(self, thread, data_class):
+        return self.enabled and any(
+            workspace == thread.workspace and channel == thread.channel and data_class in classes
+            for workspace, channel, classes in self.scopes
+        )
+
+    @classmethod
+    def parse(cls, raw):
+        if raw is None:
+            return cls()
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != {"enabled", "policy_revision", "scopes"}
+            or type(raw["enabled"]) is not bool
+            or not isinstance(raw["scopes"], list)
+        ):
+            raise ValueError("semantic policy requires explicit enabled/revision/scopes")
+        scopes = []
+        for scope in raw["scopes"]:
+            if set(scope) != {"workspace", "channel", "data_classes"}:
+                raise ValueError("semantic scope must be exact")
+            classes = scope["data_classes"]
+            if (
+                not isinstance(classes, list)
+                or not classes
+                or any(item not in ("fictional", "public-permitted") for item in classes)
+            ):
+                raise ValueError("only explicitly fictional/public-permitted data classes supported")
+            scopes.append((identifier(scope["workspace"]), identifier(scope["channel"]), tuple(classes)))
+        return cls(raw["enabled"], identifier(raw["policy_revision"]), tuple(scopes))
+
+
+@dataclass(frozen=True)
 class Config:
     database: Path
     database_id: str
     registry_revision: str
     participants: tuple[Recipient, ...]
     monitoring: tuple[tuple[str, str, str], ...] = ()
+    semantic: SemanticPolicy = SemanticPolicy()
 
     @classmethod
     def load(cls, path: Path):
         try:
             raw = json.loads(Path(path).read_text())
             required = {"database", "database_id", "registry_revision", "participants"}
-            if not required <= set(raw) or set(raw) - required - {"monitoring"}:
+            if not required <= set(raw) or set(raw) - required - {"monitoring", "semantic"}:
                 raise ValueError("unknown or missing config fields")
             database = Path(raw["database"])
             if not database.is_absolute():
@@ -43,6 +82,7 @@ class Config:
                 identifier(raw["registry_revision"]),
                 participants,
                 tuple(monitoring),
+                SemanticPolicy.parse(raw.get("semantic")),
             )
         except (OSError, ValueError, TypeError, KeyError) as exc:
             raise ConfigError(str(exc)) from exc

@@ -185,6 +185,302 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 await self.assert_rejected(self.message(text))
         self.assertEqual(self.store.show(self.key), (self.a, 1))
 
+    def enable_semantic(self):
+        from hermes_slack_thread_assignee.config import SemanticPolicy
+        from hermes_slack_thread_assignee.plans import PlanStore
+
+        self.gate.semantic = SemanticPolicy(True, "fiction-v1", (("TDEMO", "CDEMO", ("fictional",)),))
+        PlanStore(self.store).initialize()
+        self.client.conversations_replies.return_value = {
+            "ok": True,
+            "messages": [{"ts": "100.001", "user": "UHUMAN", "text": "Fictional public project."}],
+        }
+
+        async def classify(batch):
+            answers = {}
+            for name in batch["questions"]:
+                answers[name] = "no"
+                if name == "coverage":
+                    answers[name] = "complete"
+                elif name.endswith("_kind"):
+                    answers[name] = "action"
+                elif name.endswith("_destination"):
+                    answers[name] = "specific"
+                elif name.endswith("_person"):
+                    answers[name] = "none"
+            answers["u0_to0"] = "yes"
+            if "u1_to1" in answers:
+                answers["u1_to1"] = "yes"
+            return answers
+
+        self.gate.jev = AsyncMock()
+        self.gate.jev.ask.side_effect = classify
+
+    async def test_semantic_normal_scoped_input_and_nonrecipient(self):
+        self.enable_semantic()
+        original = self.message("<@UALPHA> revise SUMMARY_ONLY; <@UBETA> check DIAGRAM_ONLY.")
+        await self.dispatch(original)
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.model.assert_awaited_once()
+        received = self.model.await_args.args[0].text
+        alpha = self.adapter._team_bot_user_ids["TDEMO"] == "UALPHA"
+        self.assertIn("SUMMARY_ONLY" if alpha else "DIAGRAM_ONLY", received)
+        self.assertNotIn("DIAGRAM_ONLY" if alpha else "SUMMARY_ONLY", received)
+        self.assertIn("SUMMARY_ONLY", original["event"]["text"])
+        self.model.reset_mock()
+        if not alpha:
+            await self.assert_rejected(self.message("<@UALPHA> revise SUMMARY_ONLY."))
+        self.assertEqual(self.store.show(self.key), (self.a, 1))
+
+    async def test_semantic_other_recipient_receives_only_own_current(self):
+        self.adapter._team_bot_user_ids["TDEMO"] = "UALPHA"
+        self.adapter._bot_user_id = "UALPHA"
+        await self.test_semantic_normal_scoped_input_and_nonrecipient()
+
+    async def test_semantic_rich_text_and_busy_queue_merge_replay(self):
+        self.enable_semantic()
+        _, key = self.source_and_key()
+        self.adapter._active_sessions[key] = asyncio.Event()
+        busy = AsyncMock(return_value=True)
+        self.adapter.set_busy_session_handler(busy)
+        body = self.message(
+            "fallback includes SUMMARY_ONLY and DIAGRAM_ONLY",
+            blocks=[
+                {
+                    "type": "rich_text",
+                    "elements": [
+                        {
+                            "type": "rich_text_section",
+                            "elements": [
+                                {"type": "user", "user_id": "UALPHA"},
+                                {"type": "text", "text": " revise SUMMARY_ONLY; "},
+                                {"type": "user", "user_id": "UBETA"},
+                                {"type": "text", "text": " check DIAGRAM_ONLY."},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        )
+        await self.dispatch(body)
+        busy.assert_awaited_once()
+        self.assertIn("DIAGRAM_ONLY", busy.await_args.args[0].text)
+        self.assertNotIn("SUMMARY_ONLY", busy.await_args.args[0].text)
+        self.adapter.set_busy_session_handler(None)
+        self.adapter._busy_text_debounce_seconds = 0
+        for suffix in ("ONE", "TWO"):
+            await self.dispatch(self.message(f"<@UALPHA> SUMMARY_{suffix}; <@UBETA> DIAGRAM_{suffix}."))
+        pending = self.adapter.get_pending_message(key)
+        self.assertIsNotNone(pending)
+        self.assertIn("DIAGRAM_ONE", pending.text)
+        self.assertIn("DIAGRAM_TWO", pending.text)
+        self.assertNotIn("SUMMARY", pending.text)
+        self.adapter._active_sessions.pop(key)
+        await self.adapter.handle_message(pending)
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.model.assert_awaited_once()
+        self.assertNotIn("SUMMARY", self.model.await_args.args[0].text)
+
+    async def test_semantic_disabled_is_durable_no_context_no_client(self):
+        from hermes_slack_thread_assignee.config import SemanticPolicy
+        from hermes_slack_thread_assignee.plans import PlanStore
+
+        plans = PlanStore(self.store)
+        plans.initialize()
+        self.gate.semantic = SemanticPolicy()
+        self.gate.jev = AsyncMock()
+        await self.assert_rejected(self.message("<@UBETA> private scope is not authorized"))
+        self.client.conversations_replies.assert_not_awaited()
+        self.gate.jev.ask.assert_not_awaited()
+        self.assertEqual(plans.inspect()[0]["status"], "unresolved")
+
+    async def test_semantic_shared_busy_burst_received_scope(self):
+        self.enable_semantic()
+        _, key = self.source_and_key()
+        self.adapter._active_sessions[key] = asyncio.Event()
+        received = []
+
+        class SharedReceiver:
+            session_authority = object()
+
+            async def receive(self, event):
+                received.append(event.text)
+
+        receiver = SharedReceiver()
+        self.adapter.set_message_handler(receiver.receive)
+        self.adapter._busy_text_mode = "queue"
+        self.adapter._busy_text_debounce_seconds = 0.3
+        self.adapter._busy_text_hard_cap_seconds = 0.6
+        await asyncio.gather(
+            *(
+                self.dispatch(self.message(f"<@UALPHA> SUMMARY_{label}; <@UBETA> DIAGRAM_{label}."))
+                for label in ("ONE", "TWO")
+            )
+        )
+        self.assertEqual(len(received), 1)
+        self.assertIn("DIAGRAM_ONE", received[0])
+        self.assertIn("DIAGRAM_TWO", received[0])
+        self.assertNotIn("SUMMARY", received[0])
+        self.model.assert_not_awaited()
+
+    async def test_semantic_runner_fifo_preserves_scope_and_replay_order(self):
+        self.enable_semantic()
+        _, key = self.source_and_key()
+        self.runner._sessions[key] = self.SessionState()
+        self.adapter._active_sessions[key] = asyncio.Event()
+
+        async def enqueue(event, session_key):
+            self.runner._queue_or_replace_pending_event(session_key, event)
+            return True
+
+        self.adapter.set_busy_session_handler(enqueue)
+        for label in ("ONE", "TWO"):
+            await self.dispatch(self.message(f"<@UALPHA> SUMMARY_{label}; <@UBETA> DIAGRAM_{label}."))
+        self.assertEqual(self.runner._queue_depth(key, adapter=self.adapter), 2)
+        first = self.adapter.get_pending_message(key)
+        second = self.runner._promote_queued_event(key, self.adapter, None)
+        assert first is not None and second is not None
+        self.assertIn("DIAGRAM_ONE", first.text)
+        self.assertIn("DIAGRAM_TWO", second.text)
+        self.assertNotIn("SUMMARY", first.text + second.text)
+        self.adapter._active_sessions.pop(key)
+        self.adapter.set_busy_session_handler(None)
+        for event in (first, second):
+            await self.adapter.handle_message(event)
+            await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.assertEqual(self.model.await_count, 2)
+        self.assertIn("DIAGRAM_ONE", self.model.await_args_list[0].args[0].text)
+        self.assertIn("DIAGRAM_TWO", self.model.await_args_list[1].args[0].text)
+        self.assertTrue(all("SUMMARY" not in call.args[0].text for call in self.model.await_args_list))
+
+    async def test_semantic_original_and_projected_native_denial(self):
+        self.enable_semantic()
+        with patch.dict(os.environ, {"SLACK_IGNORE_OTHER_USER_MENTIONS": "true"}):
+            await self.assert_rejected(self.message("<@UALPHA> SUMMARY_ONLY; DIAGRAM_ONLY."))
+        self.gate.jev.ask.assert_not_awaited()
+        classify = self.gate.jev.ask.side_effect
+
+        async def grounded(batch):
+            result = await classify(batch)
+            result["u1_ref0"] = "yes"
+            return result
+
+        self.gate.jev.ask.side_effect = grounded
+        with patch.dict(os.environ, {"SLACK_STRICT_MENTION": "true"}):
+            await self.assert_rejected(self.message("<@UALPHA> summarize note from <@UBETA>; check diagram."))
+        self.gate.jev.ask.assert_awaited_once()
+
+    async def test_semantic_prior_rich_text_reference_keeps_original(self):
+        from hermes_slack_thread_assignee.plans import PlanStore
+
+        self.enable_semantic()
+        prior = {
+            "ts": "100.001",
+            "user": "UHUMAN",
+            "text": "fallback",
+            "blocks": [
+                {
+                    "type": "rich_text",
+                    "elements": [
+                        {
+                            "type": "rich_text_section",
+                            "elements": [{"type": "text", "text": "PRIOR_DIAGRAM context."}],
+                        }
+                    ],
+                }
+            ],
+        }
+        self.client.conversations_replies.return_value = {"ok": True, "messages": [prior]}
+        classify = self.gate.jev.ask.side_effect
+
+        async def referenced(batch):
+            answer = await classify(batch)
+            answer["u1_ref0"] = "yes"
+            return answer
+
+        self.gate.jev.ask.side_effect = referenced
+        await self.dispatch(self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY."))
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.assertIn("PRIOR_DIAGRAM", self.model.await_args.args[0].text)
+        self.assertNotIn("SUMMARY_ONLY", self.model.await_args.args[0].text)
+        plans = PlanStore(self.store)
+        plan = plans.generation(plans.inspect()[0]["binding"])
+        self.assertEqual(plan.units[1].references[0].original, prior)
+
+    async def test_semantic_duplicate_envelopes_classify_only_once(self):
+        self.enable_semantic()
+        body = self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY.")
+        await self.dispatch(body)
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        duplicate = copy.deepcopy(body)
+        duplicate["event"]["type"] = "app_mention"
+        duplicate["event_id"] = "EvFictionRetry"
+        await self.dispatch(duplicate)
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.gate.jev.ask.assert_awaited_once()
+
+    async def test_semantic_sdk_failure_pending_preserves_native_control(self):
+        self.enable_semantic()
+        _, key = self.source_and_key()
+
+        async def pending_failure(**kwargs):
+            state = self.SessionState()
+            state.persistent.update_prompt_pending = True
+            self.runner._sessions[key] = state
+            raise OSError("fictional SDK failure")
+
+        self.client.conversations_replies.side_effect = pending_failure
+        body = self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY.")
+        await self.dispatch(body)
+        self.assertEqual(self.downstream[-1]["event"]["text"], body["event"]["text"])
+        self.gate.jev.ask.assert_not_awaited()
+
+    async def test_semantic_sdk_fault_is_durable_and_main_preserved(self):
+        from hermes_slack_thread_assignee.plans import PlanStore
+
+        self.enable_semantic()
+        self.client.conversations_replies.side_effect = OSError("fictional SDK failure")
+        await self.assert_rejected(self.message("<@UBETA> check diagram"))
+        self.gate.jev.ask.assert_not_awaited()
+        plans = PlanStore(self.store)
+        metadata = plans.inspect()[0]
+        self.assertEqual(metadata["status"], "unresolved")
+        self.assertEqual(plans.generation(metadata["binding"]).reason, "context-fetch-failed")
+        self.assertEqual(self.store.show(self.key), (self.a, 1))
+
+    async def test_semantic_pending_recheck_after_classifier_preserves_control(self):
+        self.enable_semantic()
+        _, key = self.source_and_key()
+        classify = self.gate.jev.ask.side_effect
+
+        async def become_pending(batch):
+            result = await classify(batch)
+            state = self.SessionState()
+            state.persistent.update_prompt_pending = True
+            self.runner._sessions[key] = state
+            return result
+
+        self.gate.jev.ask.side_effect = become_pending
+        body = self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY.")
+        await self.dispatch(body)
+        self.assertEqual(self.downstream[-1]["event"]["text"], body["event"]["text"])
+
+    async def test_semantic_current_history_excluded_and_root_media_unresolved(self):
+        self.enable_semantic()
+        body = self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY.")
+        root = {"ts": "100.001", "user": "UHUMAN", "text": "Fictional root."}
+        self.client.conversations_replies.return_value = {"ok": True, "messages": [root, body["event"]]}
+        await self.dispatch(body)
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        state = self.gate.jev.ask.await_args.args[0]["state"]
+        self.assertEqual(len(state["prior"]), 1)
+        self.assertNotIn("SUMMARY_ONLY", self.model.await_args.args[0].text)
+        self.model.reset_mock()
+        self.gate.jev.ask.reset_mock()
+        root["files"] = [{"id": "FFICTION", "mimetype": "image/png"}]
+        await self.assert_rejected(self.message("<@UBETA> check root image"))
+        self.gate.jev.ask.assert_not_awaited()
+
     async def test_rejection_precedes_legacy_busy_steer_and_text_merge(self):
         _, key = self.source_and_key()
         self.adapter._active_sessions[key] = asyncio.Event()
@@ -272,6 +568,8 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         await self.assert_rejected(body)
 
     async def test_bot_and_dm_inputs_retain_native_handling(self):
+        self.enable_semantic()
+        self.addCleanup(self.gate.jev.ask.assert_not_awaited)
         for changes in (
             {"user": "UPEER", "bot_id": "BDEMO"},
             {"channel": "DDEMO", "channel_type": "im"},
@@ -283,6 +581,8 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(self.downstream), before + 1)
 
     async def test_exact_monitoring_config_preserves_native_input(self):
+        self.enable_semantic()
+        self.addCleanup(self.gate.jev.ask.assert_not_awaited)
         from hermes_slack_thread_assignee.config import Config
 
         path = self.root / "config.json"
@@ -316,6 +616,8 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 1)
 
     async def test_commands_behind_mention_and_bang_preserve_native_input(self):
+        self.enable_semantic()
+        self.addCleanup(self.gate.jev.ask.assert_not_awaited)
         for text in ("<@UBETA> /help", "<@UBETA> !help"):
             before = len(self.downstream)
             await self.dispatch(self.message(text))

@@ -16,6 +16,20 @@ def parser(result=None):
         result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--config", type=Path, default=os.environ.get("HERMES_THREAD_ASSIGNEE_CONFIG"))
     sub = result.add_subparsers(dest="command", required=True)
+    sub.add_parser("plans", help="Metadata only, at most 100 current plans")
+    for command in ("purge", "recover"):
+        item = sub.add_parser(command)
+        item.add_argument("--binding", required=True)
+        item.add_argument("--expected-fence", type=int, required=True)
+        item.add_argument(
+            "--quiescent",
+            action="store_true",
+            required=True,
+            help="Operator asserts all consumers and queued/replayed work have been stopped",
+        )
+        mode = item.add_mutually_exclusive_group(required=True)
+        mode.add_argument("--dry-run", action="store_true")
+        mode.add_argument("--apply", action="store_true")
     for command in ("init", "status", "check", "show", "establish", "transfer", "clear"):
         item = sub.add_parser(command)
         if command in ("init", "establish", "transfer", "clear"):
@@ -45,8 +59,27 @@ def run(args):
         store = config.store()
         if args.command == "init":
             receipt = store.initialize(args.dry_run)
+            from .plans import PlanStore
+
+            if not args.dry_run:
+                PlanStore(store).initialize()
         elif args.command in ("status", "check"):
             receipt = store.check()
+        elif args.command in ("plans", "purge", "recover"):
+            from .plans import PlanStore
+
+            plans = PlanStore(store)
+            if args.command == "plans":
+                rows = plans.inspect()
+                receipt = {"plans": rows, "limit": 100, "may_have_more": len(rows) == 100}
+            else:
+                receipt = plans.operate(
+                    args.command,
+                    args.binding,
+                    args.expected_fence,
+                    quiescent=args.quiescent,
+                    dry_run=args.dry_run,
+                )
         else:
             key = Thread(args.workspace, args.channel, args.thread)
             if args.command == "show":
