@@ -91,8 +91,10 @@ log keys, transcripts or service error bodies, or store routing decisions.
   the owner. Current explicit specific instructions retain priority. Topic-only recent
   context does not erase a supported root assignee. Historical joint assignments
   preserve their exact recipient set, rather than becoming an all-agent fallback.
-- Retrieval is bounded to four SDK calls of at most 100 records and one second,
-  ending before the ingress deadline minus 1.3 seconds. Missing roots, malformed,
+- Retrieval is bounded to four SDK calls requesting at most 100 replies each and one second,
+  accepting up to 101 records per page only when the extra record is the single
+  thread root (which still undergoes the full context validation). Retrieval ends
+  before the ingress deadline minus 1.3 seconds. Missing roots, malformed,
   foreign/future/conflicting records, cursor loops or unexhausted pages yield no work.
   Pages are accepted up to 1 MiB each/4 MiB total after SDK JSON decoding; these are
   not pre-download memory caps. Native SDK retries may add wire attempts. Slack does

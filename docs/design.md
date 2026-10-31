@@ -34,13 +34,18 @@ its multiplexed profiles; independent processes are outside its native inventory
    inert reference. Reject unsupported media or inseparable composition.
 2. Fetch ascending `conversations_replies` cursor pages through the receiving
    workspace client with exact channel/root, pinned `latest=current timestamp`,
-   `inclusive=False`, `limit=100`. Exhaust cursors within four SDK calls/one second
+   `inclusive=False`, `limit=100` replies. A response may include the root in addition
+   to those replies: accept at most 101 records, and require exactly one root when
+   the record count exceeds 100. Validate that root's scope/identity/order normally;
+   an extra root is not permission for excess replies or an unfinished cursor.
+   Exhaust cursors within four SDK calls/one second
    before selecting a latest window. Retain a rolling seven strictly-prior distinct
    records and pin root independently, deduplicating their union to at most eight.
    Reject missing root, current/future confusion, foreign/malformed/unordered records,
    conflicting duplicates, cursor loops/nonprogress or unexhausted bounds. Exclude
    current even if returned; root-trigger input has no prior self-reference or fetch.
-   Keep at most one page, eight bodies and 400 ID/fingerprint witnesses. Canonicalize
+   Keep at most one page, eight bodies and 401 distinct ID/fingerprint witnesses
+   (400 replies plus the root). Canonicalize
    selected root/recent bodies with original authors/IDs/field provenance; evicted
    older media does not veto the selected view. Historical native bot `markdown`
    and text-only `section` blocks retain their actual visible leaf text and source

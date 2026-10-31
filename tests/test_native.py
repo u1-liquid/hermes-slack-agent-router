@@ -265,6 +265,68 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(invocations[-1].kwargs["cursor"], "fictional-next")
         self.assertNotIn("SUMMARY_ONLY", self.model.await_args.args[0].text)
 
+    async def test_root_plus_requested_replies_page_keeps_actual_latest_seven_and_scoped_input(self):
+        self.enable_semantic()
+        records = [
+            {"ts": f"{100 + i}.001", "user": "UHUMAN", "text": f"Fictional note {i}"} for i in range(140)
+        ]
+        body = self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY.", ts="300.001")
+        pages = [
+            {
+                "ok": True,
+                "messages": records[:101],
+                "has_more": True,
+                "response_metadata": {"next_cursor": "fictional-page-two"},
+            },
+            {"ok": True, "messages": [*records[101:], body["event"]], "has_more": False},
+        ]
+
+        async def page(**kwargs):
+            if "latest" not in kwargs:
+                return {"ok": True, "messages": []}  # Native downstream history is separate.
+            self.assertEqual(kwargs["limit"], 100)
+            self.assertEqual(kwargs["latest"], "300.001")
+            self.assertFalse(kwargs["inclusive"])
+            return pages[1 if kwargs.get("cursor") else 0]
+
+        self.client.conversations_replies.side_effect = page
+        await self.dispatch(body)
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.model.assert_awaited_once()
+        self.assertEqual(self.model.await_args.args[0].text, "DIAGRAM_ONLY.")
+        state = self.gate.jev.ask.await_args.args[0]["state"]
+        self.assertEqual(
+            [h["source_id"] for h in state["prior"].values()],
+            [records[0]["ts"], *[m["ts"] for m in records[-7:]]],
+        )
+        self.assertEqual(state["root"], "h0")
+        self.assertEqual(state["recent"], [f"h{i}" for i in range(1, 8)])
+        calls = [c for c in self.client.conversations_replies.await_args_list if "latest" in c.kwargs]
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("cursor", calls[0].kwargs)
+        self.assertEqual(calls[1].kwargs["cursor"], "fictional-page-two")
+        self.client.chat_postMessage.assert_not_awaited()
+        self.client.chat_postEphemeral.assert_not_awaited()
+
+    async def test_extra_page_record_requires_exactly_one_root_and_retains_context_guards(self):
+        self.enable_semantic()
+        records = [{"ts": f"{100 + i}.001", "user": "UHUMAN", "text": "Fictional note"} for i in range(103)]
+        for data in (
+            {"ok": True, "messages": records[1:102]},  # 101 replies with no root.
+            {"ok": True, "messages": records[:102]},  # Root is not permission for 102 records.
+            {"ok": True, "messages": [records[0], *records[:100]]},  # Two roots in an extra-sized page.
+            {"ok": True, "messages": [{**records[0], "team": "TOTHER"}, *records[1:101]]},
+            {"ok": True, "messages": records[:101], "has_more": True},  # Unfinished cursor.
+            {"ok": True, "messages": records[1:101]},  # Missing root even within nominal count.
+            {"ok": True, "messages": [records[0], None]},
+            {"ok": True, "messages": [records[0], {**records[0], "text": "Conflicting root"}]},
+            {"ok": True, "messages": [records[0], {**records[1], "ts": "301.001"}]},
+        ):
+            with self.subTest(shape=str(data)[:100]):
+                self.client.conversations_replies.return_value = data
+                await self.assert_rejected(self.message("<@UBETA> DIAGRAM_ONLY.", ts="300.001"))
+        self.gate.jev.ask.assert_not_awaited()
+
     async def test_ordinary_reply_after_native_bot_markdown_reaches_assigned_model(self):
         from slack_sdk.web.async_slack_response import AsyncSlackResponse
 

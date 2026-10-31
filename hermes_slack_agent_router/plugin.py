@@ -88,7 +88,12 @@ class Gate:
                 if (
                     data.get("ok") is not True
                     or not isinstance(messages, list)
-                    or len(messages) > 100
+                    # Slack can return the requested replies PLUS the thread root.
+                    or len(messages) > args["limit"] + 1
+                    or (
+                        len(messages) > args["limit"]
+                        and sum(isinstance(m, dict) and m.get("ts") == thread.root for m in messages) != 1
+                    )
                     or size > 1048576
                     or total > 4194304
                     or not isinstance(metadata, dict)
