@@ -35,7 +35,11 @@ def snapshot(text="Atlas, revise the summary; Birch, check the diagram."):
 def controlled_answers(batch, choices):
     # Explicit local facts supplied by each fixture; no inferred tier/witness oracle.
     defaults = {
-        name: "absent" if name.endswith("_address") else "none" if "none" in q["criteria"] else "no"
+        name: ("nonexplicit" if "nonexplicit" in q["criteria"] else "absent")
+        if name.endswith("_address")
+        else "none"
+        if "none" in q["criteria"]
+        else "no"
         for name, q in batch["questions"].items()
     }
     defaults.update(choices)
@@ -61,8 +65,8 @@ def two_topic_answers(batch):
             "u1_kind": "action",
             "u0_destination": "specific",
             "u1_destination": "specific",
-            "u0_address": "explicit",
-            "u1_address": "explicit",
+            "u0_specific_address": "explicit",
+            "u1_specific_address": "explicit",
             "u0_link0": "yes",
             "u1_link1": "yes",
             "u0_to0": "yes",
@@ -170,7 +174,7 @@ class SemanticTests(unittest.TestCase):
             history=tuple(History(f"{i}.0", "UFABLE", "x" * 6000) for i in range(1, 9)),
         )
         batch = prepare(source)
-        self.assertEqual(len(batch["questions"]), 168)
+        self.assertEqual(len(batch["questions"]), 174)
         self.assertEqual(batch["state"]["recent"], [f"h{i}" for i in range(1, 8)])
         self.assertEqual(batch["state"]["root"], "h0")
         self.assertLess(
@@ -295,7 +299,7 @@ class SemanticTests(unittest.TestCase):
                 "u0_destination": "specific",
                 "u0_link0": "yes",
                 "u0_link1": "yes",
-                "u0_address": "explicit",
+                "u0_specific_address": "explicit",
                 "u0_to0": "yes",
                 "u0_to1": "yes",
             },
@@ -320,9 +324,9 @@ class SemanticTests(unittest.TestCase):
                 "u1_destination": "specific",
                 "u2_destination": "specific",
                 "u0_to0": "yes",
-                "u0_address": "explicit",
-                "u1_address": "explicit",
-                "u2_address": "explicit",
+                "u0_specific_address": "explicit",
+                "u1_specific_address": "explicit",
+                "u2_specific_address": "explicit",
                 "u1_to1": "yes",
                 "u2_to0": "yes",
                 "same0_1": "yes",
@@ -348,7 +352,7 @@ class SemanticTests(unittest.TestCase):
                 "u0_destination": "specific",
                 "u0_link1": "yes",
                 "u0_fact1": "assign:r1",
-                "u0_address": "contextual",
+                "u0_specific_address": "nonexplicit",
             },
         )
         self.assertEqual(plan.units[0].recipients, (B,))
@@ -384,7 +388,7 @@ class SemanticTests(unittest.TestCase):
                 "u1_kind": "action",
                 "u1_destination": "specific",
                 "u1_to0": "yes",
-                "u1_address": "explicit",
+                "u1_specific_address": "explicit",
                 "u1_link0": "yes",
             },
         )
@@ -435,7 +439,7 @@ class SemanticTests(unittest.TestCase):
                             "u1_destination": "specific",
                             "u1_link1": "yes",
                             "u1_to1": "yes",
-                            "u1_address": "explicit",
+                            "u1_specific_address": "explicit",
                             **conflict,
                         },
                     )
@@ -452,7 +456,7 @@ class SemanticTests(unittest.TestCase):
             "u1_kind": "action",
             "u1_destination": "specific",
             "u1_to1": "yes",
-            "u1_address": "explicit",
+            "u1_specific_address": "explicit",
         }
         raw = controlled_answers(batch, choices)
         # Irrelevant negative membership is not needed to qualify an otherwise safe ACK.
@@ -516,12 +520,109 @@ class SourceLocalProof(unittest.TestCase):
     def plan(self, source, **choices):
         batch = prepare(source)
         defaults = {
-            name: "none" if "none" in q["criteria"] else "no" for name, q in batch["questions"].items()
+            name: ("nonexplicit" if "nonexplicit" in q["criteria"] else "absent")
+            if name.endswith("_address")
+            else "none"
+            if "none" in q["criteria"]
+            else "no"
+            for name, q in batch["questions"].items()
         }
         defaults.update(coverage="complete", u0_kind="action", u0_destination="specific", u0_address="absent")
         defaults.update(choices)
         answers = {name: defaults[name] for name in batch["questions"]}
         return assemble(source, answers)
+
+    def test_coarse_nonexplicit_preserves_root_and_contextual_author(self):
+        for text in ("Please revise the summary.", "Please revise the summary you prepared."):
+            source = self.source(text=text)
+            plan = self.plan(
+                source,
+                u0_specific_address="nonexplicit",
+                u0_address="unknown",
+                u0_fact0="assign:r0",
+                u0_link0="yes",
+            )
+            self.assertEqual(plan.status, "ready", plan.reason)
+            self.assertEqual(plan.units[0].recipients, (A,))
+            self.assertIn(text, plan.view(A))
+            self.assertFalse(plan.view(B))
+
+    def test_coarse_explicit_joint_and_complete_address_safety(self):
+        source = self.source(text="Atlas and Birch, revise the summary.")
+        plan = self.plan(source, u0_specific_address="explicit", u0_to0="yes", u0_to1="yes")
+        self.assertEqual(plan.status, "ready", plan.reason)
+        self.assertEqual(plan.units[0].recipients, (A, B))
+        for unsafe in ("outside", "mixed", "unknown"):
+            partial = replace(source, text="Atlas and an unregistered reviewer, revise the summary.")
+            plan = self.plan(partial, u0_specific_address=unsafe, u0_to0="yes")
+            self.assertEqual(plan.status, "unresolved", unsafe)
+            self.assertFalse(plan.view(A) or plan.view(B))
+
+    def test_coarse_split_preserves_nonaction_contradiction_and_atomic_sibling(self):
+        source = self.source(text="Thanks; Birch, check the diagram.")
+        choices = {
+            "u0_kind": "ack",
+            "u0_destination": "none",
+            "u0_address": "absent",
+            "u1_kind": "action",
+            "u1_destination": "specific",
+            "u1_specific_address": "explicit",
+            "u1_to1": "yes",
+        }
+        plan = self.plan(source, **choices)
+        self.assertEqual(plan.status, "ready", plan.reason)
+        self.assertTrue(plan.view(B))
+        for kind in ("ack", "reference"):
+            for address in ("contextual", "explicit", "outside", "mixed", "unknown"):
+                plan = self.plan(source, **{**choices, "u0_kind": kind, "u0_address": address})
+                self.assertEqual(plan.status, "unresolved", (kind, address))
+                self.assertFalse(plan.view(A) or plan.view(B))
+
+    def test_coarse_confidence_and_malformed_answers_are_branch_safety(self):
+        source = self.source()
+        batch = prepare(source)
+        choices = {
+            "coverage": "complete",
+            "u0_kind": "action",
+            "u0_destination": "specific",
+            "u0_specific_address": "nonexplicit",
+            "u0_fact0": "assign:r0",
+            "u0_link0": "yes",
+        }
+        raw = controlled_answers(batch, {**choices, "u0_address": "unknown"})
+        raw["answers"]["u0_address"]["confidence"] = 0.1
+        self.assertEqual(assemble(source, validate_answers(batch, raw)).status, "ready")
+        for mutation in ("low", "nan", "missing", "criteria", "choice"):
+            raw = controlled_answers(batch, choices)
+            coarse = raw["answers"]["u0_specific_address"]
+            if mutation == "low":
+                coarse["confidence"] = 0.79
+            elif mutation == "nan":
+                coarse["probabilities"]["unknown"] = float("nan")
+            elif mutation == "missing":
+                raw["answers"].pop("u0_specific_address")
+            elif mutation == "criteria":
+                coarse["probabilities"]["contextual"] = 0.0
+            else:
+                coarse["choice"] = "contextual"
+            with self.subTest(mutation=mutation), self.assertRaises(JevError):
+                validate_answers(batch, raw)
+        sibling = self.source(text="Thanks; Birch, check the diagram.")
+        batch = prepare(sibling)
+        choices = {
+            "coverage": "complete",
+            "u0_kind": "ack",
+            "u0_destination": "none",
+            "u1_kind": "action",
+            "u1_destination": "specific",
+            "u1_specific_address": "explicit",
+            "u1_to1": "yes",
+        }
+        raw = controlled_answers(batch, choices)
+        self.assertEqual(assemble(sibling, validate_answers(batch, raw)).status, "ready")
+        raw["answers"]["u0_address"]["confidence"] = 0.79
+        with self.assertRaisesRegex(JevError, "uncertain relevant answer: u0_address"):
+            validate_answers(batch, raw)
 
     def test_source_local_original_root_and_takeover_paths(self):
         source = self.source(root="Birch reviews diagrams; Atlas leads this thread and prepares the summary.")
@@ -590,7 +691,7 @@ class SourceLocalProof(unittest.TestCase):
             "u0_fact0": "assign:r0",
             "u0_link0": "yes",
         }
-        for name in ("u0_fact7", "u0_link7", "u0_to1", "u0_address"):
+        for name in ("u0_fact7", "u0_link7", "u0_to1", "u0_specific_address"):
             raw = controlled_answers(batch, choices)
             raw["answers"][name]["confidence"] = 0.79
             with self.subTest(name=name), self.assertRaises(JevError):
@@ -648,7 +749,7 @@ class SourceLocalProof(unittest.TestCase):
     @unittest.skipUnless(
         os.environ.get("JEV_SOURCE_LOCAL_RECORDED_DIR"), "explicit immutable source-local recording bridge"
     )
-    def test_recorded_source_local_request_binding_and_retained_abstentions(self):
+    def test_recorded_source_local_request_binding_and_native_delivery(self):
         root = Path(os.environ["JEV_SOURCE_LOCAL_RECORDED_DIR"])
         for name in ("root-generic", "recent-handoff", "root-topic", "recent-topic"):
             with self.subTest(case=name):
@@ -673,14 +774,10 @@ class SourceLocalProof(unittest.TestCase):
                 self.assertEqual(json.loads(json.dumps({"model": JevClient.model, **batch})), request)
                 raw = json.loads((directory / "jev-result.json").read_text())
                 received = (directory / "native-received.txt").read_text()
-                if name in ("root-topic", "recent-topic"):
-                    with self.assertRaisesRegex(JevError, "uncertain relevant answer: u0_address"):
-                        validate_answers(batch, raw)
-                    self.assertEqual(received, "")  # Preserved failed delivery, not a passing journey.
-                else:
-                    plan = assemble(source, validate_answers(batch, raw))
-                    self.assertEqual(plan.status, "ready", plan.reason)
-                    self.assertEqual([plan.view(r) for r in source.recipients if plan.view(r)], [received])
+                plan = assemble(source, validate_answers(batch, raw))
+                self.assertEqual(plan.status, "ready", plan.reason)
+                self.assertTrue(received)
+                self.assertEqual([plan.view(r) for r in source.recipients if plan.view(r)], [received])
 
     def test_source_local_plain_conflict_dispute_and_unknown_are_atomic(self):
         source = self.source(recent="Birch will prepare the summary.")
@@ -692,12 +789,19 @@ class SourceLocalProof(unittest.TestCase):
     def test_source_local_explicit_current_joint_controls_and_partial_outside_rejects(self):
         source = self.source(text="Atlas and Birch, revise the summary.")
         plan = self.plan(
-            source, u0_address="explicit", u0_to0="yes", u0_to1="yes", u0_fact0="assign:r0", u0_link0="yes"
+            source,
+            u0_specific_address="explicit",
+            u0_to0="yes",
+            u0_to1="yes",
+            u0_fact0="assign:r0",
+            u0_link0="yes",
         )
         self.assertEqual(plan.status, "ready", plan.reason)
         self.assertEqual(plan.units[0].recipients, (A, B))
         for address in ("outside", "mixed", "unknown"):
-            self.assertEqual(self.plan(source, u0_address=address, u0_to0="yes").status, "unresolved")
+            self.assertEqual(
+                self.plan(source, u0_specific_address=address, u0_to0="yes").status, "unresolved"
+            )
 
 
 class APITransportTests(unittest.IsolatedAsyncioTestCase):

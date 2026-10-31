@@ -84,7 +84,7 @@ log keys, transcripts or service error bodies, or store routing decisions.
   not pre-download memory caps. Native SDK retries may add wire attempts. Slack does
   not provide an atomic history snapshot; unseen concurrent edits/deletions can race.
 - Current input is limited to 6,000 characters, six units, four recipients and
-  168 questions. Up to eight distinct prior records have 6,000 characters each
+  174 questions. Up to eight distinct prior records have 6,000 characters each
   (48,000 aggregate), with a 64 KiB retained original-record limit. The Jev request
   limit is 524,288 bytes; its response limit is 262,144 bytes. Nothing is silently
   truncated. Selected media and inseparable authored/reference composition are unsupported.

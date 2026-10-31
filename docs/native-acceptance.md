@@ -119,8 +119,9 @@ the recordings or establish a fresh external-service result.
 For a source-local four-case recording, set `JEV_SOURCE_LOCAL_RECORDED_DIR` and run
 `test_semantic.py -k recorded_source_local`. This checks exact generated requests,
 validates typed answers and compares assembled text with the saved native input.
-Recorded confidence abstentions remain failed deliveries; the bridge verifies
-that those failures are preserved rather than claiming the journeys passed.
+Every case must have a qualified ready plan and nonempty matching saved delivery.
+Recorded confidence abstentions remain failed deliveries, not passing bridge cases;
+older protocol recordings require their matching historical source for exact replay.
 
 ## Operational boundaries
 

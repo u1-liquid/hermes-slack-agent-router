@@ -47,6 +47,12 @@ its multiplexed profiles; independent processes are outside its native inventory
    sorted recipients. There is no receiving-agent preference in the model input.
    Questions classify action/reference/acknowledgement, destination, CURRENT-only
    addressing/membership, local source context links and task/lead assignment facts.
+   Specific actions use a coarse complete-address Choice: explicit registered set,
+   nonexplicit (contextual person or unstated assignee), outside, mixed or unknown.
+   Contextual and unstated cases consume the same local historical proof. A separate
+   original fine address audit remains confidence-gated for ack/reference units,
+   where contextual/explicit addressing contradicts nonaction; it is not consumed
+   by specific actions. Generic actions consume neither address family, as before.
    Each historical fact describes only that message's own assignment, acceptance,
    proposal author or explicit takeover. It never judges later supersession or a
    globally selected recipient. Closed-set labels encode complete recipient subsets,
@@ -98,7 +104,7 @@ The request owns and closes its asynchronous response/client on cancellation.
 
 Current text is capped at 6,000 characters; selected history at eight distinct
 records/6,000 characters each/48,000 total; current units at six, recipients at four,
-questions at 168 (the maximum six-unit/eight-prior/four-recipient shape). Serialized Jev request and
+questions at 174 (the maximum six-unit/eight-prior/four-recipient shape). Serialized Jev request and
 response limits are 524,288 and 262,144 bytes respectively. Retained original records
 are capped at 64 KiB; decoded Slack pages at 1 MiB each/4 MiB total. SDK JSON buffering
 precedes those checks: they are acceptance limits, not hard socket/RSS limits. Native

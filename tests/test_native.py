@@ -778,7 +778,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                         "u0_kind": "action",
                         "u0_destination": "specific",
                         "u0_to1": "yes",
-                        "u0_address": "explicit",
+                        "u0_specific_address": "explicit",
                     },
                 ),
             )
@@ -932,9 +932,9 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 u0_kind="action",
                 u1_kind="action",
                 u0_destination="specific",
-                u0_address="explicit",
+                u0_specific_address="explicit",
                 u1_destination="specific",
-                u1_address="explicit",
+                u1_specific_address="explicit",
                 u0_link1="yes",
                 u1_link2="yes",
                 u0_to0="yes",
@@ -971,7 +971,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 coverage="complete",
                 u0_kind="action",
                 u0_destination="specific",
-                u0_address="explicit",
+                u0_specific_address="explicit",
                 u0_link1="yes",
                 u0_link2="yes",
                 u0_to0="yes",
@@ -1023,11 +1023,11 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 answers.update(
                     u0_to1="no",
                     u0_to0="yes",
-                    u0_address="explicit",
+                    u0_specific_address="explicit",
                     u0_fact0="none",
                     u1_kind="action",
                     u1_destination="specific",
-                    u1_address="explicit",
+                    u1_specific_address="explicit",
                     u1_link0="yes",
                     u1_to1="yes",
                 )
@@ -1315,7 +1315,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 coverage="complete",
                 u0_kind="action",
                 u0_destination="specific",
-                u0_address="explicit",
+                u0_specific_address="explicit",
                 u0_to1="yes",
             )
             return result
@@ -1391,7 +1391,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 coverage="complete",
                 u0_kind="action",
                 u0_destination="specific",
-                u0_address="explicit",
+                u0_specific_address="explicit",
                 u0_to0="yes",
                 u0_to1="yes",
             )
@@ -1649,11 +1649,12 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 u0_mixed="yes",
                 u0_destination="specific",
                 u0_address="explicit",
+                u0_specific_address="explicit",
                 u0_link0="yes",
                 u0_to0="yes",
                 u1_kind="action",
                 u1_destination="specific",
-                u1_address="explicit",
+                u1_specific_address="explicit",
                 u1_to1="yes",
             )
             return answer

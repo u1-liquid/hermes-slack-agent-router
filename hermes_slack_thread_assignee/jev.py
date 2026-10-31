@@ -45,6 +45,8 @@ def validate_answers(batch, result, confidence=0.8):
                     "ack",
                     "reference",
                 )
+                if field == "address" and selected.get(unit + "_kind") == "action":
+                    relevant = False  # Specific actions consume the complete coarse specific_address audit.
                 if selected.get(unit + "_destination") == "generic" and field not in (
                     "kind",
                     "mixed",

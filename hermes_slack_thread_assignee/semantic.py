@@ -37,7 +37,7 @@ class Snapshot:
 
     original: dict | None = None
     provenance: tuple[dict, ...] = ()
-    protocol: str = "choice-source-local-v3"
+    protocol: str = "choice-branch-address-v4"
 
     def __post_init__(self):
         object.__setattr__(
@@ -261,6 +261,22 @@ def prepare(source: Snapshot):
             },
         )
         choice(
+            prefix + "_specific_address",
+            f"Using ONLY CURRENT unit {prefix}, audit its COMPLETE directly named/ID addressee set. "
+            "Explicit requires every directly assigned recipient to be registered. Include outside users; "
+            "do not report only a registered subset of a joint request. If no explicit named/ID assignment "
+            "exists, contextual 'you'/proposal-author address AND an unstated assignee are the SAME "
+            "nonexplicit result: historical task facts resolve either. Do not distinguish those two here. "
+            "A polite imperative alone is nonexplicit; quoted mentions are inert.",
+            {
+                "explicit": "Complete explicit registered addressee set in this CURRENT unit",
+                "nonexplicit": "No explicit named/ID assignment; contextual person OR unstated assignee",
+                "outside": "At least one required directly addressed recipient is outside the candidate set",
+                "mixed": "Inseparably mixed addressing",
+                "unknown": "Uncertain complete address",
+            },
+        )
+        choice(
             prefix + "_kind",
             f"Classify ONLY state.units.{prefix}.text. An imperative or polite request for work is action. "
             "An acknowledgement in a DIFFERENT sibling unit does not change this unit's kind. "
@@ -345,7 +361,7 @@ def prepare(source: Snapshot):
                 "ack/reference-only units. This is not a recipient or ownership judgment.",
                 yes,
             )
-    if len(questions) > 168:
+    if len(questions) > 174:
         raise SemanticError("typed question budget exceeded")
     return {"state": state, "questions": questions}
 
@@ -415,6 +431,7 @@ def assemble(source: Snapshot, answers):
             key: value
             for key, value in answers.items()
             if key.startswith(prefix + "_")
+            and key != prefix + "_address"  # Original fine audit is consumed only by nonaction above.
             and (
                 destination != "generic"
                 or key in (prefix + "_kind", prefix + "_mixed", prefix + "_destination")
@@ -434,8 +451,8 @@ def assemble(source: Snapshot, answers):
         else:
             labels = [answers[f"{prefix}_fact{j}"] for j in range(len(source.history))]
             links = [answers[f"{prefix}_link{j}"] for j in range(len(source.history))]
-            address = answers[prefix + "_address"]
-            if address not in ("explicit", "contextual", "absent"):
+            address = answers[prefix + "_specific_address"]
+            if address not in ("explicit", "nonexplicit"):
                 return unresolved("incomplete-current-address")
             if any(members(label) and links[j] != "yes" for j, label in enumerate(labels)):
                 return unresolved("assignment-link-contradiction")
