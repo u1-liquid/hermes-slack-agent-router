@@ -25,7 +25,7 @@ class Gate:
     @staticmethod
     def unresolved(reason):
         # Fixed local reason codes only: no transcript, raw model answer or durable queue.
-        logger.warning("thread-assignee unresolved: %s", reason)
+        logger.warning("agent-router unresolved: %s", reason)
 
     @staticmethod
     def native_policy(adapter, event, bot):
@@ -266,7 +266,7 @@ class Gate:
                     return BoltResponse(status=200, body="")
                 req.body = projected
             except Uncertain:
-                logger.debug("thread-assignee native exemption or unknown identity/control; pass-through")
+                logger.debug("agent-router native exemption or unknown identity/control; pass-through")
             except TopologyError:
                 self.unresolved("native-topology-unresolved")
                 return BoltResponse(status=200, body="")

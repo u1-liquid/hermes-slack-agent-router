@@ -17,9 +17,14 @@ Install into the same Python environment that runs Hermes:
 
 ```sh
 python -m pip install 'git+https://github.com/u1-liquid/hermes-slack-agent-router.git@feat/stable-thread-assignee'
-hermes plugins enable slack-thread-assignee
-hermes plugins doctor slack-thread-assignee --ci
+hermes plugins enable slack-agent-router
+hermes plugins doctor slack-agent-router --ci
 ```
+
+The distribution is `hermes-slack-agent-router`, the Python package is
+`hermes_slack_agent_router`, and the native plugin/entry point is `slack-agent-router`.
+The installation ref above is the existing Git branch, not a package identifier.
+No legacy package or plugin alias is installed.
 
 Enable it for every receiving profile that should use selective routing. Use the
 normal Hermes secret setup to make `TYPESAFE_API_KEY` available to each profile
@@ -121,8 +126,8 @@ lifecycle when activating a replacement; plugin commands alone do not prove it a
 A disabled or broken plugin is not a universal fail-closed enforcement boundary.
 
 ```sh
-hermes plugins disable slack-thread-assignee
-python -m pip uninstall hermes-slack-thread-assignee
+hermes plugins disable slack-agent-router
+python -m pip uninstall hermes-slack-agent-router
 ```
 
 ## Development and verification

@@ -9,8 +9,8 @@ python -m pip install . ruff==0.17.3 build
 python -W error::ResourceWarning -m unittest discover -s tests -p test_core.py -v
 python -W error::ResourceWarning -m unittest discover -s tests -p test_semantic.py -v
 python -W error::ResourceWarning -m unittest discover -s tests -p test_boundaries.py -v
-ruff check hermes_slack_thread_assignee tests
-ruff format --check hermes_slack_thread_assignee tests
+ruff check hermes_slack_agent_router tests
+ruff format --check hermes_slack_agent_router tests
 python -m build
 ```
 
@@ -68,6 +68,7 @@ separate target, outside the source checkout:
 python -m build
 python -m pip install --target /absolute/path/to/empty-wheel-target dist/*.whl
 export HERMES_WHEEL_TARGET=/absolute/path/to/empty-wheel-target
+export HERMES_DIST_DIR=/absolute/path/to/repository/dist
 export HERMES_REQUIRE_WHEEL=1
 cd /absolute/path/outside/source
 python -I -W error::ResourceWarning -m unittest discover -s /absolute/path/to/repository/tests -p test_installed.py -v

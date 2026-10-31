@@ -5,8 +5,8 @@ from dataclasses import replace
 
 from test_semantic import A, B, snapshot
 
-from hermes_slack_thread_assignee.policy import Recipient, Thread
-from hermes_slack_thread_assignee.semantic import SemanticError, prepare
+from hermes_slack_agent_router.policy import Recipient, Thread
+from hermes_slack_agent_router.semantic import SemanticError, prepare
 
 
 class BoundaryTests(unittest.TestCase):

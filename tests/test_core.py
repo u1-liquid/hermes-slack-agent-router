@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hermes_slack_thread_assignee.policy import Recipient, Thread, addresses
+from hermes_slack_agent_router.policy import Recipient, Thread, addresses
 
 A = Recipient("TDEMO", "UALPHA", "alpha")
 B = Recipient("TDEMO", "UBETA", "beta")
@@ -47,7 +47,7 @@ class CoreTests(unittest.TestCase):
     def test_startup_receiver(self):
         from unittest.mock import Mock
 
-        from hermes_slack_thread_assignee.plugin import register
+        from hermes_slack_agent_router.plugin import register
 
         ctx = Mock()
         register(ctx)

@@ -9,9 +9,9 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
-from hermes_slack_thread_assignee.jev import JevClient, JevError, validate_answers
-from hermes_slack_thread_assignee.policy import Recipient, Thread
-from hermes_slack_thread_assignee.semantic import History, Plan, SemanticError, Snapshot, assemble, prepare
+from hermes_slack_agent_router.jev import JevClient, JevError, validate_answers
+from hermes_slack_agent_router.policy import Recipient, Thread
+from hermes_slack_agent_router.semantic import History, Plan, SemanticError, Snapshot, assemble, prepare
 
 A = Recipient("TFICTION", "UATLAS", "atlas")
 B = Recipient("TFICTION", "UBIRCH", "birch")
@@ -469,7 +469,7 @@ class SemanticTests(unittest.TestCase):
                 validate_answers(batch, raw)
 
     def test_composition_provenance_and_inseparable_code(self):
-        from hermes_slack_thread_assignee.bridge import canonical_text
+        from hermes_slack_agent_router.bridge import canonical_text
 
         event = {
             "blocks": [

@@ -18,13 +18,16 @@ class NamespaceIdentity(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         metadata = tomllib.loads((root / "pyproject.toml").read_text())
         self.assertEqual(metadata["project"]["name"], "hermes-slack-agent-router")
-        self.assertEqual(metadata["project"]["entry-points"]["hermes_agent.plugins"],
-                         {"slack-agent-router": "hermes_slack_agent_router:register"})
+        self.assertEqual(
+            metadata["project"]["entry-points"]["hermes_agent.plugins"],
+            {"slack-agent-router": "hermes_slack_agent_router:register"},
+        )
 
     def test_new_package_is_real_and_no_legacy_import_alias(self):
         root = Path(__file__).resolve().parents[1]
         self.assertTrue((root / "hermes_slack_agent_router").is_dir())
         package = importlib.import_module("hermes_slack_agent_router")
+        assert package.__file__
         self.assertTrue(Path(package.__file__).resolve().is_relative_to(root / "hermes_slack_agent_router"))
         self.assertTrue(callable(package.register))
         self.assertIsNone(importlib.util.find_spec("hermes_slack_" + "thread_assignee"))
@@ -40,7 +43,7 @@ class PluginSurface(unittest.TestCase):
         from hermes_cli.plugin_dev import doctor_plugin
         from hermes_cli.plugins import PluginManager
 
-        package = Path(__file__).resolve().parents[1] / "hermes_slack_thread_assignee"
+        package = Path(__file__).resolve().parents[1] / "hermes_slack_agent_router"
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
             with patch.dict(os.environ, {"HERMES_HOME": str(root)}):
@@ -49,6 +52,7 @@ class PluginSurface(unittest.TestCase):
                 manifests = manager._scan_directory(package.parent, source="user", skip_names={".venv"})
                 matches = [m for m in manifests if m.name == "slack-agent-router"]
                 self.assertEqual(len(matches), 1)
+                self.assertNotIn("slack-" + "thread-assignee", [m.name for m in manifests])
                 manager._load_plugin(matches[0])
                 self.assertIsNone(manager._plugins["slack-agent-router"].error)
                 self.assertEqual(len(manager.get_platform_handler_factories("slack")), 1)

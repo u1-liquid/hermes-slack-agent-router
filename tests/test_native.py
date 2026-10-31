@@ -17,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from hermes_slack_thread_assignee.policy import Recipient, Thread
+from hermes_slack_agent_router.policy import Recipient, Thread
 
 SOURCE = os.environ.get("HERMES_TEST_SOURCE")
 if os.environ.get("HERMES_REQUIRE_NATIVE") == "1" and not SOURCE:
@@ -71,7 +71,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         from slack_bolt.async_app import AsyncApp
         from slack_bolt.authorization import AuthorizeResult
 
-        from hermes_slack_thread_assignee.plugin import Gate
+        from hermes_slack_agent_router.plugin import Gate
 
         self.SessionState = SessionState
         self.a = Recipient("TDEMO", "UALPHA", "default")
@@ -288,7 +288,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
     async def test_history_cursor_cutoff_overlap_and_failures(self):
         import time
 
-        from hermes_slack_thread_assignee.semantic import SemanticError
+        from hermes_slack_agent_router.semantic import SemanticError
 
         root = {"ts": "100.001", "user": "UHUMAN", "text": "Fictional root", "edited": {"ts": "110.001"}}
         child = {"ts": "101.001", "user": "UBETA", "text": "Fictional prior"}
@@ -448,8 +448,8 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         from slack_bolt.authorization import AuthorizeResult
         from slack_bolt.request.async_request import AsyncBoltRequest
 
-        from hermes_slack_thread_assignee.bridge import Bridge
-        from hermes_slack_thread_assignee.plugin import Gate
+        from hermes_slack_agent_router.bridge import Bridge
+        from hermes_slack_agent_router.plugin import Gate
 
         self.enable_semantic()
         body = self.message("<@UALPHA> revise SUMMARY_ONLY; <@UBETA> check DIAGRAM_ONLY.")
@@ -496,7 +496,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.peer._session_tasks)
 
     async def test_native_factory_no_config_late_rewire_unload_and_same_client_limit(self):
-        from hermes_slack_thread_assignee.plugin import register
+        from hermes_slack_agent_router.plugin import register
 
         self.enable_semantic()
         self.gate.dispose()
@@ -504,10 +504,10 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         register(ctx)
         factory = ctx.register_platform_handler.call_args.args[1]
         manager = Mock()
-        manager.get_platform_handler_factories.return_value = [(factory, "slack-thread-assignee")]
+        manager.get_platform_handler_factories.return_value = [(factory, "slack-agent-router")]
         with (
             patch("hermes_cli.plugins.get_plugin_manager", return_value=manager),
-            patch("hermes_slack_thread_assignee.plugin.JevClient", return_value=self.gate.jev),
+            patch("hermes_slack_agent_router.plugin.JevClient", return_value=self.gate.jev),
         ):
             # Native startup may attach before sockets or the live map are ready.
             with patch.object(self.adapter, "_running", False):
@@ -526,7 +526,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             replacement = Mock()
             register(replacement)
             manager.get_platform_handler_factories.return_value = [
-                (replacement.register_platform_handler.call_args.args[1], "slack-thread-assignee")
+                (replacement.register_platform_handler.call_args.args[1], "slack-agent-router")
             ]
             self.adapter.rewire_plugin_handlers()
             await self.dispatch(self.message("<@UBETA> native after unload"))
@@ -538,7 +538,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
     async def test_native_nondefault_primary_and_event_routed_secondary(self):
         from gateway.profile_routing import ProfileRoute
 
-        from hermes_slack_thread_assignee.bridge import Bridge
+        from hermes_slack_agent_router.bridge import Bridge
 
         self.runner._primary_profile_name = "captain"
         self.runner.config._runtime_profile_homes = [("captain", self.home), ("peer", self.peer_home)]
@@ -557,7 +557,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             (Recipient("TDEMO", "UALPHA", "peer"), Recipient("TDEMO", "UBETA", "peer")),
         )
         self.runner.session_authorities.remove(self.peer_home)
-        from hermes_slack_thread_assignee.bridge import TopologyError
+        from hermes_slack_agent_router.bridge import TopologyError
 
         with self.assertRaises(TopologyError):
             await bridge.participants(bound)
@@ -565,7 +565,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
     async def test_native_hot_removed_disconnected_foreign_and_incidental_participants(self):
         from gateway.config import Platform
 
-        from hermes_slack_thread_assignee.bridge import Bridge
+        from hermes_slack_agent_router.bridge import Bridge
 
         bridge = Bridge(self.adapter)
         bound = await bridge.bind(self.message())
@@ -758,7 +758,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         from agent.secret_scope import reset_secret_scope, set_secret_scope
         from test_semantic import controlled_answers
 
-        from hermes_slack_thread_assignee.jev import JevClient
+        from hermes_slack_agent_router.jev import JevClient
 
         self.enable_semantic()
         self.gate.jev = JevClient()
@@ -807,8 +807,8 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         from agent import secret_scope
         from test_semantic import snapshot, two_topic_answers
 
-        from hermes_slack_thread_assignee.jev import JevClient, JevError
-        from hermes_slack_thread_assignee.semantic import prepare
+        from hermes_slack_agent_router.jev import JevClient, JevError
+        from hermes_slack_agent_router.semantic import prepare
 
         batch = prepare(snapshot())
         seen = []
@@ -857,7 +857,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         import httpx
         from agent.secret_scope import reset_secret_scope, set_secret_scope
 
-        from hermes_slack_thread_assignee.jev import JevClient
+        from hermes_slack_agent_router.jev import JevClient
 
         self.enable_semantic()
         self.gate.jev = JevClient()
@@ -986,7 +986,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         await self.dispatch(original)
         await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
         self.model.assert_awaited_once()
-        from hermes_slack_thread_assignee.plugin import Gate
+        from hermes_slack_agent_router.plugin import Gate
 
         fresh = Gate()
         fresh.jev = self.gate.jev
@@ -1257,7 +1257,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
 
         self.enable_semantic()
         self.client.conversations_replies.side_effect = OSError("fictional SDK failure")
-        with self.assertLogs("hermes_slack_thread_assignee.plugin", level="WARNING") as logs:
+        with self.assertLogs("hermes_slack_agent_router.plugin", level="WARNING") as logs:
             await self.assert_rejected(self.message("<@UBETA> check diagram"))
         self.gate.jev.ask.assert_not_awaited()
         self.assertIn("context-fetch-failed", logs.output[0])
@@ -1483,7 +1483,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         from gateway.profile_routing import ProfileRoute
         from hermes_cli.profiles import get_profile_dir
 
-        from hermes_slack_thread_assignee.bridge import Bridge, Uncertain
+        from hermes_slack_agent_router.bridge import Bridge, Uncertain
 
         profile = get_profile_dir("demo-routed")
         self.assertTrue(profile.is_relative_to(self.home), "test must never write a live profile")
@@ -1559,7 +1559,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         await self.assert_rejected(self.message("ordinary API input", app_id="ADEMO", client_msg_id=""))
 
     async def test_file_metadata_ambiguity_timeout_and_order(self):
-        from hermes_slack_thread_assignee.bridge import Bridge, Uncertain
+        from hermes_slack_agent_router.bridge import Bridge, Uncertain
 
         bridge = Bridge(self.adapter)
         body = {
@@ -1675,7 +1675,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         busy.assert_not_awaited()
 
     async def test_jev_failure_and_late_pending_no_invented_work_or_control_loss(self):
-        from hermes_slack_thread_assignee.jev import JevError
+        from hermes_slack_agent_router.jev import JevError
 
         self.enable_semantic()
         self.gate.jev.ask.side_effect = JevError("fictional timeout")
@@ -1711,7 +1711,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         from agent.secret_scope import reset_secret_scope, set_secret_scope
         from test_semantic import RecordingJev
 
-        from hermes_slack_thread_assignee.jev import validate_answers
+        from hermes_slack_agent_router.jev import validate_answers
 
         if real:
             token = set_secret_scope(self.canary_secrets)

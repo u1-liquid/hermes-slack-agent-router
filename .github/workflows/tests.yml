@@ -19,8 +19,8 @@ jobs:
           python -W error::ResourceWarning -m unittest discover -s tests -p test_semantic.py -v
           python -W error::ResourceWarning -m unittest discover -s tests -p test_boundaries.py -v
       # Only fixed source/config values enter commands; no PR/event text interpolation.
-      - run: ruff check hermes_slack_thread_assignee tests
-      - run: ruff format --check hermes_slack_thread_assignee tests
+      - run: ruff check hermes_slack_agent_router tests
+      - run: ruff format --check hermes_slack_agent_router tests
       - run: python -m build
   native:
     runs-on: ubuntu-latest
@@ -58,5 +58,6 @@ jobs:
         env:
           HERMES_TEST_SOURCE: ${{ github.workspace }}/.native-host
           HERMES_WHEEL_TARGET: ${{ runner.temp }}/wheel-target
+          HERMES_DIST_DIR: ${{ github.workspace }}/dist
           HERMES_REQUIRE_WHEEL: '1'
         run: python -I -W error::ResourceWarning -m unittest discover -s "$GITHUB_WORKSPACE/tests" -p test_installed.py -v
