@@ -1,9 +1,28 @@
 # Native acceptance preparation
 
-Status: authored, not executed. These are candidate tests, not evidence of a
-working plugin. The production `plugin.Gate` and source-pinned bridge are still
-absent. Native execution remains reserved until the originating requester resolves
-the active local command guard. Do not run these commands to bypass that guard.
+Status: initial native middleware/bridge implemented and exercised against the
+pinned host; broader release acceptance remains incomplete. The local execution
+guard was resolved through the originating requester. Historical preparation
+notes below are not fresh test results; see the current implementation status.
+
+## Current implementation status
+
+The Gate now wires public global middleware through the native factory and uses
+the host's source builder, canonical identity, session keys and scoped pending
+registries. Actual AsyncApp/native-listener tests exercise silent rejection,
+positive main/secondary/multiple model execution boundaries, legacy-busy exclusion,
+clarify-choice/slash-confirm/update handling, rich-quote exclusion, exact monitoring,
+video-only early rejection, unload and downstream error behavior. Unit tests use
+mocked external Slack I/O and the model boundary, not a real Slack connection.
+
+Plugin manifest/discovery/Doctor and host CLI registration are still missing.
+Routed/shared-authority and full Socket Mode receipt coverage below remain open.
+Native activation is not yet a supported release installation path. Callback
+retention means re-enable/replacement requires restart; pending/file metadata have
+no atomic lease. Slash-prefixed unknown skill commands conservatively pass, which
+is degraded ordinary coverage, not a permissions grant or universal fail-closed
+claim. Optional JSON `monitoring` entries require exact `workspace`, `channel` and
+`sender` identifiers; no keyword/regex exemptions are accepted.
 
 ## Declared CI
 

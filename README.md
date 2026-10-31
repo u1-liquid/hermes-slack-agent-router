@@ -4,9 +4,11 @@ Stable main-recipient policy for multi-agent Slack channel threads.
 
 ## Development status
 
-The local policy, shared SQLite store and terminal administrator are implemented.
-Native Hermes/Bolt registration and middleware are not implemented yet. Installing
-this candidate does not change Gateway routing. See [design](docs/design.md) and
+The local policy, shared SQLite store, terminal administrator and initial native
+Gate/bridge are implemented. Actual pinned-host AsyncApp/native-method tests cover
+the first integration boundary. Plugin discovery/manifest and host CLI activation
+are not finished: installing this candidate does not automatically activate routing.
+See [native acceptance](docs/native-acceptance.md), [design](docs/design.md) and
 [implementation plan](docs/implementation-plan.md) for the remaining acceptance
 criteria and the source-pinned integration boundary.
 
@@ -85,8 +87,10 @@ uv tool run ruff format --check .
 uv build
 ```
 
-Tests use synthetic local fixtures, including two spawned processes. They do not
-exercise Slack transport, model/queue suppression, Plugin Doctor or lifecycle.
-Those integration checks and CI remain required before release.
+The native test module additionally exercises actual pinned-host methods with
+synthetic SDK responses. Socket transport receipts, shared-authority/routed paths,
+Plugin Doctor and release lifecycle coverage remain incomplete. See
+`docs/native-acceptance.md` for the precise boundary; CI still must execute on the
+published candidate before release.
 
 MIT license, copyright u1-liquid.

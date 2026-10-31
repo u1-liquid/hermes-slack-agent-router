@@ -17,12 +17,14 @@ class Config:
     database_id: str
     registry_revision: str
     participants: tuple[Recipient, ...]
+    monitoring: tuple[tuple[str, str, str], ...] = ()
 
     @classmethod
     def load(cls, path: Path):
         try:
             raw = json.loads(Path(path).read_text())
-            if set(raw) != {"database", "database_id", "registry_revision", "participants"}:
+            required = {"database", "database_id", "registry_revision", "participants"}
+            if not required <= set(raw) or set(raw) - required - {"monitoring"}:
                 raise ValueError("unknown or missing config fields")
             database = Path(raw["database"])
             if not database.is_absolute():
@@ -30,8 +32,17 @@ class Config:
             participants = tuple(Recipient(**item) for item in raw["participants"])
             if not participants or len(set(participants)) != len(participants):
                 raise ValueError("empty or duplicate participant registry")
+            monitoring = []
+            for item in raw.get("monitoring", []):
+                if set(item) != {"workspace", "channel", "sender"}:
+                    raise ValueError("monitoring rules require exact workspace/channel/sender")
+                monitoring.append(tuple(identifier(item[k]) for k in ("workspace", "channel", "sender")))
             return cls(
-                database, identifier(raw["database_id"]), identifier(raw["registry_revision"]), participants
+                database,
+                identifier(raw["database_id"]),
+                identifier(raw["registry_revision"]),
+                participants,
+                tuple(monitoring),
             )
         except (OSError, ValueError, TypeError, KeyError) as exc:
             raise ConfigError(str(exc)) from exc

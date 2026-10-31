@@ -41,10 +41,11 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         from gateway.config import GatewayConfig, Platform, PlatformConfig
         from gateway.run import GatewayRunner
         from gateway.session_state import SessionState
-        from hermes_slack_thread_assignee.plugin import Gate
         from plugins.platforms.slack.adapter import SlackAdapter
         from slack_bolt.async_app import AsyncApp
         from slack_bolt.authorization import AuthorizeResult
+
+        from hermes_slack_thread_assignee.plugin import Gate
 
         self.SessionState = SessionState
         self.a = Recipient("TDEMO", "UALPHA", "default")
@@ -185,7 +186,8 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_secondary_then_ordinary_does_not_transfer(self):
         await self.dispatch(self.message("<@UBETA> help"))
         self.assertEqual(len(self.downstream), 1)
-        # Positive delivery may need native text-burst flush; remaining setup is documented.
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.model.assert_awaited_once()
         self.assertEqual(self.store.show(self.key), (self.a, 1))
         self.model.reset_mock()
         await self.assert_rejected(self.message("ordinary continuation"))
@@ -234,11 +236,32 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_multiple_mentions_keep_secondary_eligible(self):
         await self.dispatch(self.message("<@UALPHA> <@UBETA> jointly"))
         self.assertEqual(len(self.downstream), 1)
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.model.assert_awaited_once()
         self.assertEqual(self.store.show(self.key), (self.a, 1))
+
+    async def test_main_ordinary_reaches_native_model_boundary(self):
+        self.store.change(self.key, self.b, 1, "synthetic transfer")
+        await self.dispatch(self.message("ordinary main"))
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.model.assert_awaited_once()
+
+    async def test_rich_quote_does_not_leak_flat_fallback_mention(self):
+        body = self.message("<@UBETA>")
+        body["event"]["blocks"] = [
+            {
+                "type": "rich_text",
+                "elements": [
+                    {"type": "rich_text_quote", "elements": [{"type": "user", "user_id": "UBETA"}]},
+                    {"type": "rich_text_section", "elements": [{"type": "text", "text": "ordinary"}]},
+                ],
+            }
+        ]
+        await self.assert_rejected(body)
 
     async def test_bot_and_dm_inputs_retain_native_handling(self):
         for changes in (
-            {"user": "UBETA", "bot_id": "BDEMO"},
+            {"user": "UPEER", "bot_id": "BDEMO"},
             {"channel": "DDEMO", "channel_type": "im"},
             {"channel": "GDEMO", "channel_type": "mpim"},
         ):
@@ -246,6 +269,51 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 before = len(self.downstream)
                 await self.dispatch(self.message("<@UBETA> hello", **changes))
                 self.assertEqual(len(self.downstream), before + 1)
+
+    async def test_exact_monitoring_config_preserves_native_input(self):
+        from hermes_slack_thread_assignee.config import Config
+
+        path = self.root / "config.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "database": str(self.store.path),
+                    "database_id": "demo",
+                    "registry_revision": "1",
+                    "participants": [self.a.as_dict(), self.b.as_dict()],
+                    "monitoring": [{"workspace": "TDEMO", "channel": "CDEMO", "sender": "UHUMAN"}],
+                }
+            )
+        )
+        config = Config.load(path)
+        self.gate.monitoring = frozenset(config.monitoring)
+        await self.dispatch(self.message("monitoring sample"))
+        self.assertEqual(len(self.downstream), 1)
+
+    async def test_downstream_error_is_not_retried(self):
+        calls = []
+
+        async def failure(body, next):
+            calls.append(body)
+            raise RuntimeError("synthetic downstream error")
+
+        self.app.use(failure)
+        self.gate.dispose()
+        response = await self.dispatch(self.message("after dispose"))
+        self.assertEqual(response.status, 500)
+        self.assertEqual(len(calls), 1)
+
+    async def test_commands_behind_mention_and_bang_preserve_native_input(self):
+        for text in ("<@UBETA> /help", "<@UBETA> !help"):
+            before = len(self.downstream)
+            await self.dispatch(self.message(text))
+            await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+            self.assertEqual(len(self.downstream), before + 1)
+
+    async def test_missing_shared_store_is_silent_for_verified_ordinary(self):
+        self.store.path.unlink()
+        await self.assert_rejected(self.message("ordinary with unavailable store"))
+        self.assertFalse(self.store.path.exists())
 
     async def test_original_video_rejects_before_native_fallback(self):
         self.client.files_info.return_value = {
