@@ -11,7 +11,8 @@ synthetic mention or host source patch is registered.
 The pinned official host is Hermes v0.22.5,
 `bf0203a794a07aac3ff764972ab9087baa4e4f4e`. Native tests use Python3.14,
 Slack Bolt1.30.0 and Slack SDK3.44.1 with `tests/requirements-native.txt` in an
-isolated environment. Core CI declares Python3.11–3.14. These bounded imports are
+isolated environment. CI has one `core` job and a separate mandatory `native` job,
+both on Python3.14. These bounded imports are
 not a full host/browser installation. Local self-check is not independent review,
 hosted exact-head CI, live Slack operation or deployment permission.
 

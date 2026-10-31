@@ -146,7 +146,8 @@ A disabled/broken plugin and unknown native mappings are not fail-closed guarant
 
 ## Verification
 
-CI runs offline deterministic semantic/core tests on Python3.11–3.14, pinned native
+CI runs offline deterministic semantic/core tests in the `core` job on Python3.14.
+The separate mandatory `native` job also uses Python3.14 for pinned native
 integration, discovery/Doctor and a freshly built installed wheel outside source.
 Real Jev calls are explicit local-only, use wholly fictional fixtures and require
 no CI credentials. Set `JEV_FICTIONAL_CANARY_DIR` to a private new output directory

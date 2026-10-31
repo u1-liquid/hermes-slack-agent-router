@@ -7,15 +7,11 @@ permissions:
 jobs:
   core:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ['3.11', '3.12', '3.13', '3.14']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
+          python-version: '3.14'
       - run: python -m pip install . ruff==0.17.3 build
       - name: Core suites only (native job is separate and mandatory)
         run: |
