@@ -68,7 +68,7 @@ class Store:
             if row is None or row[0] != encode(self.metadata):
                 raise StoreError("database/registry identity mismatch")
             yield db
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, ValueError, TypeError) as exc:
             raise StoreError(str(exc)) from exc
         finally:
             if db is not None:
@@ -115,7 +115,14 @@ class Store:
             "SELECT recipient,revision FROM assignments WHERE workspace=? AND channel=? AND root=?",
             (key.workspace, key.channel, key.root),
         ).fetchone()
-        return (None, 0) if row is None else (Recipient(**json.loads(row[0])) if row[0] else None, row[1])
+        if row is None:
+            return None, 0
+        if type(row[1]) is not int or row[1] < 1:
+            raise StoreError("invalid persisted assignment revision")
+        recipient = Recipient(**json.loads(row[0])) if row[0] is not None else None
+        if recipient is not None and recipient.workspace != key.workspace:
+            raise StoreError("persisted assignment workspace mismatch")
+        return recipient, row[1]
 
     def show(self, key: Thread):
         with self._connect() as db:
@@ -187,6 +194,12 @@ class Store:
                     if cached[0] != evidence:
                         return Decision("pass", "event evidence mismatch")
                     selected, revision = json.loads(cached[1]), cached[2]
+                    if not isinstance(selected, list) or type(revision) is not int or revision < 0:
+                        raise StoreError("invalid persisted decision values")
+                    for value in selected:
+                        recipient = Recipient(**value)
+                        if recipient not in self.participants or recipient.workspace != key.workspace:
+                            raise StoreError("persisted decision outside registry")
                 else:
                     main, revision = self._show(db, key)
                     known_direct = [
