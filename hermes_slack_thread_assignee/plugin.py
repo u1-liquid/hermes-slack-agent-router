@@ -30,7 +30,9 @@ class Gate:
         channel = event["channel"]
         text = event.get("text", "")
         own = {bot, adapter._bot_user_id} - {None, ""}
-        mentioned = bool(set(composition(event)) & own)
+        mentioned = bool(set(composition(event)) & own) or adapter._slack_message_matches_mention_patterns(
+            text
+        )
         allowed = adapter._slack_allowed_channels()
         if allowed and channel not in allowed:
             return False
@@ -145,7 +147,14 @@ class Gate:
                     message["ts"],
                     message["user"],
                     prior_text,
-                    "prior-" + message["ts"],
+                    await asyncio.to_thread(
+                        plans.prior_topic,
+                        source.thread,
+                        message["ts"],
+                        message["user"],
+                        prior_text,
+                        source.identity,
+                    ),
                     copy.deepcopy(message),
                 )
             )
@@ -166,7 +175,12 @@ class Gate:
         for field in ("blocks", "attachments", "files"):
             target.pop(field, None)
             projected["event"].pop(field, None)
-        admission = {**event, "text": text}
+        current = "".join(
+            plan.source[u.start : u.end]
+            for u in plan.units
+            if u.disposition == "action" and bound.recipient in u.recipients
+        )
+        admission = {**event, "text": current}
         admission.pop("blocks", None)
         if not self.native_policy(adapter, admission, bound.recipient.bot_user):
             await asyncio.to_thread(plans.record, source, bound.recipient, "native-not-admitted")
@@ -189,6 +203,10 @@ class Gate:
             if exempt or bridge.pending(bound):
                 return body
             if self.semantic is not None:
+                if adapter._early_reject_unauthorized(
+                    bound.event.sender, key.channel, False, thread_id=key.root
+                ):
+                    return None
                 try:
                     projected = await self.project(body, bound, adapter, deadline)
                 except (Exception, asyncio.CancelledError):

@@ -216,6 +216,102 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.gate.jev = AsyncMock()
         self.gate.jev.ask.side_effect = classify
 
+    async def test_semantic_sender_auth_before_context_allow_unknown_and_pending(self):
+        self.enable_semantic()
+        self.adapter.set_authorization_check(lambda *args, **kwargs: False)
+        await self.assert_rejected(self.message("<@UBETA> check diagram"))
+        self.gate.jev.ask.assert_not_awaited()
+        self.client.conversations_replies.assert_not_awaited()
+        for decision in (True, None):
+            self.adapter.set_authorization_check(lambda *args, value=decision, **kwargs: value)
+            await self.dispatch(self.message("<@UALPHA> update summary; <@UBETA> check diagram"))
+            await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.assertEqual(self.gate.jev.ask.await_count, 2)
+        self.adapter.set_authorization_check(lambda *args, **kwargs: False)
+        _, key = self.source_and_key()
+        state = self.SessionState()
+        state.persistent.update_prompt_pending = True
+        self.runner._sessions[key] = state
+        await self.dispatch(self.message("confirm"))
+        self.assertEqual(self.downstream[-1]["event"]["text"], "confirm")
+        self.assertEqual(self.gate.jev.ask.await_count, 2)
+
+    async def test_semantic_joint_prior_refs_retain_topic_on_reopen(self):
+        from hermes_slack_thread_assignee.plans import PlanStore
+
+        self.enable_semantic()
+        self.client.conversations_replies.return_value["messages"] += [
+            {"ts": "101.001", "user": "UALPHA", "text": "Add a legend to the diagram"},
+            {"ts": "102.001", "user": "UBETA", "text": "Add arrows to the diagram"},
+        ]
+
+        async def grounded(batch):
+            answers = dict.fromkeys(batch["questions"], "no")
+            answers.update(
+                coverage="complete",
+                u0_kind="action",
+                u0_destination="specific",
+                u0_ref1="yes",
+                u0_ref2="yes",
+                u0_to0="yes",
+                u0_to1="yes",
+            )
+            return answers
+
+        self.gate.jev.ask.side_effect = grounded
+        original = self.message("<@UALPHA> and <@UBETA> combine your diagram changes")
+        await self.dispatch(original)
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        await self.dispatch(original)
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.gate.jev.ask.assert_awaited_once()
+        plans = PlanStore(self.store)
+        unit = plans.generation(plans.inspect()[0]["binding"]).units[0]
+        self.assertEqual(unit.people, ("UALPHA", "UBETA"))
+        for reference in unit.references:
+            self.assertEqual(
+                PlanStore(self.store).prior_topic(
+                    self.key, reference.identity, reference.sender, reference.text
+                ),
+                unit.topic,
+            )
+        await self.dispatch(self.message("<@UALPHA> and <@UBETA> combine your diagram changes again"))
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.assertEqual(plans.generation(plans.inspect()[-1]["binding"]).units[0].topic, unit.topic)
+
+    async def test_semantic_wake_pattern_only_assigned_current_confers_admission(self):
+        self.enable_semantic()
+        self.adapter.config.extra["mention_patterns"] = ["FictionalBeta"]
+        self.adapter._compiled_mention_patterns = None
+        self.client.conversations_replies.return_value["messages"][0]["text"] = (
+            "FictionalBeta diagram proposal"
+        )
+
+        async def grounded(batch):
+            answers = dict.fromkeys(batch["questions"], "no")
+            answers.update(
+                coverage="complete", u0_kind="action", u0_destination="specific", u0_ref0="yes", u0_to1="yes"
+            )
+            if "u1_kind" in answers:
+                answers.update(
+                    u0_to1="no",
+                    u0_to0="yes",
+                    u1_kind="action",
+                    u1_destination="specific",
+                    u1_ref0="yes",
+                    u1_to1="yes",
+                )
+            return answers
+
+        self.gate.jev.ask.side_effect = grounded
+        with patch.dict(os.environ, {"SLACK_STRICT_MENTION": "true"}):
+            await self.dispatch(self.message("FictionalBeta check diagram"))
+            await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+            self.model.assert_awaited_once()
+            self.model.reset_mock()
+            await self.assert_rejected(self.message("<@UALPHA> FictionalBeta update summary; check diagram"))
+            await self.assert_rejected(self.message("<@UALPHA> and <@UBETA> update summary; check diagram"))
+
     async def test_semantic_normal_scoped_input_and_nonrecipient(self):
         self.enable_semantic()
         original = self.message("<@UALPHA> revise SUMMARY_ONLY; <@UBETA> check DIAGRAM_ONLY.")

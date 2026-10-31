@@ -88,6 +88,47 @@ def semantic_process_worker(path, barrier, counter, queue):
 
 
 class SemanticTests(unittest.TestCase):
+    def test_archived_purge_fence_live_claim_pointer_and_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            store = Store(root / "state.db", "fiction", "r1", (A, B))
+            store.initialize()
+            store.change(KEY, A, 0, "fiction bootstrap")
+            plans = PlanStore(store)
+            plans.initialize()
+            source = snapshot()
+            claim = plans.claim(source)
+            plan = assemble(source, validate_answers(prepare(source), two_topic_answers(prepare(source))))
+            plans.publish(source, claim.fence, plan)
+            changed = replace(source, policy_revision="changed")
+            pending = plans.claim(changed)
+            before = plans.inspect()[0]
+            self.assertTrue(next(r for r in plans.inspect() if r["binding"] == source.binding)["archived"])
+            with self.assertRaises(Conflict):
+                plans.operate("purge", source.binding, 99, quiescent=True)
+            plans.operate("recover", changed.binding, pending.fence, quiescent=True, dry_run=False)
+            live = plans.claim(changed)
+            with self.assertRaises(Conflict):
+                plans.operate("purge", source.binding, claim.fence, quiescent=True, dry_run=False)
+            plans.publish(changed, live.fence, replace(plan, binding=changed.binding))
+            current = plans.inspect()[0]
+            plans.operate("purge", source.binding, claim.fence, quiescent=True, dry_run=False)
+            self.assertEqual(plans.inspect()[0], current)
+            self.assertEqual(before["binding"], current["binding"])
+            self.assertFalse(plans.claim(source).owner)
+            self.assertEqual(plans.read(source).reason, "content-purged")
+            with self.assertRaises(StoreError):
+                plans.operate("recover", source.binding, claim.fence + 1, quiescent=True, dry_run=False)
+            with store._connect() as db:
+                self.assertIsNone(
+                    db.execute(
+                        "SELECT snapshot FROM semantic_sources WHERE binding=?", (source.binding,)
+                    ).fetchone()
+                )
+                self.assertEqual(db.execute("SELECT count(*) FROM audit").fetchone()[0], 1)
+            self.assertEqual(store.show(KEY), (A, 1))
+
     def test_real_process_agreement_and_immutable_history_after_invalidation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

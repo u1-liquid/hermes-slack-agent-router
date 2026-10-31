@@ -17,7 +17,7 @@ hosted exact-head CI, live Slack operation or deployment permission.
 
 ## Exercised source boundaries
 
-The current source collection passed 73 tests with three explicit skips out of 76:
+The remediated source collection passed 77 tests with three explicit skips out of 80:
 two opt-in external canaries and the separate installed-wheel job. The latter passed
 separately outside the checkout with isolated Python. CLI parser/dispatch dry-run/apply,
 purge tombstone/no rehydration, prior-rich originals, canonical duplicate call-count,

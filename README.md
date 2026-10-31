@@ -105,6 +105,15 @@ Recovery only reopens retained unresolved work for a subsequent native retry;
 it cannot replay Slack, bypass native policy or reclassify accepted/purged work.
 Previously accepted generations remain immutable until explicit quiescent purge.
 
+The bounded metadata listing includes archived bindings and fences, not only current
+pointers. Exact archived purge leaves the current binding and main/audit unchanged;
+retained tombstones prevent old retries from rehydrating forgotten payloads.
+Definitive native sender denial is checked before semantic context/Jev. Configured
+native wake patterns count only in original and assigned CURRENT text, never PRIOR.
+Bootstrap prior-message IDs are not distinct semantic topics: validated joint refs
+receive a stable local composite topic; exact retained earlier reference links can
+restore a known topic. Conflicting established topics remain unresolved.
+
 ## Execution and uncertainty boundaries
 
 Ordinary rich_text is flattened with exact original leaves, canonical Unicode

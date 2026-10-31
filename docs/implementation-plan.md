@@ -6,7 +6,7 @@ streaming Jev caps/cancellation, shared immutable generations and operational CL
 Six real fictional journeys passed at the v2 question boundary; a fresh streaming client
 canary passed separately. Retention/recovery CLI, purge tombstone/no rehydration, prior-rich
 body, canonical duplicate call-count, oversized no-egress and pending-on-SDK-failure controls
-passed. Full source collection: 76 tests, 73 passed and three explicit skips (two local external
+passed. Remediation source collection: 80 tests, 77 passed and three explicit skips (two local external
 canaries and the separate wheel job). The isolated rebuilt-wheel job passed separately;
 offline Ruff and build passed. These are builder checks, not expanded independent acceptance.
 

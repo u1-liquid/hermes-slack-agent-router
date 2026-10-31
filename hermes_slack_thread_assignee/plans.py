@@ -52,6 +52,16 @@ class PlanStore:
             db.execute("BEGIN IMMEDIATE")
             from dataclasses import asdict
 
+            retained = db.execute(
+                "SELECT fence,result FROM semantic_generations WHERE binding=? ORDER BY fence DESC LIMIT 1",
+                (source.binding,),
+            ).fetchone()
+            recovering = db.execute(
+                "SELECT 1 FROM semantic_plans WHERE binding=? AND status='claimed' AND fence>?",
+                (source.binding, retained[0] if retained else 0),
+            ).fetchone()
+            if retained and not recovering:
+                return Claim(json.loads(retained[1])["status"], retained[0])
             db.execute(
                 "INSERT OR IGNORE INTO semantic_sources VALUES (?,?)",
                 (source.binding, encode(asdict(source))),
@@ -64,6 +74,12 @@ class PlanStore:
             if row is not None:
                 binding, fence, expiry, status = row
                 if binding != source.binding:
+                    db.execute(
+                        "INSERT OR IGNORE INTO semantic_generations SELECT binding,fence,result "
+                        "FROM semantic_plans WHERE workspace=? AND channel=? AND root=? AND identity=? "
+                        "AND result IS NOT NULL",
+                        self._key(source),
+                    )
                     plan = Plan(source.binding, "unresolved", "stale-evidence", source.text)
                     db.execute(
                         "UPDATE semantic_plans SET binding=?,fence=?,status='unresolved',result=? "
@@ -141,11 +157,21 @@ class PlanStore:
 
     def read(self, source):
         with self.store._connect() as db:
+            retained = db.execute(
+                "SELECT result,fence FROM semantic_generations WHERE binding=? ORDER BY fence DESC LIMIT 1",
+                (source.binding,),
+            ).fetchone()
             row = db.execute(
                 "SELECT binding,status,result FROM semantic_plans WHERE workspace=? "
                 "AND channel=? AND root=? AND identity=?",
                 self._key(source),
             ).fetchone()
+            recovering = db.execute(
+                "SELECT 1 FROM semantic_plans WHERE binding=? AND status='claimed' AND fence>?",
+                (source.binding, retained[1] if retained else 0),
+            ).fetchone()
+            if retained and not recovering:
+                row = (source.binding, json.loads(retained[0])["status"], retained[0])
             if row is None or row[1] == "claimed":
                 return None
             if row[0] != source.binding:
@@ -173,6 +199,27 @@ class PlanStore:
             except (ValueError, KeyError, TypeError) as exc:
                 raise StoreError("invalid persisted semantic plan") from exc
 
+    def prior_topic(self, thread, identity, sender, text, before=None):
+        """Recover only exact retained reference links in this conversation."""
+        with self.store._connect() as db:
+            rows = db.execute(
+                "SELECT g.result FROM semantic_generations g JOIN semantic_sources s USING(binding) "
+                "WHERE json_extract(s.snapshot,'$.thread.workspace')=? "
+                "AND json_extract(s.snapshot,'$.thread.channel')=? "
+                "AND json_extract(s.snapshot,'$.thread.root')=? "
+                "AND json_extract(g.result,'$.status')='ready' "
+                "AND (? IS NULL OR CAST(json_extract(s.snapshot,'$.identity') AS REAL)<CAST(? AS REAL)) LIMIT 100",
+                (thread.workspace, thread.channel, thread.root, before, before),
+            )
+            topics = {
+                unit.topic
+                for (raw,) in rows
+                for unit in Plan.from_dict(json.loads(raw)).units
+                for ref in unit.references
+                if (ref.identity, ref.sender, ref.text) == (identity, sender, text)
+            }
+            return next(iter(topics)) if len(topics) == 1 else "prior-" + identity
+
     def inspect(self):
         """No content in routine status; explicit private database holds bounded source."""
         with self.store._connect() as db:
@@ -192,6 +239,24 @@ class PlanStore:
                     )
                 ]
                 result.append(item)
+            for binding, fence, raw in db.execute(
+                "SELECT g.binding,g.fence,g.result FROM semantic_generations g "
+                "WHERE NOT EXISTS (SELECT 1 FROM semantic_plans p WHERE p.binding=g.binding) "
+                "AND g.fence=(SELECT max(h.fence) FROM semantic_generations h WHERE h.binding=g.binding) "
+                "ORDER BY g.binding LIMIT ?",
+                (100 - len(result),),
+            ):
+                plan = json.loads(raw)
+                result.append(
+                    {
+                        "binding": binding,
+                        "fence": fence,
+                        "status": plan["status"],
+                        "reason": plan["reason"],
+                        "archived": True,
+                        "native_receipts": [],
+                    }
+                )
             return result
 
     def operate(self, operation, binding, expected_fence, *, quiescent, dry_run=True):
@@ -204,12 +269,32 @@ class PlanStore:
             row = db.execute(
                 "SELECT fence,lease,status,result FROM semantic_plans WHERE binding=?", (binding,)
             ).fetchone()
+            archived = row is None
+            if archived:
+                generation = db.execute(
+                    "SELECT fence,result FROM semantic_generations WHERE binding=? ORDER BY fence DESC LIMIT 1",
+                    (binding,),
+                ).fetchone()
+                if generation:
+                    row = (generation[0], 0, json.loads(generation[1])["status"], generation[1])
+                live = db.execute(
+                    "SELECT 1 FROM semantic_plans p JOIN semantic_sources s ON s.binding=? "
+                    "WHERE p.workspace=json_extract(s.snapshot,'$.thread.workspace') "
+                    "AND p.channel=json_extract(s.snapshot,'$.thread.channel') "
+                    "AND p.root=json_extract(s.snapshot,'$.thread.root') "
+                    "AND p.identity=json_extract(s.snapshot,'$.identity') "
+                    "AND p.status='claimed' AND p.lease>?",
+                    (binding, time.time()),
+                ).fetchone()
+                if live:
+                    raise Conflict("active semantic claim cannot be changed")
             if row is None or row[0] != expected_fence:
                 raise Conflict("current binding/fence changed")
             if row[2] == "claimed" and row[1] > time.time():
                 raise Conflict("active semantic claim cannot be changed")
             if operation == "recover" and (
-                row[2] != "unresolved"
+                archived
+                or row[2] != "unresolved"
                 or json.loads(row[3])["reason"] == "content-purged"
                 or db.execute(
                     "SELECT 1 FROM semantic_generations WHERE binding=? "
@@ -246,6 +331,10 @@ class PlanStore:
                     "semantic_receipt_events",
                 ):
                     db.execute(f"DELETE FROM {table} WHERE binding=?", (binding,))
+                db.execute(
+                    "INSERT INTO semantic_generations VALUES (?,?,?)",
+                    (binding, expected_fence + 1, encode(tombstone.as_dict())),
+                )
             db.commit()
             return receipt
 

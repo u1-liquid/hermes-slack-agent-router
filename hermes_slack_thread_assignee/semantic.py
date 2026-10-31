@@ -324,10 +324,17 @@ def assemble(source: Snapshot, answers):
             )
         ):
             return unresolved("specific recipient has no source evidence")
-        topics = {h.topic for h in refs}
+        # Bootstrap message identifiers are not established semantic topic boundaries.
+        topics = {h.topic for h in refs if not h.topic.startswith("prior-")}
         if len(topics) > 1:
             return unresolved("conflicting topic/person reference")
-        topic = next(iter(topics), f"current-u{i}")
+        joint = (
+            "joint-"
+            + hashlib.sha256(
+                encode((asdict(source.thread), sorted(h.identity for h in refs))).encode()
+            ).hexdigest()
+        )
+        topic = next(iter(topics), joint if refs else f"current-u{i}")
         units.append(Unit(start, end, kind, topic, refs, recipients, people))
     groups = [{i} for i in range(len(units))]
     for i in range(len(units)):
