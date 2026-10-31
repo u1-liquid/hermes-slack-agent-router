@@ -30,6 +30,25 @@ conflicts versus explicit takeovers, disputes/unsafe facts and current partial-o
 joint rejection. Every relevant positive and negative fact/link/address decision
 retains the same confidence gate; controlled facts are not real-model evidence.
 
+## Complete newly assembled input
+
+The native `pre_gateway_dispatch` hook consumes a request-local Python closure
+attached only after successful ordinary-message projection. Slack JSON cannot
+construct that closure. It rechecks the native sender, source/message, recipient,
+serving runtime and runner before removing newly hydrated `channel_context`,
+reply backfill and recovered root media. The witness is removed before native
+admission/persistence; there is no registry or persisted routing representation.
+Selected inert prior references remain in projected text. Existing native session
+memory, channel configuration, authorization, controls and exempt events are not
+cleared or replaced. A changed binding skips the routed request, rather than
+passing unscoped backfill.
+
+Native regressions inspect the complete event and actual sender/context prefix,
+with nonempty cold-thread and active explicit-mention fetches, selected and
+superseded prior, nonrecipient exclusion, native queue/merge/replay, cross-profile
+serving context, JSON forgery/binding negatives and the native persistence codec.
+These are controlled SDK/semantic tests, not fresh external inference or live Slack.
+
 ## Native integration
 
 Use a separate official checkout at the pinned revision, never an installed/live

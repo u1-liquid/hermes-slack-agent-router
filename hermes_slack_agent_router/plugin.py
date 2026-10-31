@@ -8,6 +8,7 @@ import logging
 import time
 from collections import deque
 from decimal import Decimal
+from types import FunctionType
 
 from .bridge import Bridge, TopologyError, Uncertain, canonical_text, composition
 from .jev import JevClient, JevError
@@ -15,6 +16,35 @@ from .policy import Thread, identifier
 from .semantic import History, SemanticError, Snapshot, assemble, prepare
 
 logger = logging.getLogger(__name__)
+_PROJECTION = "_hermes_slack_agent_router_projection"
+
+
+def constrain_backfill(event, gateway, **kwargs):
+    """Native ingress hook: discard only backfill on a proven routed request.
+
+    A Python closure cannot arrive through Slack JSON. It also crosses profile
+    module instances without relying on a process-global registry or class token.
+    Remove it before native admission snapshots any input; replay needs no token.
+    """
+    raw = event.raw_message
+    if not isinstance(raw, dict):
+        return None
+    proof = raw.pop(_PROJECTION, None)
+    if not isinstance(proof, FunctionType):
+        return None
+    try:
+        if not proof(event, gateway):
+            return {"action": "skip", "reason": "agent-router projection identity changed"}
+        event.channel_context = None
+        event.reply_to_text = None
+        # Successful routing accepted text-only current/root/reference composition.
+        # Native hydration can independently recover root images after that check.
+        event.media_urls = []
+        event.media_types = []
+        event.media_text_inlined = []
+    except Exception:  # noqa: BLE001 - no untrusted data or internal token in diagnostics
+        return {"action": "skip", "reason": "agent-router projection validation failed"}
+    return None  # Continue native authorization/controls; do not short-circuit other hooks.
 
 
 class Gate:
@@ -269,6 +299,27 @@ class Gate:
         admission.pop("blocks", None)
         if not self.native_policy(adapter, admission, bound.recipient.bot_user):
             return None
+
+        def proof(delivered, gateway):
+            source = delivered.source
+            identity = adapter._canonicalize(source)
+            return (
+                gateway is adapter.gateway_runner
+                and identity == bound.identity
+                and identity is not None
+                and identity.adapter() is adapter
+                and identity.runtime_profile == bound.recipient.runtime_profile
+                and adapter._team_bot_user_ids.get(thread.workspace) == bound.recipient.bot_user
+                and source.scope_id == thread.workspace
+                and source.chat_id == thread.channel
+                and source.thread_id == thread.root
+                and source.user_id == bound.event.sender
+                and source.message_id == bound.source.message_id
+                and delivered.message_id == bound.source.message_id
+                and gateway._session_key_for_source(source) == bound.session_key
+            )
+
+        target[_PROJECTION] = proof
         return projected
 
     def dispose(self):
@@ -339,5 +390,6 @@ def register(ctx):
         gates.append(gate)
         gate.wire(native, adapter)
 
+    ctx.register_hook("pre_gateway_dispatch", constrain_backfill)
     ctx.register_platform_handler("slack", wire)
     ctx.on_unload(dispose)

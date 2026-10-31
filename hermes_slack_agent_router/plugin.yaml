@@ -7,4 +7,4 @@ author: u1-liquid
 license: MIT
 homepage: https://github.com/u1-liquid/hermes-slack-agent-router
 provides_tools: []
-provides_hooks: []
+provides_hooks: [pre_gateway_dispatch]

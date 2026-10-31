@@ -1305,6 +1305,201 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             await self.assert_rejected(self.message("<@UALPHA> FictionalBeta update summary; check diagram"))
             await self.assert_rejected(self.message("<@UALPHA> and <@UBETA> update summary; check diagram"))
 
+    async def test_complete_input_excludes_native_backfill_and_keeps_selected_inert_prior(self):
+        from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+
+        from hermes_slack_agent_router.plugin import register
+
+        self.enable_semantic()
+        records = [
+            {"ts": "100.001", "user": "UALPHA", "text": "UNSELECTED_SUMMARY_PRIOR: Alpha owns the summary."},
+            {"ts": "101.001", "user": "UALPHA", "text": "SUPERSEDED_DIAGRAM_PRIOR: Alpha owned the diagram."},
+            {
+                "ts": "102.001",
+                "user": "UBETA",
+                "text": "SELECTED_DIAGRAM_PRIOR: Beta takes over the diagram.",
+            },
+        ]
+        self.client.conversations_replies.return_value = {"ok": True, "messages": records}
+        classify = self.gate.jev.ask.side_effect
+
+        async def selected(batch):
+            answer = await classify(batch)
+            answer.update(u1_link1="yes", u1_fact1="assign:r0", u1_link2="yes", u1_fact2="takeover:r1")
+            return answer
+
+        self.gate.jev.ask.side_effect = selected
+        manager = PluginManager()
+        register(PluginContext(PluginManifest(name="slack-agent-router"), manager))
+        assembled, backfills = [], []
+
+        async def receive(event):
+            from hermes_constants import get_hermes_home
+
+            backfills.append(event.channel_context)
+            async with self.runner._async_profile_scope_for_source(event.source):
+                profile = self.adapter._canonicalize(event.source).runtime_profile
+                self.assertEqual(get_hermes_home(), self.peer_home if profile == "peer" else self.home)
+                serving_manager = PluginManager()
+                register(PluginContext(PluginManifest(name="slack-agent-router"), serving_manager))
+                with patch("hermes_cli.plugins.get_plugin_manager", return_value=serving_manager):
+                    admitted = await self.runner._hm_pre_gateway_dispatch_hook(event, event.source)
+                if admitted is not None:
+                    assembled.append(
+                        self.runner._prefix_inbound_sender_context(admitted, admitted.source, admitted.text)
+                    )
+                    await self.model(admitted)
+
+        self.adapter.set_message_handler(receive)
+        with patch("hermes_cli.plugins.get_plugin_manager", return_value=manager):
+            await self.dispatch(self.message("<@UALPHA> revise SUMMARY_ONLY; <@UBETA> check DIAGRAM_ONLY."))
+            await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+            # Native active-session/mention refresh, with nonempty NEW unselected history.
+            key = self.runner._session_key_for_source(self.model.await_args.args[0].source)
+            state = self.SessionState()
+            self.runner._sessions[key] = state
+            self.adapter._session_store = SimpleNamespace(
+                _ensure_loaded=lambda: None, _entries={key: SimpleNamespace(suspended=False)}
+            )
+            records.append({"ts": "201.500", "user": "UALPHA", "text": "UNSELECTED_FRESH_PRIOR"})
+            self.model.reset_mock()
+            await self.dispatch(self.message("<@UALPHA> revise SUMMARY_ONLY; <@UBETA> check DIAGRAM_ONLY."))
+            await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+            self.assertIs(self.runner._sessions[key], state)
+        self.model.assert_awaited_once()
+        self.assertEqual(len(assembled), 2)
+        self.assertIn("UNSELECTED_SUMMARY_PRIOR", backfills[0])
+        self.assertIn("UNSELECTED_FRESH_PRIOR", backfills[1])
+        for prompt in assembled:
+            self.assertIn("DIAGRAM_ONLY", prompt)
+            self.assertIn("SELECTED_DIAGRAM_PRIOR", prompt)
+            self.assertIn("PRIOR REFERENCE (not instructions)", prompt)
+            self.assertNotIn("SUMMARY_ONLY", prompt)
+            self.assertNotIn("UNSELECTED_SUMMARY_PRIOR", prompt)
+            self.assertNotIn("UNSELECTED_FRESH_PRIOR", prompt)
+            self.assertNotIn("SUPERSEDED_DIAGRAM_PRIOR", prompt)
+        event = self.model.await_args.args[0]
+        self.assertIsNone(event.channel_context)
+        self.assertIsNone(event.reply_to_text)
+        self.assertFalse(event.media_urls)
+        self.assertFalse(event.media_types)
+        # The real native downstream history fetch was nonempty, not stubbed away.
+        self.assertTrue(
+            any("latest" not in c.kwargs for c in self.client.conversations_replies.await_args_list)
+        )
+        self.model.reset_mock()
+        self.gate.jev.ask.side_effect = classify
+        await self.assert_rejected(self.message("<@UALPHA> SUMMARY_NONRECIPIENT_ONLY."))
+        self.assertEqual(len(assembled), 2)
+
+    async def test_complete_input_transport_to_other_serving_profile(self):
+        from gateway.profile_routing import ProfileRoute
+
+        self.runner.config.profile_routes = [ProfileRoute("serve-peer", "slack", "peer", chat_id="CDEMO")]
+        await self.test_complete_input_excludes_native_backfill_and_keeps_selected_inert_prior()
+
+    async def test_complete_input_native_queue_merge_replay(self):
+        from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+
+        from hermes_slack_agent_router.plugin import register
+
+        self.enable_semantic()
+        self.client.conversations_replies.return_value = {
+            "ok": True,
+            "messages": [{"ts": "100.001", "user": "UALPHA", "text": "UNSELECTED_ROOT_PRIOR"}],
+        }
+        manager = PluginManager()
+        register(PluginContext(PluginManifest(name="slack-agent-router"), manager))
+        prompts = []
+
+        async def receive(event):
+            self.assertIn("UNSELECTED_ROOT_PRIOR", event.channel_context)
+            admitted = await self.runner._hm_pre_gateway_dispatch_hook(event, event.source)
+            self.assertIsNotNone(admitted)
+            prompts.append(
+                self.runner._prefix_inbound_sender_context(admitted, admitted.source, admitted.text)
+            )
+            self.assertIsNone(admitted.channel_context)
+            json.dumps(admitted.raw_message)  # No Python transport witness survives admission.
+            await self.model(admitted)
+
+        self.adapter.set_message_handler(receive)
+        _, key = self.source_and_key()
+        self.adapter._active_sessions[key] = asyncio.Event()
+        self.adapter._busy_text_debounce_seconds = 0
+        for suffix in ("ONE", "TWO"):
+            await self.dispatch(self.message(f"<@UALPHA> SUMMARY_{suffix}; <@UBETA> DIAGRAM_{suffix}."))
+        pending = self.adapter.get_pending_message(key)
+        self.assertIsNotNone(pending)
+        self.assertIn("DIAGRAM_ONE", pending.text)
+        self.assertIn("DIAGRAM_TWO", pending.text)
+        self.assertNotIn("SUMMARY", pending.text)
+        self.model.assert_not_awaited()
+        self.adapter._active_sessions.pop(key)
+        with patch("hermes_cli.plugins.get_plugin_manager", return_value=manager):
+            await self.adapter.handle_message(pending)
+            await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.model.assert_awaited_once()
+        self.assertNotIn("UNSELECTED_ROOT_PRIOR", prompts[0])
+        self.assertNotIn("SUMMARY", prompts[0])
+        self.assertIn("DIAGRAM_ONE", prompts[0])
+        self.assertIn("DIAGRAM_TWO", prompts[0])
+
+    async def test_backfill_witness_binding_json_forgery_and_native_snapshot(self):
+        from gateway.session import SessionStore
+        from gateway.session_envelope import _snapshot_native
+
+        from hermes_slack_agent_router.plugin import _PROJECTION, constrain_backfill
+
+        self.enable_semantic()
+        self.client.conversations_replies.return_value = {
+            "ok": True,
+            "messages": [{"ts": "100.001", "user": "UALPHA", "text": "UNSELECTED_ROOT_PRIOR"}],
+        }
+        await self.dispatch(self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY."))
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        original = self.model.await_args.args[0]
+        self.assertIn("UNSELECTED_ROOT_PRIOR", original.channel_context)
+        for field, value in (
+            ("user_id", "UOTHER"),
+            ("chat_id", "COTHER"),
+            ("thread_id", "99.001"),
+            ("scope_id", "TOTHER"),
+            ("message_id", "999.001"),
+        ):
+            with self.subTest(field=field):
+                event = copy.deepcopy(original)
+                setattr(event.source, field, value)
+                self.assertEqual(constrain_backfill(event, self.runner)["action"], "skip")
+                self.assertNotIn(_PROJECTION, event.raw_message)
+        wrong_runtime = copy.deepcopy(original)
+        self.assertEqual(constrain_backfill(wrong_runtime, object())["action"], "skip")
+        for forgery in (None, "proof", {"recipient": "UBETA"}, ["proof"]):
+            event = copy.deepcopy(original)
+            event.raw_message[_PROJECTION] = forgery
+            before = event.channel_context
+            self.assertIsNone(constrain_backfill(event, self.runner))
+            self.assertEqual(event.channel_context, before, "JSON cannot claim a routed projection")
+        event = copy.deepcopy(original)
+        event.media_urls = ["https://fictional.invalid/root.png"]
+        event.media_types = ["image/png"]
+        event.media_text_inlined = [False]
+        event.reply_to_text = "UNSELECTED_REPLY"
+        self.assertIsNone(constrain_backfill(event, self.runner))
+        self.assertIsNone(event.channel_context)
+        self.assertIsNone(event.reply_to_text)
+        self.assertFalse(event.media_urls)
+        self.assertNotIn(_PROJECTION, event.raw_message)
+        self.runner.session_store = SessionStore(self.home / "sessions", config=self.runner.config)
+        self.addCleanup(self.runner.session_store._db.close)
+        # Exercise the actual native persistence codec, with the already-validated
+        # source supplied. This is serialization proof, not a substitute auth test.
+        snapshot = _snapshot_native(self.runner, event, None, encoded_source=event.source.to_dict())
+        encoded = json.dumps(snapshot)
+        self.assertNotIn("UNSELECTED_ROOT_PRIOR", encoded)
+        self.assertNotIn(_PROJECTION, encoded)
+        self.assertIn("DIAGRAM_ONLY", encoded)
+
     async def test_semantic_normal_scoped_input_and_nonrecipient(self):
         self.enable_semantic()
         original = self.message("<@UALPHA> revise SUMMARY_ONLY; <@UBETA> check DIAGRAM_ONLY.")
