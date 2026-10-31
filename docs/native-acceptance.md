@@ -62,9 +62,10 @@ examples, not calibrated accuracy: uncertain answers remain no-work, not synthet
 
 ## Packaging/startup and independent acceptance
 
-`test_core.py` launches a fresh subprocess that parses DB-free config, registers the
-plugin and activates its actual factory/middleware without init/owner setup or routing
-files. `test_plugin_surface.py` runs real directory discovery, activation and isolated
+`test_core.py` launches a fresh standard-library-only subprocess that parses DB-free
+config and registers the plugin without init/owner setup or routing files. It does not
+activate Slack SDK middleware in the SDK-free core lane. The separate required native
+`test_plugin_surface.py` runs real directory discovery, actual factory activation and isolated
 Plugin Doctor with no admin command. `test_installed.py` runs Python-I outside the source
 checkout against a fresh separate wheel target, verifies the real entry point and factory,
 and rejects stale Store/PlanStore/admin modules/console scripts. Source-suite wheel skips

@@ -28,7 +28,7 @@ architecture. This supersedes the unreleased persistent-design plan and its old 
 
 | Outcome | Executable boundary |
 | --- | --- |
-| Fresh startup without database/init/admin/bootstrap | test_core fresh subprocess→register→factory→middleware; native PluginManager/Doctor; outside-checkout rebuilt wheel |
+| Fresh startup without database/init/admin/bootstrap | test_core SDK-free fresh subprocess→config/register; mandatory native PluginManager→factory/middleware/Doctor; outside-checkout rebuilt wheel |
 | Two topics/two recipients and exact actionable scope | deterministic semantic spans plus real AsyncApp/SlackAdapter received CURRENT and both-recipient controls; explicit real Jev native canary |
 | Unmentioned contextual reply; mixed ACK/new work | source-reference and multilingual controls; explicit real Jev journeys |
 | Same-topic joint recipients and separate prior authors | semantic group/reference controls; actual native scoped receiver/reconstructed Gate |

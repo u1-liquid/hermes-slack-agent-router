@@ -1,4 +1,4 @@
-"""Stateless configuration, identity and fresh-process activation boundaries."""
+"""Stateless configuration/registration without optional native SDK dependencies."""
 
 import json
 import os
@@ -17,7 +17,7 @@ KEY = Thread("TDEMO", "CDEMO", "100.001")
 
 
 class CoreTests(unittest.TestCase):
-    def test_fresh_process_activation_without_database_or_initialization(self):
+    def test_fresh_process_config_and_registration_without_database_or_initialization(self):
         # Run a real subprocess/module entry point, not an inline bootstrap script.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -26,6 +26,7 @@ class CoreTests(unittest.TestCase):
             result = subprocess.run(
                 [
                     sys.executable,
+                    "-S",  # Core startup must not inherit optional native SDK packages.
                     "-m",
                     "unittest",
                     "discover",
@@ -47,7 +48,7 @@ class CoreTests(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get("STATELESS_STARTUP_CONFIG"), "fresh subprocess receiver")
     def test_startup_receiver(self):
-        from unittest.mock import Mock, patch
+        from unittest.mock import Mock
 
         from hermes_slack_thread_assignee.plugin import register
 
@@ -57,12 +58,7 @@ class CoreTests(unittest.TestCase):
         register(ctx)
         ctx.register_cli_command.assert_not_called()
         ctx.register_platform_handler.assert_called_once()
-        # Actual factory/config/Gate construction must work without init or operator bootstrap.
-        factory = ctx.register_platform_handler.call_args.args[1]
-        with patch.dict(os.environ, {"HERMES_THREAD_ASSIGNEE_CONFIG": str(path)}):
-            native = Mock()
-            factory(native, Mock())
-            native.use.assert_called_once()
+        # Actual factory activation is mandatory in the separate native/discovery/wheel lane.
         ctx.on_unload.call_args.args[0]()
 
     def test_config_rejects_ambiguous_or_legacy_state_and_defaults_no_egress(self):
