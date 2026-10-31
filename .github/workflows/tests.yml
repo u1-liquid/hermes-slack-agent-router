@@ -18,7 +18,7 @@ jobs:
           python -W error::ResourceWarning -m unittest discover -s tests -p test_core.py -v
           python -W error::ResourceWarning -m unittest discover -s tests -p test_semantic.py -v
           python -W error::ResourceWarning -m unittest discover -s tests -p test_boundaries.py -v
-          python -W error::ResourceWarning -m unittest discover -s tests -p test_storage_corruption.py -v
+
       # Only fixed source/config values enter commands; no PR/event text interpolation.
       - run: ruff check hermes_slack_thread_assignee tests
       - run: ruff format --check hermes_slack_thread_assignee tests

@@ -3,8 +3,6 @@
 import asyncio
 import json
 import math
-import time
-from pathlib import Path
 
 
 class JevError(ValueError):
@@ -42,9 +40,18 @@ def validate_answers(batch, result, confidence=0.8):
             if name.startswith("u") and "_" in name:
                 unit, field = name.split("_", 1)
                 relevant = field == "kind" or selected.get(unit + "_kind") not in ("ack", "reference")
+                if selected.get(unit + "_destination") == "generic" and field.startswith(("ref", "to")):
+                    relevant = False  # Generic routing uses main/main_ref instead of these answers.
             elif name.startswith("same"):
                 left, right = name[4:].split("_")
                 relevant = all(selected.get(f"u{i}_kind") == "action" for i in (left, right))
+            elif name == "main" or name.startswith("main_ref"):
+                relevant = any(
+                    key.endswith("_destination")
+                    and value == "generic"
+                    and selected.get(key.replace("_destination", "_kind")) == "action"
+                    for key, value in selected.items()
+                )
             if relevant and answer["confidence"] < confidence:
                 raise JevError("uncertain relevant answer: " + name)
         return selected
@@ -88,21 +95,18 @@ class JevClient:
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    def __init__(self, executable="jev", timeout=1.2, receipt_directory: Path | None = None):
+    def __init__(self, executable="jev", timeout=1.2):
         if not 0 < timeout <= 1.2:
             raise ValueError("Jev sub-budget must be in (0, 1.2] seconds")
         self.executable = executable
         self.timeout = timeout
-        self.receipt_directory = receipt_directory
 
     async def ask(self, batch):
         raw = json.dumps(batch, ensure_ascii=False, allow_nan=False).encode()
         if len(raw) > 262144:
             raise JevError("oversized serialized request")
         process = None
-        started = time.monotonic()
-        receipt = {"protocol": "jev ask Choice", "exit": None, "elapsed_ms": None}
-        stdout, stderr = b"", b""
+
         try:
             async with asyncio.timeout(self.timeout):
                 process = await asyncio.create_subprocess_exec(
@@ -114,8 +118,7 @@ class JevClient:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                stdout, stderr = await self._exchange(process, raw)
-            receipt["exit"] = process.returncode
+                stdout, _ = await self._exchange(process, raw)
             if process.returncode != 0:
                 raise JevError("native Jev failed")
             if len(stdout) > 262144:
@@ -140,12 +143,3 @@ class JevClient:
                     await asyncio.gather(discard(process.stdout), discard(process.stderr), process.wait())
 
                 await asyncio.shield(reap())
-                receipt["exit"] = process.returncode
-            receipt["elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
-            if self.receipt_directory is not None:
-                root = Path(self.receipt_directory)
-                root.mkdir(parents=True, exist_ok=True, mode=0o700)
-                (root / "jev-request.json").write_bytes(raw)
-                (root / "jev-result.json").write_bytes(stdout)
-                (root / "jev-stderr.txt").write_bytes(stderr)
-                (root / "jev-receipt.json").write_text(json.dumps(receipt, indent=2))

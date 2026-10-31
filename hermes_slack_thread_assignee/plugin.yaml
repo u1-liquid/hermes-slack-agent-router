@@ -1,7 +1,7 @@
 manifest_version: 2
 name: slack-thread-assignee
 version: 0.1.0
-description: Stable shared Slack thread recipient eligibility
+description: Stateless contextual Slack recipient routing through Jev
 kind: standalone
 author: u1-liquid
 license: MIT

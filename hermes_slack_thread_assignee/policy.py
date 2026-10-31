@@ -60,13 +60,6 @@ class Event:
         object.__setattr__(self, "direct", tuple(sorted(set(self.direct))))
 
 
-@dataclass(frozen=True)
-class Decision:
-    action: str
-    reason: str
-    revision: int | None = None
-
-
 def addresses(text: str) -> tuple[str, ...]:
     """Parse flat Slack composition only; rich blocks need bridge validation."""
     visible = []

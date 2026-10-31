@@ -1,8 +1,5 @@
 """Real directory discovery, registration and isolated Plugin Doctor."""
 
-import argparse
-import contextlib
-import io
 import json
 import os
 import sys
@@ -16,7 +13,7 @@ SOURCE = os.environ.get("HERMES_TEST_SOURCE")
 
 @unittest.skipUnless(SOURCE, "requires isolated official host")
 class PluginSurface(unittest.TestCase):
-    def test_real_discovery_cli_doctor_and_missing_config(self):
+    def test_real_discovery_activation_doctor_without_database_or_admin(self):
         assert SOURCE
         sys.path.insert(0, SOURCE)
         self.addCleanup(sys.path.remove, SOURCE)
@@ -30,9 +27,6 @@ class PluginSurface(unittest.TestCase):
             config.write_text(
                 json.dumps(
                     {
-                        "database": str(root / "db"),
-                        "database_id": "demo",
-                        "registry_revision": "1",
                         "participants": [
                             {"workspace": "TDEMO", "bot_user": "UBETA", "runtime_profile": "default"}
                         ],
@@ -49,16 +43,16 @@ class PluginSurface(unittest.TestCase):
                 manager._load_plugin(matches[0])
                 self.assertIsNone(manager._plugins["slack-thread-assignee"].error)
                 self.assertEqual(len(manager.get_platform_handler_factories("slack")), 1)
-                command = manager._cli_commands["thread-assignee"]
-                parser = argparse.ArgumentParser()
-                command["setup_fn"](parser)
-                args = parser.parse_args(["--config", str(config), "init"])
-                with contextlib.redirect_stdout(io.StringIO()) as output:
-                    self.assertEqual(command["handler_fn"](args), 0)
-                self.assertTrue(json.loads(output.getvalue())["initialized"])
+                from unittest.mock import Mock
+
+                native = Mock()
+                manager.get_platform_handler_factories("slack")[0][0](native, Mock())
+                native.use.assert_called_once()
+                self.assertNotIn("thread-assignee", manager._cli_commands)
+                self.assertFalse((root / "db").exists())
                 report = doctor_plugin(package)
                 self.assertTrue(report.ok, report.format_text())
                 with patch.dict(os.environ, {"HERMES_THREAD_ASSIGNEE_CONFIG": ""}):
                     report = doctor_plugin(package)
                     self.assertTrue(report.ok, report.format_text())
-                    # Discovery/CLI must work without activating native routing.
+                    # Discovery remains possible without activating native routing.

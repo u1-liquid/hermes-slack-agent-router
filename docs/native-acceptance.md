@@ -1,103 +1,93 @@
-# Native acceptance boundary
+# Stateless native acceptance boundary
 
-## Candidate and host
+## Host and candidate
 
-The semantic candidate supplies native Jev Choice integration, a source-grounded
-multi-unit plan, shared SQLite claims/fences/history, recipient-specific private
-Bolt request projection and trusted local administration. Main/CAS/audit remain
-administrative. No model-facing mutation tool, Slack post, force-process flag,
-synthetic mention or host source patch is registered.
+Pinned official Hermes v0.22.5, bf0203a794a07aac3ff764972ab9087baa4e4f4e;
+Python3.14, Slack Bolt1.30.0 and Slack SDK3.44.1 via tests/requirements-native.txt.
+The candidate uses request-local context/typed-Jev plans and private Bolt projection.
+There is no plugin assignment/decision/topic/transcript store, admin/init CLI or manual
+main bootstrap. Discovery and startup require only static participants/input policy.
+CI retains distinct required core/native jobs on Python3.14, not an interpreter matrix.
 
-The pinned official host is Hermes v0.22.5,
-`bf0203a794a07aac3ff764972ab9087baa4e4f4e`. Native tests use Python3.14,
-Slack Bolt1.30.0 and Slack SDK3.44.1 with `tests/requirements-native.txt` in an
-isolated environment. CI has one `core` job and a separate mandatory `native` job,
-both on Python3.14. These bounded imports are
-not a full host/browser installation. Local self-check is not independent review,
-hosted exact-head CI, live Slack operation or deployment permission.
+## Executed versus controlled boundaries
 
-## Exercised source boundaries
+`tests/test_native.py` uses actual AsyncApp dispatch, SlackAdapter listeners and native
+GatewayRunner identity/session/pending/queue methods. Only external SDK I/O and the final
+model/busy receivers are controlled. Offline native tests control Jev answers too; they
+are not claimed as external model inference. Assertions inspect the receiver's actual
+CURRENT text, not just a classifier label.
 
-The remediated source collection passed 77 tests with three explicit skips out of 80:
-two opt-in external canaries and the separate installed-wheel job. The latter passed
-separately outside the checkout with isolated Python. CLI parser/dispatch dry-run/apply,
-purge tombstone/no rehydration, prior-rich originals, canonical duplicate call-count,
-oversized-request no-egress and pending-on-SDK-failure controls passed. This is a
-builder receipt, not expanded independent review or hosted CI.
+- Both recipients get disjoint assigned CURRENT spans and relevant labeled PRIOR sources.
+  Nonrecipients get empty200 before native model/chat/warning/queue/steering.
+- Rich/nested edited input is canonicalized with exact Unicode/source-field provenance;
+  private projection removes excluded blocks/files/attachments, preserving caller originals.
+- Native original/projected authorization and mention/wake admission intersect. A mention
+  in somebody else's action or rendered PRIOR text cannot manufacture wake permission.
+- Normal handling, legacy busy, shared native burst, runner FIFO/promotion/merge/replay
+  retain scope. This is not a separate deployed SessionAuthority persistence system.
+- Commands, bots/self, DMs/MPIMs and exact monitoring keep native handling. Genuine blocking
+  approval, clarification, slash confirmation and update controls bypass/recheck after awaits,
+  including SDK/Jev failure. Short control replies do not become new broad work.
+- Current timestamp is excluded. Root/current media and incomplete/foreign/future/conflicting
+  history are unresolved. Opposite receivers with reversed registry/history produce the
+  same canonical question batch. Edited input reclassifies rather than reuses stored state.
+- Native duplicate accepted-event suppression survives while plugin classification may
+  run again. A fresh Gate reconstructs prior references from native history without DB/init.
+- Socket Mode sends exact empty acknowledgement, unknown native identity is not guessed,
+  runtime/transport rebinding remains checked and disposed callbacks pass through.
 
-`tests/test_native.py` runs actual AsyncApp dispatch, SlackAdapter listeners,
-GatewayRunner identity/session/pending/queue methods and SQLite. External SDK I/O
-and final model/busy receivers are controlled. Assertions inspect actual received
-CURRENT text, not just routing labels:
+`tests/test_semantic.py` exercises exact spans, selected source authors, current topic
+groups, joint recipients, multilingual ACK/new-work, quoted context, generic lead/source
+support without bootstrap, atomic uncertainty, typed distribution/key/confidence validation,
+request/output caps and actual native subprocess cancellation/reaping. `test_boundaries.py`
+checks canonical inputs, edits and workspace/ambiguous-identity isolation. DB lock/schema/
+migration/CAS/audit/purge/election tests are intentionally removed with the rejected store.
 
-- Both recipients receive only their assigned CURRENT source; nonrecipients return
-  empty200 before downstream/model/chat/warning/queue.
-- Ordinary rich_text canonicalization removes excluded CURRENT composition while
-  retaining source leaves, fieldpaths, mapping kinds and original provenance.
-  Prior rich_text uses the same canonicalizer and retains original prior bodies.
-- Legacy busy callback, native pending merge/replay, shared native burst and actual
-  GatewayRunner FIFO/promotion/replay retain only assigned input. This qualifies
-  the supported boundary, not a separate durable SessionAuthority deployment.
-- Original and projected channel admission intersect. A mention only in another
-  unit or rendered PRIOR reference cannot manufacture projected mention permission.
-- Triggering current_ts is excluded from semantic evidence and the host's PRIOR
-  formatter. Unsupported root/current media is explicit unresolved.
-- Commands, bots, DMs and exact monitoring bypass Jev; native pending state is
-  rechecked after awaited classification. SDK failure is visible unresolved with
-  main preserved. Unknown identity/control ownership remains native/degraded.
-- Genuine blocking approval, Socket Mode empty ACK, runtime/transport rebinding,
-  filesystem faults, unload and native source/control guards retain baseline tests.
+## Explicit real fictional inference
 
-`tests/test_semantic.py` additionally covers real two-process agreement/one
-classifier, restart/fencing, stale evidence, immutable accepted generations,
-explicit recovery/purge safety, canonical delivery-envelope binding, malformed
-Choice distributions, exact Unicode spans, mixed/reference uncertainty and real
-native child cancellation/output limits. Control fixtures never substitute for
-external Jev execution.
+`JEV_FICTIONAL_CANARY_DIR` opts into real Jev CLI0.23.1 through the production
+prepare→JevClient.ask→assemble path. The semantic journey test requires READY/correct
+scopes for two topics, contextual unmentioned reply, ACK/new work, same-topic multiple
+recipients, quote/reference and a generic lead inferred from conversation; ambiguous
+addressee requires unresolved/no views. The native real-Jev test additionally drives
+actual AsyncApp→SlackAdapter input for both recipients of a multi-topic message, an
+unmentioned contextual reply and a generic continuation. SDK history and final model
+receiver remain controlled; inference is external and real, not replayed fixture answers.
 
-The explicit local real canaries use independently fictional messages. Five
-journeys require READY/correct views (two topics, contextual unmentioned reply,
-mixed acknowledgement/action, same-topic multiple recipients, quote/reference);
-uncertainty requires unresolved. Current people sets derive from authors of
-Jev-selected source references, not an independent contradictory person oracle.
-Threshold0.8 is not calibrated accuracy or authorization. Native request/result,
-model/latency/exit evidence stays private; no CI secrets or private Slack input.
+Raw request/result/exit/latency, plan and native received-text artifacts belong only to
+the opt-in test harness. Production has no filesystem transcript/decision capture. No
+private Slack/customer/credential/reversible-private fixture or CI credential is used.
+Confidence0.8 is preserved, not tuned to make canaries pass. These are bounded fictional
+examples, not calibrated accuracy: uncertain answers remain no-work, not synthetic success.
 
-## Packaging and operational checks
+## Packaging/startup and independent acceptance
 
-`tests/test_plugin_surface.py` exercises actual PluginManager directory discovery,
-registration, registered parser/CLI and isolated Plugin Doctor, including missing
-configuration. Doctor uses an isolated temporary home/network-denied sandbox.
-`tests/test_installed.py` requires a newly rebuilt wheel installed into a separate
-target, Python `-I` and execution outside source; source-suite skips are not wheel
-proof. CI makes native/surface/wheel setup mandatory. Recheck these gates against
-the final candidate, not an older wheel.
+`test_core.py` launches a fresh subprocess that parses DB-free config, registers the
+plugin and activates its actual factory/middleware without init/owner setup or routing
+files. `test_plugin_surface.py` runs real directory discovery, activation and isolated
+Plugin Doctor with no admin command. `test_installed.py` runs Python-I outside the source
+checkout against a fresh separate wheel target, verifies the real entry point and factory,
+and rejects stale Store/PlanStore/admin modules/console scripts. Source-suite wheel skips
+are not wheel proof; native CI explicitly requires the separate installed-wheel gate.
 
-The CLI provides explicit schema1 initialization/additive semantic upgrade, main
-bootstrap/CAS administration, bounded metadata `plans`, and binding/fence-specific
-`recover`/`purge`. Both content operations require `--quiescent` plus an explicit
-`--dry-run` or `--apply`. Quiescence is an operator assertion, not automatically
-verified gateway state. Active claims are rejected. Recovery only reopens retained
-unresolved work for a later native retry, never accepted/purged work or automatic
-Slack replay. Purge leaves a no-execution tombstone, protects main/audit and is not
-forensic erasure of journals/backups. No automatic retention scheduler exists.
+The current source must pass complete local suites, Ruff/check-format/diff/build, fresh
+wheel/native gates, one consolidated independent review and exact-head hosted core/native.
+Implementation self-checks, prior persistent-product acceptance and scalar code-quality
+scores do not supply current independent stateless acceptance. Historical private evidence
+remains at its original source/behavior boundary, not relabeled as database-free proof.
 
-## Limits, not hidden guarantees
+## Limits and unperformed operations
 
-Default semantic egress is off. Exact workspace/channel/data-class policy must
-permit current content, history and audience; public channel naming or aliases do
-not authorize private data. Unsupported/inseparable rich/media/adoption is visible
-unresolved, never a successful whole-message fallback. Storage unavailable means
-bounded local diagnosis/drop, not a durable record claim or destructive repair.
+Context is a bounded complete short thread (root plus at most6 prior messages/6000characters).
+`has_more`, unsupported/inseparable composition, missing/ambiguous lead and failed Jev produce
+bounded fixed local diagnostics and empty ordinary acknowledgement, not durable recovery.
+Only request-local memory exists; repeated events/processes/restarts can classify again and
+independent stochastic plans may differ. Native history/dedup are not plugin consensus.
 
-One host/local filesystem only. The2.5s ingress target passes remaining budget to
-Jev/claim/publication; native inference is at most1.2s. Short SQLite waits and
-cancellation cleanup depend on OS/filesystem scheduling, not hard real-time SLA.
-No atomic native pending-state lease or universal auth/control coverage is exposed.
-A projected receipt is not delivered/executed/exactly-once. Disabled/broken plugins
-and ambiguous native mappings are explicit framework coverage limitations.
-
-Unload disposes retained callbacks into pass-through; physical unwiring is not
-supported, so re-enable/replacement needs operator-managed restart. No live install,
-restart, private egress or release was performed by the local acceptance fixtures.
-Independent review and exact-head hosted CI remain required before release.
+Default semantic egress is off; exact fictional/public-permitted policy is required. Native
+auth/control/wake remains authoritative. No atomic native control lease or universal
+fail-closed coverage is claimed for disabled/broken plugins/unknown native mappings.
+Ingress target2.5s and Jev<=1.2s include bounded I/O and cancellation cleanup, not a hard
+OS scheduling SLA. Physical middleware unwiring is unsupported; replacement/re-enable
+needs an operator-managed restart. No live install/Slack probe, private egress, real DB
+file deletion, Gateway restart, merge/release or deployment is performed by these tests.

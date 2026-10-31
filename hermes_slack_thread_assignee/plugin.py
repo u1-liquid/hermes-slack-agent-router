@@ -1,28 +1,34 @@
-"""Official native factory/global middleware; no listener or transport replacement."""
+"""Request-local contextual routing through the official native middleware seam."""
 
 import asyncio
 import copy
 import logging
 import os
 import time
+from decimal import Decimal
 from pathlib import Path
 
 from .bridge import Bridge, Uncertain, canonical_text, composition
-from .config import Config
-from .jev import JevClient
-from .plans import PlanStore
-from .semantic import History, Plan, SemanticError, Snapshot
+from .config import Config, SemanticPolicy
+from .jev import JevClient, JevError
+from .policy import Thread, identifier
+from .semantic import History, SemanticError, Snapshot, assemble, prepare
 
 logger = logging.getLogger(__name__)
 
 
 class Gate:
-    def __init__(self, store, *, monitoring=(), semantic=None):
-        self.store = store
+    def __init__(self, participants, *, monitoring=(), semantic=None):
+        self.participants = tuple(participants)
         self.monitoring = frozenset(tuple(item) for item in monitoring)
         self.disposed = False
-        self.semantic = semantic
+        self.semantic = semantic if semantic is not None else SemanticPolicy()
         self.jev = JevClient()
+
+    @staticmethod
+    def unresolved(reason):
+        # Fixed local reason codes only: no transcript, raw model answer or durable queue.
+        logger.warning("thread-assignee unresolved: %s", reason)
 
     @staticmethod
     def native_policy(adapter, event, bot):
@@ -52,117 +58,89 @@ class Gate:
         )
 
     async def project(self, body, bound, adapter, deadline):
-        assert self.semantic is not None
-        plans = PlanStore(self.store)
         event = copy.deepcopy(body["event"])
         if event.get("subtype") == "message_changed":
             event.update(event.get("message") or {})
             event.pop("message", None)
-        main, revision = await asyncio.to_thread(self.store.show, bound.event.thread)
-        source = Snapshot(
-            bound.event.thread,
-            bound.event.identity,
-            bound.event.sender,
-            event.get("text", ""),
-            (),
-            tuple(r for r in self.store.participants if r.workspace == bound.event.thread.workspace),
-            self.store.metadata["registry_revision"],
-            self.semantic.policy_revision,
-            revision,
-            main,
-        )
-
-        async def unresolved(reason):
-            claim = await asyncio.to_thread(plans.claim, source)
-            if claim.owner:
-                await asyncio.to_thread(
-                    plans.publish,
-                    source,
-                    claim.fence,
-                    Plan(source.binding, "unresolved", reason, source.text),
-                )
-
-        classes = next(
-            (
-                classes
-                for workspace, channel, classes in self.semantic.scopes
-                if workspace == source.thread.workspace and channel == source.thread.channel
-            ),
-            (),
-        )
-        if not any(self.semantic.permits(source.thread, kind) for kind in classes):
-            return await unresolved("privacy-disabled")
-        if event.get("files") or event.get("attachments"):
-            return await unresolved("unsupported-current-composition")
+        thread = bound.event.thread
+        if not any(self.semantic.permits(thread, kind) for kind in ("fictional", "public-permitted")):
+            return self.unresolved("privacy-disabled")
+        if bound.event.provenance == "file_shared" or event.get("files") or event.get("attachments"):
+            return self.unresolved("unsupported-current-composition")
         try:
             text, provenance = canonical_text(event)
         except (SemanticError, KeyError, TypeError):
-            return await unresolved("unsupported-current-composition")
-        from dataclasses import replace
-
-        source = replace(source, text=text, provenance=provenance)
+            return self.unresolved("unsupported-current-composition")
         if not self.native_policy(adapter, event, bound.recipient.bot_user):
-            await asyncio.to_thread(plans.record, source, bound.recipient, "native-not-admitted-original")
             return None
-        client = adapter._team_clients[source.thread.workspace]
+        client = adapter._team_clients[thread.workspace]
         from slack_sdk.errors import SlackClientError
 
         try:
             response = await client.conversations_replies(
-                channel=source.thread.channel,
-                ts=source.thread.root,
+                channel=thread.channel,
+                ts=thread.root,
                 latest=bound.source.message_id,
                 inclusive=False,
                 limit=7,
             )
-        except asyncio.CancelledError:
-            await asyncio.shield(unresolved("context-deadline-or-cancelled"))
-            raise
         except (SlackClientError, OSError, ValueError):
-            return await unresolved("context-fetch-failed")
+            return self.unresolved("context-fetch-failed")
         messages = response.get("messages", [])
-        if response.get("ok") is not True or response.get("has_more") or len(messages) > 6:
-            return await unresolved("incomplete-context")
-        if source.thread.root != bound.source.message_id and not any(
-            item.get("ts") == source.thread.root for item in messages
+        if (
+            response.get("ok") is not True
+            or response.get("has_more")
+            or not isinstance(messages, list)
+            or len(messages) > 7
         ):
-            return await unresolved("missing-root-context")
-        history = []
+            return self.unresolved("incomplete-context")
+        history = {}
         for message in messages:
             if message.get("ts") == bound.source.message_id:
                 continue
-            if (
-                message.get("files")
-                or message.get("attachments")
-                or not message.get("ts")
-                or not message.get("user")
-            ):
-                return await unresolved("unsupported-prior-media-or-identity")
+            if message.get("files") or message.get("attachments"):
+                return self.unresolved("unsupported-prior-media-or-identity")
             try:
+                ts = message["ts"]
+                Thread(thread.workspace, thread.channel, ts)
+                sender = identifier(message["user"])
+                if (
+                    Decimal(ts) >= Decimal(bound.source.message_id)
+                    or Decimal(ts) < Decimal(thread.root)
+                    or (message.get("thread_ts") and message["thread_ts"] != thread.root)
+                    or (message.get("channel") and message["channel"] != thread.channel)
+                    or (message.get("team") and message["team"] != thread.workspace)
+                ):
+                    return self.unresolved("foreign-or-future-context")
                 prior_text, _ = canonical_text(message)
-            except (SemanticError, KeyError, TypeError):
-                return await unresolved("unsupported-prior-composition")
-            history.append(
-                History(
-                    message["ts"],
-                    message["user"],
-                    prior_text,
-                    await asyncio.to_thread(
-                        plans.prior_topic,
-                        source.thread,
-                        message["ts"],
-                        message["user"],
-                        prior_text,
-                        source.identity,
-                    ),
-                    copy.deepcopy(message),
-                )
-            )
-
-        source = replace(source, history=tuple(history), original=copy.deepcopy(body["event"]))
-        plan = await plans.resolve(source, self.jev, budget=max(0, deadline - time.monotonic()))
-        if await asyncio.to_thread(self.store.show, source.thread) != (main, revision):
-            return await unresolved("stale-main")
+                prior = History(ts, sender, prior_text, copy.deepcopy(message))
+            except (ValueError, KeyError, TypeError):
+                return self.unresolved("unsupported-prior-composition")
+            if ts in history and history[ts] != prior:
+                return self.unresolved("conflicting-context")
+            history[ts] = prior
+        if len(history) > 6:
+            return self.unresolved("incomplete-context")
+        if thread.root != bound.source.message_id and thread.root not in history:
+            return self.unresolved("missing-root-context")
+        source = Snapshot(
+            thread,
+            bound.event.identity,
+            bound.event.sender,
+            text,
+            tuple(history.values()),
+            tuple(r for r in self.participants if r.workspace == thread.workspace),
+            self.semantic.policy_revision,
+            copy.deepcopy(body["event"]),
+            provenance,
+        )
+        try:
+            async with asyncio.timeout_at(deadline):
+                plan = assemble(source, await self.jev.ask(prepare(source)))
+        except (JevError, SemanticError, TimeoutError):
+            return self.unresolved("classifier-failed")
+        if plan.status != "ready":
+            return self.unresolved("coverage-or-grounding-unresolved")
         text = plan.view(bound.recipient)
         if not text:
             return None
@@ -183,9 +161,7 @@ class Gate:
         admission = {**event, "text": current}
         admission.pop("blocks", None)
         if not self.native_policy(adapter, admission, bound.recipient.bot_user):
-            await asyncio.to_thread(plans.record, source, bound.recipient, "native-not-admitted")
             return None
-        await asyncio.to_thread(plans.record, source, bound.recipient, "selected-projected-not-delivery")
         return projected
 
     def dispose(self):
@@ -202,24 +178,21 @@ class Gate:
             exempt = (key.workspace, key.channel, bound.event.sender) in self.monitoring
             if exempt or bridge.pending(bound):
                 return body
-            if self.semantic is not None:
-                if adapter._early_reject_unauthorized(
-                    bound.event.sender, key.channel, False, thread_id=key.root
-                ):
-                    return None
-                try:
-                    projected = await self.project(body, bound, adapter, deadline)
-                except (Exception, asyncio.CancelledError):
-                    if bridge.pending(bound):
-                        return body
-                    raise
-                if self.disposed or bridge.pending(bound):
-                    return body
-                return projected
-            decision = await asyncio.to_thread(self.store.decide, bound.event, bound.recipient)
-            if decision.action == "drop" and not self.disposed and not bridge.pending(bound):
+            if bound.recipient not in self.participants:
+                raise Uncertain("unconfigured receiving runtime")
+            if adapter._early_reject_unauthorized(bound.event.sender, key.channel, False, thread_id=key.root):
                 return None
-            return body
+            try:
+                projected = await self.project(body, bound, adapter, deadline)
+            except (Exception, asyncio.CancelledError):
+                if bridge.pending(bound):
+                    return body
+                raise
+            if self.disposed or bridge.pending(bound):
+                return body
+            if adapter._team_bot_user_ids.get(key.workspace) != bound.recipient.bot_user:
+                raise Uncertain("native receiver changed")
+            return projected
 
         async def middleware(body, next, req):
             if self.disposed:
@@ -231,22 +204,17 @@ class Gate:
                 if projected is None:
                     return BoltResponse(status=200, body="")
                 req.body = projected
-            except Uncertain as exc:
-                logger.debug("thread-assignee native pass-through: %s", exc)
-            except Exception:
-                if self.semantic is not None:
-                    logger.warning("thread-assignee semantic unresolved; no native inference", exc_info=True)
-                    return BoltResponse(status=200, body="")
-                logger.warning("thread-assignee classification failed; native pass-through", exc_info=True)
+            except Uncertain:
+                logger.debug("thread-assignee native exemption or unknown identity/control; pass-through")
+            except Exception:  # noqa: BLE001 - fail closed at ingress without logging untrusted payloads
+                self.unresolved("ingress-failed")
+                return BoltResponse(status=200, body="")
             return await next()
 
         native.use(middleware)
 
 
 def register(ctx):
-    from .cli import parser, run
-
-    ctx.register_cli_command("thread-assignee", "Inspect or administer shared Slack assignments", parser, run)
     gates = []
     disposed = False
 
@@ -260,12 +228,12 @@ def register(ctx):
         if disposed:
             return
         path = os.environ.get("HERMES_THREAD_ASSIGNEE_CONFIG")
-        if not path:
+        if not path or not Path(path).is_absolute():
             raise ValueError(
-                "Set HERMES_THREAD_ASSIGNEE_CONFIG to an absolute shared JSON config; routing is not active"
+                "Set HERMES_THREAD_ASSIGNEE_CONFIG to an absolute participant/input-policy config; routing is not active"
             )
         config = Config.load(Path(path))
-        gate = Gate(config.store(), monitoring=config.monitoring, semantic=config.semantic)
+        gate = Gate(config.participants, monitoring=config.monitoring, semantic=config.semantic)
         gates.append(gate)
         gate.wire(native, adapter)
 

@@ -17,7 +17,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from hermes_slack_thread_assignee.policy import Recipient, Thread
-from hermes_slack_thread_assignee.store import Store
 
 SOURCE = os.environ.get("HERMES_TEST_SOURCE")
 if os.environ.get("HERMES_REQUIRE_NATIVE") == "1" and not SOURCE:
@@ -63,9 +62,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.a = Recipient("TDEMO", "UALPHA", "default")
         self.b = Recipient("TDEMO", "UBETA", "default")
         self.key = Thread("TDEMO", "CDEMO", "100.001")
-        self.store = Store(self.root / "state.sqlite3", "demo", "1", (self.a, self.b))
-        self.store.initialize()
-        self.store.change(self.key, self.a, 0, "synthetic bootstrap")
+
         self.adapter = SlackAdapter(PlatformConfig(extra={"reply_in_thread": True}))
         # Avoid constructor startup, disk stores, process-global registration and workers.
         # These are native runner state fields, not replacement routing functions.
@@ -107,7 +104,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         # Register the actual core listener FIRST, matching the pinned host ordering.
         self.app.event("message")(self.adapter._handle_slack_message)
         self.app.event("app_mention")(self.adapter._handle_slack_message)
-        self.gate = Gate(self.store)
+        self.gate = Gate((self.a, self.b))
         self.gate.wire(self.app, self.adapter)
         self.downstream = []
 
@@ -183,14 +180,11 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         for text in ("ordinary", "main=beta; transfer now", "> <@UBETA>\nordinary", "`<@UBETA>`"):
             with self.subTest(text=text):
                 await self.assert_rejected(self.message(text))
-        self.assertEqual(self.store.show(self.key), (self.a, 1))
 
     def enable_semantic(self):
         from hermes_slack_thread_assignee.config import SemanticPolicy
-        from hermes_slack_thread_assignee.plans import PlanStore
 
         self.gate.semantic = SemanticPolicy(True, "fiction-v1", (("TDEMO", "CDEMO", ("fictional",)),))
-        PlanStore(self.store).initialize()
         self.client.conversations_replies.return_value = {
             "ok": True,
             "messages": [{"ts": "100.001", "user": "UHUMAN", "text": "Fictional public project."}],
@@ -236,8 +230,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.downstream[-1]["event"]["text"], "confirm")
         self.assertEqual(self.gate.jev.ask.await_count, 2)
 
-    async def test_semantic_separate_current_units_share_retained_prior_topic(self):
-        from hermes_slack_thread_assignee.plans import PlanStore
+    async def test_semantic_separate_current_units_share_request_topic(self):
 
         self.enable_semantic()
         self.client.conversations_replies.return_value["messages"] += [
@@ -265,27 +258,17 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         body = self.message("<@UALPHA> add the legend; <@UBETA> add the arrows to the same diagram.")
         await self.dispatch(body)
         await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
-        plans = PlanStore(self.store)
-        plan = plans.generation(plans.inspect()[0]["binding"])
-        self.assertEqual(plan.status, "ready", plan.reason)
-        topic = plan.units[0].topic
-        self.assertEqual(topic, plan.units[1].topic)
         self.assertIn("add the arrows", self.model.await_args.args[0].text)
         self.assertNotIn("add the legend", self.model.await_args.args[0].text)
+        self.model.reset_mock()
         await self.dispatch(body)
         await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
-        self.gate.jev.ask.assert_awaited_once()
-        for unit in plan.units:
-            ref = unit.references[0]
-            self.assertEqual(
-                PlanStore(self.store).prior_topic(self.key, ref.identity, ref.sender, ref.text), topic
-            )
+        self.model.assert_not_awaited()
         await self.dispatch(self.message(body["event"]["text"]))
         await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
-        self.assertTrue(all(u.topic == topic for u in plans.generation(plans.inspect()[-1]["binding"]).units))
+        self.model.assert_awaited_once()
 
-    async def test_semantic_joint_prior_refs_retain_topic_on_reopen(self):
-        from hermes_slack_thread_assignee.plans import PlanStore
+    async def test_semantic_joint_prior_refs_reconstructed_on_new_gate(self):
 
         self.enable_semantic()
         self.client.conversations_replies.return_value["messages"] += [
@@ -312,20 +295,21 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
         await self.dispatch(original)
         await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
-        self.gate.jev.ask.assert_awaited_once()
-        plans = PlanStore(self.store)
-        unit = plans.generation(plans.inspect()[0]["binding"]).units[0]
-        self.assertEqual(unit.people, ("UALPHA", "UBETA"))
-        for reference in unit.references:
-            self.assertEqual(
-                PlanStore(self.store).prior_topic(
-                    self.key, reference.identity, reference.sender, reference.text
-                ),
-                unit.topic,
-            )
+        self.model.assert_awaited_once()
+        from hermes_slack_thread_assignee.plugin import Gate
+
+        fresh = Gate((self.b, self.a), semantic=self.gate.semantic)
+        fresh.jev = self.gate.jev
+        self.gate.dispose()
+        self.gate = fresh
+        fresh.wire(self.app, self.adapter)
+        self.addCleanup(fresh.dispose)
+        self.model.reset_mock()
         await self.dispatch(self.message("<@UALPHA> and <@UBETA> combine your diagram changes again"))
         await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
-        self.assertEqual(plans.generation(plans.inspect()[-1]["binding"]).units[0].topic, unit.topic)
+        self.model.assert_awaited_once()
+        self.assertIn("Add a legend", self.model.await_args.args[0].text)
+        self.assertIn("Add arrows", self.model.await_args.args[0].text)
 
     async def test_semantic_wake_pattern_only_assigned_current_confers_admission(self):
         self.enable_semantic()
@@ -374,7 +358,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.model.reset_mock()
         if not alpha:
             await self.assert_rejected(self.message("<@UALPHA> revise SUMMARY_ONLY."))
-        self.assertEqual(self.store.show(self.key), (self.a, 1))
 
     async def test_semantic_other_recipient_receives_only_own_current(self):
         self.adapter._team_bot_user_ids["TDEMO"] = "UALPHA"
@@ -425,18 +408,14 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.model.assert_awaited_once()
         self.assertNotIn("SUMMARY", self.model.await_args.args[0].text)
 
-    async def test_semantic_disabled_is_durable_no_context_no_client(self):
+    async def test_semantic_disabled_no_context_no_client(self):
         from hermes_slack_thread_assignee.config import SemanticPolicy
-        from hermes_slack_thread_assignee.plans import PlanStore
 
-        plans = PlanStore(self.store)
-        plans.initialize()
         self.gate.semantic = SemanticPolicy()
         self.gate.jev = AsyncMock()
         await self.assert_rejected(self.message("<@UBETA> private scope is not authorized"))
         self.client.conversations_replies.assert_not_awaited()
         self.gate.jev.ask.assert_not_awaited()
-        self.assertEqual(plans.inspect()[0]["status"], "unresolved")
 
     async def test_semantic_shared_busy_burst_received_scope(self):
         self.enable_semantic()
@@ -515,7 +494,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.gate.jev.ask.assert_awaited_once()
 
     async def test_semantic_prior_rich_text_reference_keeps_original(self):
-        from hermes_slack_thread_assignee.plans import PlanStore
 
         self.enable_semantic()
         prior = {
@@ -547,11 +525,9 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
         self.assertIn("PRIOR_DIAGRAM", self.model.await_args.args[0].text)
         self.assertNotIn("SUMMARY_ONLY", self.model.await_args.args[0].text)
-        plans = PlanStore(self.store)
-        plan = plans.generation(plans.inspect()[0]["binding"])
-        self.assertEqual(plan.units[1].references[0].original, prior)
+        self.assertEqual(self.client.conversations_replies.return_value["messages"], [prior])
 
-    async def test_semantic_duplicate_envelopes_classify_only_once(self):
+    async def test_semantic_duplicate_envelopes_native_delivery_only_once(self):
         self.enable_semantic()
         body = self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY.")
         await self.dispatch(body)
@@ -561,7 +537,8 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         duplicate["event_id"] = "EvFictionRetry"
         await self.dispatch(duplicate)
         await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
-        self.gate.jev.ask.assert_awaited_once()
+        self.model.assert_awaited_once()
+        self.assertEqual(self.gate.jev.ask.await_count, 2)
 
     async def test_semantic_sdk_failure_pending_preserves_native_control(self):
         self.enable_semantic()
@@ -579,18 +556,15 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.downstream[-1]["event"]["text"], body["event"]["text"])
         self.gate.jev.ask.assert_not_awaited()
 
-    async def test_semantic_sdk_fault_is_durable_and_main_preserved(self):
-        from hermes_slack_thread_assignee.plans import PlanStore
+    async def test_semantic_sdk_fault_explicit_silent_no_work(self):
 
         self.enable_semantic()
         self.client.conversations_replies.side_effect = OSError("fictional SDK failure")
-        await self.assert_rejected(self.message("<@UBETA> check diagram"))
+        with self.assertLogs("hermes_slack_thread_assignee.plugin", level="WARNING") as logs:
+            await self.assert_rejected(self.message("<@UBETA> check diagram"))
         self.gate.jev.ask.assert_not_awaited()
-        plans = PlanStore(self.store)
-        metadata = plans.inspect()[0]
-        self.assertEqual(metadata["status"], "unresolved")
-        self.assertEqual(plans.generation(metadata["binding"]).reason, "context-fetch-failed")
-        self.assertEqual(self.store.show(self.key), (self.a, 1))
+        self.assertIn("context-fetch-failed", logs.output[0])
+        self.assertNotIn("fictional SDK failure", "".join(logs.output))
 
     async def test_semantic_pending_recheck_after_classifier_preserves_control(self):
         self.enable_semantic()
@@ -636,12 +610,33 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         busy.assert_not_awaited()
 
     async def test_explicit_secondary_then_ordinary_does_not_transfer(self):
+        self.enable_semantic()
+
+        async def secondary(batch):
+            result = dict.fromkeys(batch["questions"], "no")
+            result.update(coverage="complete", u0_kind="action", u0_destination="specific", u0_to1="yes")
+            return result
+
+        self.gate.jev.ask.side_effect = secondary
         await self.dispatch(self.message("<@UBETA> help"))
         self.assertEqual(len(self.downstream), 1)
         await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
         self.model.assert_awaited_once()
-        self.assertEqual(self.store.show(self.key), (self.a, 1))
         self.model.reset_mock()
+
+        async def generic(batch):
+            result = dict.fromkeys(batch["questions"], "no")
+            result.update(
+                coverage="complete",
+                main="r0",
+                main_ref0="r0",
+                u0_kind="action",
+                u0_destination="generic",
+                u0_to0="yes",
+            )
+            return result
+
+        self.gate.jev.ask.side_effect = generic
         await self.assert_rejected(self.message("ordinary continuation"))
 
     async def test_pending_clarify_choice_preserves_native_control(self):
@@ -686,14 +681,40 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.downstream), 1)
 
     async def test_explicit_multiple_mentions_keep_secondary_eligible(self):
+        self.enable_semantic()
+
+        async def joint(batch):
+            result = dict.fromkeys(batch["questions"], "no")
+            result.update(
+                coverage="complete", u0_kind="action", u0_destination="specific", u0_to0="yes", u0_to1="yes"
+            )
+            return result
+
+        self.gate.jev.ask.side_effect = joint
         await self.dispatch(self.message("<@UALPHA> <@UBETA> jointly"))
         self.assertEqual(len(self.downstream), 1)
         await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
         self.model.assert_awaited_once()
-        self.assertEqual(self.store.show(self.key), (self.a, 1))
 
-    async def test_main_ordinary_reaches_native_model_boundary(self):
-        self.store.change(self.key, self.b, 1, "synthetic transfer")
+    async def test_inferred_main_ordinary_reaches_native_model_without_bootstrap(self):
+        self.enable_semantic()
+        self.client.conversations_replies.return_value["messages"][0]["text"] = (
+            "Beta, lead this whole thread."
+        )
+
+        async def generic(batch):
+            result = dict.fromkeys(batch["questions"], "no")
+            result.update(
+                coverage="complete",
+                main="r1",
+                main_ref0="r1",
+                u0_kind="action",
+                u0_destination="generic",
+                u0_to1="yes",
+            )
+            return result
+
+        self.gate.jev.ask.side_effect = generic
         await self.dispatch(self.message("ordinary main"))
         await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
         self.model.assert_awaited_once()
@@ -733,9 +754,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         path.write_text(
             json.dumps(
                 {
-                    "database": str(self.store.path),
-                    "database_id": "demo",
-                    "registry_revision": "1",
                     "participants": [self.a.as_dict(), self.b.as_dict()],
                     "monitoring": [{"workspace": "TDEMO", "channel": "CDEMO", "sender": "UHUMAN"}],
                 }
@@ -767,26 +785,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             await self.dispatch(self.message(text))
             await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
             self.assertEqual(len(self.downstream), before + 1)
-
-    async def test_inaccessible_database_parent_is_silent_and_preserves_state(self):
-        parent = self.root / "database-only"
-        parent.mkdir(mode=0o700)
-        destination = parent / "state.sqlite3"
-        self.store.path.rename(destination)
-        self.store.path = destination
-        original = destination.read_bytes()
-        parent.chmod(0o000)
-        try:
-            await self.assert_rejected(self.message("ordinary inaccessible storage"))
-        finally:
-            parent.chmod(0o700)
-        self.assertEqual(destination.read_bytes(), original)
-        self.assertEqual(self.store.show(self.key), (self.a, 1))
-
-    async def test_missing_shared_store_is_silent_for_verified_ordinary(self):
-        self.store.path.unlink()
-        await self.assert_rejected(self.message("ordinary with unavailable store"))
-        self.assertFalse(self.store.path.exists())
 
     async def test_actual_routed_runtime_and_receiver_rebind(self):
         from gateway.profile_routing import ProfileRoute
@@ -863,34 +861,9 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(task, 3)
         self.assertFalse(approval.has_blocking_approval(key))
 
-    async def test_pending_rechecked_after_real_sqlite_decision(self):
-        import sqlite3
-
-        from tools import clarify_gateway
-
-        _, key = self.source_and_key()
-        original = sqlite3.connect
-
-        def connection(*args, **kwargs):
-            db = original(*args, **kwargs)
-
-            def trace(statement):
-                if "SELECT evidence,recipients,revision" in statement:
-                    clarify_gateway.register("during-store", key, "Choose", ["One", "Two"])
-
-            db.set_trace_callback(trace)
-            return db
-
-        self.addCleanup(clarify_gateway.clear_session, key)
-        with patch("sqlite3.connect", side_effect=connection):
-            await self.dispatch(self.message("late pending reply"))
-        self.assertTrue(self.downstream)
-        self.assertIsNotNone(clarify_gateway.get_pending_for_session(key, include_choice_prompts=True))
-
     async def test_api_human_override_retains_verified_human_policy(self):
         self.adapter.config.extra["api_human_users"] = ["UHUMAN"]
         await self.assert_rejected(self.message("ordinary API input", app_id="ADEMO", client_msg_id=""))
-        self.assertEqual(self.store.show(self.key), (self.a, 1))
 
     async def test_file_metadata_ambiguity_timeout_and_order(self):
         from hermes_slack_thread_assignee.bridge import Bridge, Uncertain
@@ -934,14 +907,134 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         rich = self.message("<@UBETA> explicit", ts="220.001")
         normal = await bridge.bind(rich)
         fallback = await bridge.bind(body)
-        for first, second in ((normal, fallback), (fallback, normal)):
-            # Provenance differs, so either arrival order keeps its own evidence.
-            a = self.store.decide(first.event, first.recipient)
-            b = self.store.decide(second.event, second.recipient)
-            self.assertEqual(
-                {first.event.provenance: a.action, second.event.provenance: b.action},
-                {"message": "allow", "file_shared": "drop"},
-            )
+        self.assertEqual(normal.event.provenance, "message")
+        self.assertEqual(fallback.event.provenance, "file_shared")
+        self.assertEqual(normal.event.thread, fallback.event.thread)
+        self.assertEqual(normal.event.direct, ("UBETA",))
+        self.assertEqual(fallback.event.direct, ())
+
+    async def test_canonical_context_across_receivers_and_foreign_incomplete_rejection(self):
+        self.enable_semantic()
+        history = [
+            {"ts": "100.001", "user": "UHUMAN", "text": "Fictional project root."},
+            {"ts": "101.001", "user": "UBETA", "text": "Diagram prepared."},
+        ]
+        self.client.conversations_replies.return_value = {"ok": True, "messages": history[::-1]}
+        body = self.message("<@UALPHA> revise summary; <@UBETA> check diagram.")
+        await self.dispatch(body)
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        beta_batch = self.gate.jev.ask.await_args.args[0]
+        self.adapter._team_bot_user_ids["TDEMO"] = "UALPHA"
+        self.adapter._bot_user_id = "UALPHA"
+        self.gate.participants = (self.b, self.a)
+        self.client.conversations_replies.return_value["messages"] = history
+        await self.dispatch(self.message(body["event"]["text"]))
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.assertEqual(beta_batch, self.gate.jev.ask.await_args.args[0])
+        for mutation in (
+            {"ok": True, "messages": history, "has_more": True},
+            {"ok": True, "messages": [history[0], {**history[1], "team": "TOTHER"}]},
+            {"ok": True, "messages": [history[0], {**history[1], "thread_ts": "99.001"}]},
+            {"ok": True, "messages": [history[0], {**history[1], "ts": "999.001"}]},
+            {"ok": True, "messages": [history[0], {**history[0], "text": "Conflicting root"}]},
+        ):
+            self.model.reset_mock()
+            self.gate.jev.ask.reset_mock()
+            self.client.conversations_replies.return_value = mutation
+            await self.assert_rejected(self.message(body["event"]["text"]))
+            self.gate.jev.ask.assert_not_awaited()
+
+    async def test_jev_failure_and_late_pending_no_invented_work_or_control_loss(self):
+        from hermes_slack_thread_assignee.jev import JevError
+
+        self.enable_semantic()
+        self.gate.jev.ask.side_effect = JevError("fictional timeout")
+        await self.assert_rejected(self.message("<@UBETA> revise diagram."))
+        _, key = self.source_and_key()
+
+        async def late_failure(batch):
+            state = self.SessionState()
+            state.persistent.update_prompt_pending = True
+            self.runner._sessions[key] = state
+            raise JevError("fictional timeout")
+
+        self.gate.jev.ask.side_effect = late_failure
+        body = self.message("yes")
+        await self.dispatch(body)
+        self.assertEqual(self.downstream[-1]["event"]["text"], "yes")
+
+    @unittest.skipUnless(
+        os.environ.get("JEV_FICTIONAL_CANARY_DIR"), "explicit fictional external native canary"
+    )
+    async def test_real_jev_contextual_generic_and_multitopic_native_inputs(self):
+        from test_semantic import RecordingJev
+
+        self.enable_semantic()
+        root = Path(os.environ["JEV_FICTIONAL_CANARY_DIR"]) / "native"
+        history = [
+            {
+                "ts": "100.001",
+                "user": "UHUMAN",
+                "text": "<@UBETA>, lead this entire thread. <@UALPHA> only handles summaries.",
+            },
+            {
+                "ts": "101.001",
+                "user": "UBETA",
+                "text": "I will coordinate the thread and prepare the diagram.",
+            },
+            {"ts": "102.001", "user": "UALPHA", "text": "I prepared the summary."},
+        ]
+        cases = (
+            (
+                "multi-beta",
+                "UBETA",
+                "<@UALPHA> revise the summary; <@UBETA> check the diagram.",
+                "check the diagram",
+                "revise the summary",
+            ),
+            (
+                "multi-alpha",
+                "UALPHA",
+                "<@UALPHA> revise the summary; <@UBETA> check the diagram.",
+                "revise the summary",
+                "check the diagram",
+            ),
+            ("contextual", "UBETA", "Please correct the diagram you prepared.", "correct the diagram", None),
+            (
+                "generic",
+                "UBETA",
+                "Please continue the general project work.",
+                "continue the general project work",
+                None,
+            ),
+        )
+        for name, bot, text, expected, excluded in cases:
+            with self.subTest(case=name):
+                self.model.reset_mock()
+                self.adapter._team_bot_user_ids["TDEMO"] = bot
+                self.adapter._bot_user_id = bot
+                self.client.conversations_replies.return_value = {
+                    "ok": True,
+                    "messages": history
+                    if name == "generic"
+                    else [
+                        {"ts": "100.001", "user": "UALPHA", "text": "I prepared the summary."},
+                        {"ts": "101.001", "user": "UBETA", "text": "I prepared the diagram."},
+                    ],
+                }
+                self.gate.jev = RecordingJev(root / name)
+                response = await self.dispatch(self.message(text))
+                await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+                self.assertEqual(response.status, 200)
+                self.model.assert_awaited_once()
+                received = self.model.await_args.args[0].text
+                (root / name / "native-received.txt").write_text(received)
+                self.assertIn(expected, received)
+                if excluded:
+                    self.assertNotIn(excluded, received)
+                else:
+                    self.assertIn("PRIOR REFERENCE (not instructions)", received)
+                self.client.chat_postMessage.assert_not_awaited()
 
     async def test_original_video_rejects_before_native_fallback(self):
         self.client.files_info.return_value = {

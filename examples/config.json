@@ -1,7 +1,5 @@
 {
-  "database": "/var/lib/thread-assignee/assignments.sqlite3",
-  "database_id": "demo-local",
-  "registry_revision": "demo-v1",
+
   "participants": [
     {"workspace": "TDEMO", "bot_user": "UALPHA", "runtime_profile": "alpha"},
     {"workspace": "TDEMO", "bot_user": "UBETA", "runtime_profile": "beta"}

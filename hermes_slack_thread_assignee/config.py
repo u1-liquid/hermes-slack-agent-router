@@ -51,9 +51,6 @@ class SemanticPolicy:
 
 @dataclass(frozen=True)
 class Config:
-    database: Path
-    database_id: str
-    registry_revision: str
     participants: tuple[Recipient, ...]
     monitoring: tuple[tuple[str, str, str], ...] = ()
     semantic: SemanticPolicy = SemanticPolicy()
@@ -62,32 +59,28 @@ class Config:
     def load(cls, path: Path):
         try:
             raw = json.loads(Path(path).read_text())
-            required = {"database", "database_id", "registry_revision", "participants"}
+            required = {"participants"}
             if not required <= set(raw) or set(raw) - required - {"monitoring", "semantic"}:
                 raise ValueError("unknown or missing config fields")
-            database = Path(raw["database"])
-            if not database.is_absolute():
-                raise ValueError("database must be absolute")
-            participants = tuple(Recipient(**item) for item in raw["participants"])
-            if not participants or len(set(participants)) != len(participants):
-                raise ValueError("empty or duplicate participant registry")
+            participants = tuple(
+                sorted(
+                    (Recipient(**item) for item in raw["participants"]),
+                    key=lambda r: (r.workspace, r.bot_user, r.runtime_profile),
+                )
+            )
+            if not participants or len({(r.workspace, r.bot_user) for r in participants}) != len(
+                participants
+            ):
+                raise ValueError("empty or ambiguous participant registry")
             monitoring = []
             for item in raw.get("monitoring", []):
                 if set(item) != {"workspace", "channel", "sender"}:
                     raise ValueError("monitoring rules require exact workspace/channel/sender")
                 monitoring.append(tuple(identifier(item[k]) for k in ("workspace", "channel", "sender")))
             return cls(
-                database,
-                identifier(raw["database_id"]),
-                identifier(raw["registry_revision"]),
                 participants,
                 tuple(monitoring),
                 SemanticPolicy.parse(raw.get("semantic")),
             )
         except (OSError, ValueError, TypeError, KeyError) as exc:
             raise ConfigError(str(exc)) from exc
-
-    def store(self):
-        from .store import Store
-
-        return Store(self.database, self.database_id, self.registry_revision, self.participants)

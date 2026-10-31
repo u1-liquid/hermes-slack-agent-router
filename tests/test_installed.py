@@ -1,6 +1,8 @@
 """Wheel-only import/discovery check; execute with -I outside the source cwd."""
 
 import importlib.metadata
+import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -15,7 +17,7 @@ if os.environ.get("HERMES_REQUIRE_WHEEL") == "1" and not TARGET:
 
 @unittest.skipUnless(TARGET, "separate installed-wheel job")
 class InstalledWheel(unittest.TestCase):
-    def test_wheel_metadata_entrypoint_directory_and_cli(self):
+    def test_wheel_entrypoint_activation_without_database_or_admin(self):
         assert TARGET
         target = Path(TARGET).resolve()
         sys.path.insert(0, str(target))
@@ -29,6 +31,9 @@ class InstalledWheel(unittest.TestCase):
         entry = next(e for e in distribution.entry_points if e.group == "hermes_agent.plugins")
         self.assertEqual(entry.name, "slack-thread-assignee")
         self.assertTrue(callable(entry.load()))
+        self.assertFalse(any(e.group == "console_scripts" for e in distribution.entry_points))
+        for module in ("store", "plans", "cli"):
+            self.assertIsNone(importlib.util.find_spec("hermes_slack_thread_assignee." + module))
         source = os.environ["HERMES_TEST_SOURCE"]
         sys.path.append(source)
         self.addCleanup(sys.path.remove, source)
@@ -44,6 +49,22 @@ class InstalledWheel(unittest.TestCase):
             manifest = next(m for m in manifests if m.name == "slack-thread-assignee")
             manager._load_plugin(manifest)
             self.assertIsNone(manager._plugins[entry.name].error)
-            self.assertIn("thread-assignee", manager._cli_commands)
+            self.assertNotIn("thread-assignee", manager._cli_commands)
+            from unittest.mock import Mock
+
+            config = Path(home) / "config.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "participants": [
+                            {"workspace": "TFICTION", "bot_user": "UATLAS", "runtime_profile": "atlas"}
+                        ]
+                    }
+                )
+            )
+            with patch.dict(os.environ, {"HERMES_THREAD_ASSIGNEE_CONFIG": str(config)}):
+                native = Mock()
+                manager.get_platform_handler_factories("slack")[0][0](native, Mock())
+                native.use.assert_called_once()
             report = doctor_plugin(Path(package.__file__).parent)
             self.assertTrue(report.ok, report.format_text())

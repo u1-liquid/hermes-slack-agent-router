@@ -254,7 +254,7 @@ class Bridge:
             direct = composition(event)
         except Uncertain:
             # A verified ordinary human with unknown composition is not a native control exemption.
-            # The semantic ingress validates it and persists unresolved before any native listener.
+            # Semantic ingress validates it before any native listener, without retaining content.
             direct = addresses(event.get("text", ""))
         return Bound(
             Event(thread, event_id, sender, direct, provenance=provenance),
