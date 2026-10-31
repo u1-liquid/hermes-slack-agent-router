@@ -2,9 +2,9 @@
 # The host checkout is imported via HERMES_TEST_SOURCE, not installed in full.
 # These direct versions match the independently exercised local native surface.
 slack-bolt==1.30.0
-slack-sdk==3.44.1
+slack-sdk==3.45.0
 aiohttp==3.14.5
-ruamel.yaml==0.18.16
-python-dotenv==1.2.2
-rich==14.3.3
+ruamel.yaml==0.19.1
+python-dotenv==1.2.4
+rich==15.0.0
 httpx==0.28.1
