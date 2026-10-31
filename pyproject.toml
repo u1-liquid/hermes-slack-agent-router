@@ -5,11 +5,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hermes-slack-thread-assignee"
 version = "0.1.0"
-description = "Stateless contextual Slack recipient routing through Jev for Hermes"
+description = "Context-aware multi-agent Slack message routing for Hermes, powered by Jev."
+readme = "README.md"
+keywords = ["hermes-agent", "slack", "multi-agent", "message-routing", "context-aware", "jev", "typesafe-ai"]
 requires-python = ">=3.11"
 dependencies = ["httpx>=0.28.1,<0.29"]
 license = "MIT"
 authors = [{name = "u1-liquid"}]
+
+[project.urls]
+Homepage = "https://github.com/u1-liquid/hermes-slack-agent-router"
+Repository = "https://github.com/u1-liquid/hermes-slack-agent-router"
+Issues = "https://github.com/u1-liquid/hermes-slack-agent-router/issues"
 
 [project.entry-points."hermes_agent.plugins"]
 slack-thread-assignee = "hermes_slack_thread_assignee:register"

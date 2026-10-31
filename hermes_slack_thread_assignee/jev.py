@@ -43,12 +43,14 @@ def validate_answers(batch, result, confidence=0.8):
                     "ack",
                     "reference",
                 )
-                if selected.get(unit + "_destination") == "generic" and field.startswith(("ref", "to")):
+                if selected.get(unit + "_destination") == "generic" and (
+                    field.startswith(("ref", "to")) or field == "basis"
+                ):
                     relevant = False  # Generic routing uses main/main_ref instead of these answers.
             elif name.startswith("same"):
                 left, right = name[4:].split("_")
                 relevant = all(selected.get(f"u{i}_kind") == "action" for i in (left, right))
-            elif name == "main" or name.startswith("main_ref"):
+            elif name == "main" or name.startswith("main_"):
                 relevant = any(
                     key.endswith("_destination")
                     and value == "generic"
@@ -68,6 +70,7 @@ class JevClient:
     endpoint = "https://api.typesafe.ai/v1/systemone"
     model = "jev-latest"
     limit = 262144
+    request_limit = 524288
 
     def __init__(self, timeout=1.2):
         if not math.isfinite(timeout) or not 0 < timeout <= 1.2:
@@ -116,7 +119,7 @@ class JevClient:
             raw = json.dumps({"model": self.model, **batch}, ensure_ascii=False, allow_nan=False).encode()
         except (ValueError, TypeError, UnicodeError):
             raise JevError("invalid serialized request") from None
-        if len(raw) > self.limit:
+        if len(raw) > self.request_limit:
             raise JevError("oversized serialized request")
         # Import and resolve inside the calling request's native Hermes scope, not
         # at registration/construction or through CLI-specific auth/environment files.

@@ -1,6 +1,7 @@
-# Hermes Slack Thread Assignee
+# Hermes Slack Agent Router
 
-Contextual Slack routing for Hermes. Jev identifies which earlier message, person
+Context-aware multi-agent Slack message routing for Hermes, powered by Jev.
+Jev identifies which earlier message, person
 and topic each current instruction addresses. Each eligible agent receives only
 its own actionable CURRENT spans and selected, explicitly inert PRIOR references.
 A message can address several agents with different work.
@@ -15,7 +16,7 @@ revision. Package metadata alone does not establish compatibility with other hos
 Install into the same Python environment that runs Hermes:
 
 ```sh
-python -m pip install 'git+https://github.com/u1-liquid/hermes-slack-thread-assignee.git@feat/stable-thread-assignee'
+python -m pip install 'git+https://github.com/u1-liquid/hermes-slack-agent-router.git@feat/stable-thread-assignee'
 hermes plugins enable slack-thread-assignee
 hermes plugins doctor slack-thread-assignee --ci
 ```
@@ -65,15 +66,29 @@ log keys, transcripts or service error bodies, or store routing decisions.
 - Jev returns closed-set typed decisions, not executable text. Relevant confidence
   must be at least 0.8; source grounding and complete instruction coverage are checked.
   Uncertainty in any actionable unit rejects the whole message, not just one clause.
-- Replies need the root and a complete short history: at most six prior messages
-  and 6,000 prior characters. Pagination, missing roots and foreign/future/conflicting
-  records are unresolved, not silently truncated.
+- Replies use the actual latest seven messages strictly before the trigger, plus
+  the verified root even outside that window. Overlap is represented once. Slack's
+  ascending cursor pages are exhausted before selecting the latest window; the first
+  page is not assumed to be latest. Older pages alone do not reject a thread.
+- Informative recent message/person/topic evidence takes priority. Root context is
+  used only when recent messages provide no relevant assignee support. A newer clear
+  handoff overrides an older assignment; unresolved conflict or failed retrieval does
+  not become root fallback. A human root author or first mention is not automatically
+  the owner. Current explicit specific instructions retain priority.
+- Retrieval is bounded to four SDK calls of at most 100 records and one second,
+  ending before the ingress deadline minus 1.3 seconds. Missing roots, malformed,
+  foreign/future/conflicting records, cursor loops or unexhausted pages yield no work.
+  Pages are accepted up to 1 MiB each/4 MiB total after SDK JSON decoding; these are
+  not pre-download memory caps. Native SDK retries may add wire attempts. Slack does
+  not provide an atomic history snapshot; unseen concurrent edits/deletions can race.
 - Current input is limited to 6,000 characters, six units, four recipients and
-  96 questions. Request and response bodies are each limited to 262,144 bytes.
-  Media and inseparable authored/reference composition are unsupported.
+  128 questions. Up to eight distinct prior records have 6,000 characters each
+  (48,000 aggregate), with a 64 KiB retained original-record limit. The Jev request
+  limit is 524,288 bytes; its response limit is 262,144 bytes. Nothing is silently
+  truncated. Selected media and inseparable authored/reference composition are unsupported.
 - The ingress budget is 2.5 seconds, including context and the at-most-1.2-second
   Jev request. These are engineering deadlines, not hard real-time guarantees.
-  TLS is verified; redirects, environment proxies and automatic retries are disabled.
+  Jev TLS is verified; redirects, environment proxies and automatic Jev retries are disabled.
 - Original and projected native sender/channel/mention/wake policy must permit the
   request. Commands, DMs/MPIMs, bots/self and native pending approval, clarification,
   confirmation and update controls retain native handling. Inferred recipients do
@@ -89,7 +104,7 @@ log keys, transcripts or service error bodies, or store routing decisions.
 ## Troubleshooting and disabling
 
 If registration succeeds but routing does not, check the native Slack connection,
-served profile, serving-profile key and complete short history. Local codes such as
+served profile, serving-profile key and bounded cursor-complete root/recent view. Local codes such as
 `incomplete-context`, `native-topology-unresolved`, `native-topology-changed`, `classifier-failed` and
 `coverage-or-grounding-unresolved` distinguish bounded failures. `ingress-failed`
 can indicate unavailable native identity/lifecycle seams. Do not paste private input

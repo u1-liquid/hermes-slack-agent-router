@@ -1,4 +1,4 @@
-# Testing
+# Hermes Slack Agent Router — testing
 
 ## Offline repository checks
 
@@ -20,6 +20,10 @@ spans, selected prior authors, topic groups, joint recipients, generic continuat
 multilingual acknowledgement/new-work separation, atomic uncertainty and typed
 confidence. Controlled HTTP tests check official URL/authentication, missing-key
 no-egress, body caps, faults and async cancellation/resource closure.
+Root/recent tests cover root outside the latest seven, ascending old-first cursor
+pages, pinned cutoff/current exclusion, overlap/dedup, edits/field provenance,
+malformed/foreign/missing/failed retrieval, bounds, fallback and explicit handoff
+precedence. Incomplete retrieval never becomes semantically unhelpful context.
 
 ## Native integration
 
@@ -85,6 +89,10 @@ The native test also requires the isolated host setup above. The recording harne
 preserves fictional request/result/plan and received-input evidence; production
 writes none of those files. SDK history and final model receivers remain controlled
 while Jev inference uses the actual official HTTPS client.
+To run only the changed root/recent native examples, use `-k real_jev_root` with
+that native command. They exercise a human-authored root outside seven recent
+messages, generic/topic root fallback, newer general-lead/topic handoff priority
+and actual native received input. Slack SDK history and final model remain controlled.
 
 A confidence abstention is a no-work result, not successful delivery. Preserve
 failed assertions and inspect their actual source/answers; do not lower thresholds

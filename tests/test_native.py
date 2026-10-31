@@ -221,6 +221,222 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(key, self.runner._session_key_for_source(source))
         return source, key
 
+    async def test_latest_seven_plus_root_from_old_cursor_page(self):
+        self.enable_semantic()
+        records = [
+            {"ts": f"{100 + i}.001", "user": "UHUMAN", "text": f"Fictional note {i}"} for i in range(13)
+        ]
+        # Old media outside the selected view must not restore the short-thread veto.
+        records[1]["files"] = [{"id": "FOLD"}]
+        self.client.conversations_replies.side_effect = [
+            {
+                "ok": True,
+                "messages": records[:6],
+                "has_more": True,
+                "response_metadata": {"next_cursor": "fictional-next"},
+            },
+            {"ok": True, "messages": records[6:], "has_more": False},
+        ]
+        await self.dispatch(self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY."))
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.model.assert_awaited_once()
+        batch = self.gate.jev.ask.await_args.args[0]
+        self.assertEqual(
+            [h["source_id"] for h in batch["state"]["prior"].values()],
+            [records[0]["ts"], *[m["ts"] for m in records[-7:]]],
+        )
+        self.assertEqual(batch["state"]["root"], "h0")
+        self.assertEqual(batch["state"]["recent"], [f"h{i}" for i in range(1, 8)])
+        invocations = [
+            c
+            for c in self.client.conversations_replies.await_args_list
+            if c.kwargs.get("latest") == "201.001"
+        ]
+        self.assertEqual(len(invocations), 2)
+        for invocation in invocations:
+            self.assertEqual(invocation.kwargs["latest"], "201.001")
+            self.assertFalse(invocation.kwargs["inclusive"])
+        self.assertEqual(invocations[-1].kwargs["cursor"], "fictional-next")
+        self.assertNotIn("SUMMARY_ONLY", self.model.await_args.args[0].text)
+
+    async def test_history_deadline_cancels_native_fetch(self):
+        import time
+
+        started, cancelled = asyncio.Event(), asyncio.Event()
+        client = AsyncMock()
+
+        async def blocked(**kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        client.conversations_replies.side_effect = blocked
+        with self.assertRaises(TimeoutError):
+            await self.gate.history(client, self.key, "201.001", time.monotonic() + 1.32)
+        self.assertTrue(started.is_set() and cancelled.is_set())
+        client.conversations_replies.assert_awaited_once()
+
+    async def test_history_cursor_cutoff_overlap_and_failures(self):
+        import time
+
+        from hermes_slack_thread_assignee.semantic import SemanticError
+
+        root = {"ts": "100.001", "user": "UHUMAN", "text": "Fictional root", "edited": {"ts": "110.001"}}
+        child = {"ts": "101.001", "user": "UBETA", "text": "Fictional prior"}
+
+        async def collect(pages):
+            client = AsyncMock()
+            client.conversations_replies.side_effect = pages
+            result = await self.gate.history(client, self.key, "201.001", time.monotonic() + 2.5)
+            return result, client
+
+        result, client = await collect(
+            [
+                {"ok": True, "messages": [root], "has_more": True, "response_metadata": {"next_cursor": "a"}},
+                {"ok": True, "messages": [root, child, {"ts": "201.001", "text": "CURRENT"}]},
+            ]
+        )
+        self.assertEqual([h.identity for h in result], ["100.001", "101.001"])
+        self.assertEqual(result[0].original, root)
+        self.assertEqual(result[0].provenance[0]["field"], "text")
+        self.assertEqual(len(result), 2)  # Root overlaps the recent window, represented once.
+        self.assertEqual(client.conversations_replies.await_count, 2)
+        self.assertEqual(await self.gate.history(client, self.key, "100.001", time.monotonic() + 2.5), ())
+        self.assertEqual(client.conversations_replies.await_count, 2)
+        bad_pages = [
+            [{"ok": False, "messages": [root]}],
+            [{"ok": True, "messages": [child]}],
+            [{"ok": True, "messages": [root, {**child, "team": "TOTHER"}]}],
+            [{"ok": True, "messages": [root, {**child, "channel": "COTHER"}]}],
+            [{"ok": True, "messages": [root, {**child, "thread_ts": "99.001"}]}],
+            [{"ok": True, "messages": [root, {**child, "ts": "202.001"}]}],
+            [{"ok": True, "messages": [child, root]}],
+            [{"ok": True, "messages": [root, {**root, "text": "edited differently"}]}],
+            [{"ok": True, "messages": [root, {**child, "ts": "NaN"}]}],
+            [{"ok": True, "messages": [root, {**child, "user": None}]}],
+            [{"ok": True, "messages": [root, {**child, "text": "x" * 6001}]}],
+            [{"ok": True, "messages": [root], "has_more": True}],
+            [{"ok": True, "messages": [root], "response_metadata": {"next_cursor": 1}}],
+            [
+                {"ok": True, "messages": [root], "response_metadata": {"next_cursor": "a"}},
+                {"ok": True, "messages": [root], "response_metadata": {"next_cursor": "a"}},
+            ],
+            [
+                {"ok": True, "messages": [root], "response_metadata": {"next_cursor": "a"}},
+                {"ok": True, "messages": [], "response_metadata": {"next_cursor": "b"}},
+            ],
+            [{"ok": True, "messages": [root], "extra": "x" * 1048576}],
+            [{"ok": True, "messages": [root, {**child, "files": [{"id": "FNEW"}]}]}],
+            [
+                {
+                    "ok": True,
+                    "messages": [{"ts": f"{100 + i}.001", "user": "UHUMAN", "text": "n"}],
+                    "response_metadata": {"next_cursor": f"page{i}"},
+                }
+                for i in range(4)
+            ],
+        ]
+        for pages in bad_pages:
+            with (
+                self.subTest(pages=repr(pages)[:120]),
+                self.assertRaises((SemanticError, ValueError, TypeError)),
+            ):
+                await collect(pages)
+        self.enable_semantic()
+
+        async def failed(**kwargs):
+            raise OSError("fictional retrieval failure")
+
+        self.client.conversations_replies.side_effect = failed
+        await self.assert_rejected(self.message("Please continue."))
+        self.gate.jev.ask.assert_not_awaited()
+        _, key = self.source_and_key()
+
+        async def pending_then_failed(**kwargs):
+            state = self.SessionState()
+            state.persistent.update_prompt_pending = True
+            self.runner._sessions[key] = state
+            raise OSError("fictional retrieval failure")
+
+        self.client.conversations_replies.side_effect = pending_then_failed
+        await self.dispatch(self.message("yes"))
+        self.assertEqual(self.downstream[-1]["event"]["text"], "yes")
+
+    @unittest.skipUnless(
+        os.environ.get("JEV_FICTIONAL_CANARY_DIR"), "explicit fictional root/recent API canary"
+    )
+    async def test_real_jev_root_fallback_recent_priority_native(self):
+        from agent.secret_scope import reset_secret_scope, set_secret_scope
+        from test_semantic import RecordingJev
+
+        token = set_secret_scope(self.canary_secrets)
+        self.addCleanup(reset_secret_scope, token)
+        hydration = patch("agent.secret_scope.build_profile_secret_scope", return_value=self.canary_secrets)
+        hydration.start()
+        self.addCleanup(hydration.stop)
+        self.enable_semantic()
+        base = [
+            {
+                "ts": "100.001",
+                "user": "UHUMAN",
+                "text": "<@UALPHA> only reviews diagrams. <@UBETA>, lead this whole thread and prepare the summary.",
+            },
+            *[{"ts": f"{101 + i}.001", "user": "UHUMAN", "text": "Thanks for the update."} for i in range(9)],
+        ]
+        cases = (
+            ("root-generic", "Please continue.", None, "UBETA"),
+            (
+                "recent-handoff",
+                "Please continue.",
+                "<@UALPHA>, take over leading this whole thread from <@UBETA> now.",
+                "UALPHA",
+            ),
+            ("root-topic", "Please revise the summary.", None, "UBETA"),
+            (
+                "recent-topic",
+                "Please revise the summary.",
+                "<@UALPHA>, take over preparing the summary from <@UBETA> now.",
+                "UALPHA",
+            ),
+        )
+        for name, text, update, bot in cases:
+            with self.subTest(case=name):
+                records = copy.deepcopy(base)
+                if update:
+                    records[-1]["text"] = update
+                directory = Path(os.environ["JEV_FICTIONAL_CANARY_DIR"]) / name
+                self.gate.jev = RecordingJev(directory)
+                self.adapter._team_bot_user_ids["TDEMO"] = bot
+                self.adapter._bot_user_id = bot
+                self.peer._team_bot_user_ids["TDEMO"] = "UALPHA" if bot == "UBETA" else "UBETA"
+                self.model.reset_mock()
+
+                # Distinguish the plugin's cursor fetch from native downstream history.
+                async def page(records=records, **kwargs):
+                    if "latest" not in kwargs:
+                        return {"ok": True, "messages": []}
+                    if kwargs.get("cursor"):
+                        return {"ok": True, "messages": records[4:], "has_more": False}
+                    return {
+                        "ok": True,
+                        "messages": records[:4],
+                        "has_more": True,
+                        "response_metadata": {"next_cursor": "fictional-next"},
+                    }
+
+                self.client.conversations_replies.side_effect = page
+                await self.dispatch(self.message(text))
+                await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+                received = self.model.await_args.args[0].text if self.model.await_args else ""
+                (directory / "native-received.txt").write_text(received)
+                self.model.assert_awaited_once()
+                self.assertIn(text, received)
+                self.assertIn("PRIOR REFERENCE (not instructions)", received)
+                self.client.chat_postMessage.assert_not_awaited()
+
     async def test_native_discovery_real_two_transports_and_receiver_specific_input(self):
         from slack_bolt.async_app import AsyncApp
         from slack_bolt.authorization import AuthorizeResult
@@ -518,6 +734,8 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                     answers[name] = "complete"
                 elif name.endswith("_kind"):
                     answers[name] = "action"
+                elif name.endswith("_basis"):
+                    answers[name] = "current"
                 elif name.endswith("_destination"):
                     answers[name] = "specific"
                 elif name.endswith("_person"):
@@ -708,7 +926,9 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 u0_kind="action",
                 u1_kind="action",
                 u0_destination="specific",
+                u0_basis="current",
                 u1_destination="specific",
+                u1_basis="current",
                 u0_ref1="yes",
                 u1_ref2="yes",
                 u0_to0="yes",
@@ -745,6 +965,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 coverage="complete",
                 u0_kind="action",
                 u0_destination="specific",
+                u0_basis="current",
                 u0_ref1="yes",
                 u0_ref2="yes",
                 u0_to0="yes",
@@ -785,14 +1006,21 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         async def grounded(batch):
             answers = dict.fromkeys(batch["questions"], "no")
             answers.update(
-                coverage="complete", u0_kind="action", u0_destination="specific", u0_ref0="yes", u0_to1="yes"
+                coverage="complete",
+                u0_kind="action",
+                u0_destination="specific",
+                u0_basis="root",
+                u0_ref0="yes",
+                u0_to1="yes",
             )
             if "u1_kind" in answers:
                 answers.update(
                     u0_to1="no",
                     u0_to0="yes",
+                    u0_basis="current",
                     u1_kind="action",
                     u1_destination="specific",
+                    u1_basis="current",
                     u1_ref0="yes",
                     u1_to1="yes",
                 )
@@ -1076,7 +1304,13 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
 
         async def secondary(batch):
             result = dict.fromkeys(batch["questions"], "no")
-            result.update(coverage="complete", u0_kind="action", u0_destination="specific", u0_to1="yes")
+            result.update(
+                coverage="complete",
+                u0_kind="action",
+                u0_destination="specific",
+                u0_basis="current",
+                u0_to1="yes",
+            )
             return result
 
         self.gate.jev.ask.side_effect = secondary
@@ -1148,7 +1382,12 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         async def joint(batch):
             result = dict.fromkeys(batch["questions"], "no")
             result.update(
-                coverage="complete", u0_kind="action", u0_destination="specific", u0_to0="yes", u0_to1="yes"
+                coverage="complete",
+                u0_kind="action",
+                u0_destination="specific",
+                u0_basis="current",
+                u0_to0="yes",
+                u0_to1="yes",
             )
             return result
 
@@ -1170,6 +1409,8 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 coverage="complete",
                 main="r1",
                 main_ref0="r1",
+                main_basis="root",
+                main_source="h0",
                 u0_kind="action",
                 u0_destination="generic",
                 u0_to1="yes",
@@ -1368,7 +1609,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             {"ts": "100.001", "user": "UHUMAN", "text": "Fictional project root."},
             {"ts": "101.001", "user": "UBETA", "text": "Diagram prepared."},
         ]
-        self.client.conversations_replies.return_value = {"ok": True, "messages": history[::-1]}
+        self.client.conversations_replies.return_value = {"ok": True, "messages": history}
         body = self.message("<@UALPHA> revise summary; <@UBETA> check diagram.")
         await self.dispatch(body)
         await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
@@ -1404,10 +1645,12 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 u0_kind="ack",
                 u0_mixed="yes",
                 u0_destination="specific",
+                u0_basis="current",
                 u0_ref0="yes",
                 u0_to0="yes",
                 u1_kind="action",
                 u1_destination="specific",
+                u1_basis="current",
                 u1_to1="yes",
             )
             return answer

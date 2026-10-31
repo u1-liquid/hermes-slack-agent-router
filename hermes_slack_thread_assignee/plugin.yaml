@@ -1,10 +1,10 @@
 manifest_version: 2
 name: slack-thread-assignee
 version: 0.1.0
-description: Stateless contextual Slack recipient routing through Jev
+description: "Hermes Slack Agent Router: context-aware multi-agent routing powered by Jev"
 kind: standalone
 author: u1-liquid
 license: MIT
-homepage: https://github.com/u1-liquid/hermes-slack-thread-assignee
+homepage: https://github.com/u1-liquid/hermes-slack-agent-router
 provides_tools: []
 provides_hooks: []

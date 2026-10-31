@@ -27,6 +27,16 @@ class InstalledWheel(unittest.TestCase):
         self.assertTrue(Path(package.__file__).with_name("plugin.yaml").is_file())
         distributions = list(importlib.metadata.distributions(path=[str(target)]))
         distribution = next(d for d in distributions if d.metadata["Name"] == "hermes-slack-thread-assignee")
+        self.assertEqual(
+            distribution.metadata["Summary"],
+            "Context-aware multi-agent Slack message routing for Hermes, powered by Jev.",
+        )
+        self.assertIn("context-aware", distribution.metadata["Keywords"])
+        self.assertIn(
+            "Repository, https://github.com/u1-liquid/hermes-slack-agent-router",
+            distribution.metadata.get_all("Project-URL"),
+        )
+        self.assertIn("Hermes Slack Agent Router", distribution.metadata.get_payload())
         entry = next(e for e in distribution.entry_points if e.group == "hermes_agent.plugins")
         self.assertEqual(entry.name, "slack-thread-assignee")
         self.assertTrue(callable(entry.load()))

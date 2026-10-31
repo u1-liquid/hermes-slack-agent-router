@@ -1,4 +1,4 @@
-# Runtime design
+# Hermes Slack Agent Router — runtime design
 
 ## Native-derived participation
 
@@ -32,18 +32,29 @@ its multiplexed profiles; independent processes are outside its native inventory
 1. Canonicalize supported authored text/rich text while preserving exact half-open
    Unicode ranges and source-field provenance. Quotes/code/forwarded material is
    inert reference. Reject unsupported media or inseparable composition.
-2. Fetch `conversations_replies` through the receiving workspace client with the
-   exact channel/root, `latest=current timestamp`, `inclusive=False`, `limit=7`.
-   Require a complete short history, exclude the current timestamp and validate
-   root/workspace/channel/time identities. Deduplicate identical records and sort
-   by original timestamp identity. No pagination cache or transcript store exists.
+2. Fetch ascending `conversations_replies` cursor pages through the receiving
+   workspace client with exact channel/root, pinned `latest=current timestamp`,
+   `inclusive=False`, `limit=100`. Exhaust cursors within four SDK calls/one second
+   before selecting a latest window. Retain a rolling seven strictly-prior distinct
+   records and pin root independently, deduplicating their union to at most eight.
+   Reject missing root, current/future confusion, foreign/malformed/unordered records,
+   conflicting duplicates, cursor loops/nonprogress or unexhausted bounds. Exclude
+   current even if returned; root-trigger input has no prior self-reference or fetch.
+   Keep at most one page, eight bodies and 400 ID/fingerprint witnesses. Canonicalize
+   selected root/recent bodies with original authors/IDs/field provenance; evicted
+   older media does not veto the selected view. No pagination cache/store exists.
 3. Build one typed question batch over current units, prior source authors/text and
    sorted recipients. There is no receiving-agent preference in the model input.
    Questions classify action/reference/acknowledgement, destination, source support,
    per-recipient membership and topic relationships.
-4. A generic continuation uses a general-lead Choice plus independent evidence
-   Choices for prior messages. Specific work does not need a known general lead.
-   Mere participation or a secondary topic invitation does not establish that lead.
+4. State identifies root and recent source keys. Specific-unit basis Choices and
+   generic general-lead/basis/controlling-source Choices express current explicit
+   instruction → informative recent support → root-only fallback. Independent raw
+   lead Choices qualify cited support. A later authored explicit handoff can supersede
+   old assignments; mere recency does not resolve conflict. Root fallback requires no
+   relevant recent support, not a failed fetch or unresolved conflicting evidence.
+   Human root authorship, first mention and participation are not ownership rules.
+   Specific/joint work does not depend on irrelevant general-lead uncertainty.
 5. Validate exact keys/types, finite distributions, relevant confidence of 0.8,
    source grounding, transitive topic relations and complete coverage. Assemble
    atomically: no invented instructions or identifiers, partial omission or fan-out
@@ -76,10 +87,17 @@ responses are disabled. Non-200, transport, timeout, body-size, JSON and typed-a
 failures produce no ordinary work; response bodies and credentials are not logged.
 The request owns and closes its asynchronous response/client on cancellation.
 
-Current and prior text are each capped at 6,000 characters; history at six messages,
-current units at six, recipients at four, questions at 96, and each serialized
-request/response at 262,144 bytes. The 2.5-second ingress budget includes context,
-with at most 1.2 seconds for Jev. Deadlines are not hard real-time scheduling claims.
+Current text is capped at 6,000 characters; selected history at eight distinct
+records/6,000 characters each/48,000 total; current units at six, recipients at four,
+questions at 128 (maximum supported shape uses 123). Serialized Jev request and
+response limits are 524,288 and 262,144 bytes respectively. Retained original records
+are capped at 64 KiB; decoded Slack pages at 1 MiB each/4 MiB total. SDK JSON buffering
+precedes those checks: they are acceptance limits, not hard socket/RSS limits. Native
+SDK retry behavior is unchanged, so four SDK invocations need not mean four wire attempts.
+The 2.5-second ingress budget includes context, with at most one second for retrieval
+(also bounded by ingress deadline minus 1.3 seconds) and 1.2 seconds for Jev. Deadlines
+are not hard real-time scheduling claims. Slack history has no atomic snapshot;
+unseen concurrent edits/deletions can race even a cursor-complete view.
 
 ## Integration boundaries
 
@@ -111,3 +129,4 @@ References: [Hermes plugins](https://hermes-agent.nousresearch.com/docs/develope
 [System One API](https://docs.typesafe.ai/api.md),
 [Bolt middleware](https://docs.slack.dev/tools/bolt-python/concepts/global-middleware/),
 and [testing](native-acceptance.md).
+Slack ordering and pagination: [conversations.replies](https://docs.slack.dev/reference/methods/conversations.replies/).

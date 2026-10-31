@@ -1,4 +1,4 @@
-"""Stateless contextual Slack recipient routing through Jev."""
+"""Hermes Slack Agent Router: context-aware multi-agent routing powered by Jev."""
 
 __version__ = "0.1.0"
 

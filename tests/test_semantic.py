@@ -33,6 +33,36 @@ def snapshot(text="Atlas, revise the summary; Birch, check the diagram."):
 
 
 def controlled_answers(batch, choices):
+    choices = dict(choices)
+    state = batch["state"]
+    for name in batch["questions"]:
+        if name.endswith("_basis") and name != "main_basis":
+            unit = name.removesuffix("_basis")
+            refs = [key for key in state["prior"] if choices.get(f"{unit}_ref{key[1:]}") == "yes"]
+            recipients = [
+                r for key, r in state["recipients"].items() if choices.get(f"{unit}_to{key[1:]}") == "yes"
+            ]
+            text = state["units"][unit]["text"]
+            explicit = recipients and all(
+                r["name"].casefold() in text.casefold() or f"<@{r['source_user']}>" in text
+                for r in recipients
+            )
+            choices.setdefault(
+                name,
+                "current"
+                if explicit
+                else "recent"
+                if any(key != state["root"] for key in refs)
+                else "root"
+                if refs
+                else "none",
+            )
+    support = [key for key in state["prior"] if choices.get(f"main_ref{key[1:]}") == choices.get("main")]
+    selected = next(
+        (key for key in reversed(support) if key != state["root"]), support[-1] if support else "none"
+    )
+    choices.setdefault("main_source", selected)
+    choices.setdefault("main_basis", "root" if selected == state["root"] else "recent" if support else "none")
     return {
         "answers": {
             name: {
@@ -102,6 +132,127 @@ class SemanticTests(unittest.TestCase):
         batch = prepare(source)
         raw = two_topic_answers(batch) if choices is None else controlled_answers(batch, choices)
         return assemble(source, validate_answers(batch, raw))
+
+    def test_root_fallback_and_newer_explicit_handoff(self):
+        source = replace(
+            snapshot("Please continue."),
+            history=(
+                History("1.0", "UFABLE", "Atlas, lead this whole thread."),
+                *[History(f"{i}.0", "UFABLE", "Thanks for the update.") for i in range(2, 9)],
+            ),
+            identity="9.0",
+        )
+        choices = {
+            "coverage": "complete",
+            "main": "r0",
+            "main_ref0": "r0",
+            "main_basis": "root",
+            "main_source": "h0",
+            "u0_kind": "action",
+            "u0_destination": "generic",
+        }
+        plan = self.plan(source, choices)
+        self.assertEqual(plan.status, "ready", plan.reason)
+        self.assertEqual(plan.units[0].recipients, (A,))
+        changed = replace(
+            source,
+            history=(
+                *source.history[:-1],
+                History("8.0", "UFABLE", "Birch, take over leading the whole thread from Atlas now."),
+            ),
+        )
+        takeover = {
+            **choices,
+            "main": "r1",
+            "main_ref7": "r1",
+            "main_basis": "recent-handoff",
+            "main_source": "h7",
+        }
+        plan = self.plan(changed, takeover)
+        self.assertEqual(plan.status, "ready", plan.reason)
+        self.assertEqual(plan.units[0].recipients, (B,))
+        self.assertEqual([h.identity for h in plan.units[0].references], ["8.0"])
+        for delta in (
+            {"main_basis": "root"},
+            {"main_basis": "conflict"},
+            {"main_source": "h0"},
+            {"main_basis": "recent"},
+        ):
+            with self.subTest(delta=delta):
+                self.assertEqual(self.plan(changed, {**takeover, **delta}).status, "unresolved")
+
+    def test_full_root_recent_question_and_text_budgets(self):
+        recipients = (A, B, Recipient("TFICTION", "UCEDAR", "cedar"), Recipient("TFICTION", "UDUNE", "dune"))
+        source = replace(
+            snapshot("Atlas, one; Birch, two; Cedar, three; Dune, four; Atlas, five; Birch, six."),
+            identity="9.0",
+            recipients=recipients,
+            history=tuple(History(f"{i}.0", "UFABLE", "x" * 6000) for i in range(1, 9)),
+        )
+        batch = prepare(source)
+        self.assertEqual(len(batch["questions"]), 123)
+        self.assertEqual(batch["state"]["recent"], [f"h{i}" for i in range(1, 8)])
+        self.assertEqual(batch["state"]["root"], "h0")
+        self.assertLess(
+            len(json.dumps({"model": JevClient.model, **batch}).encode()), JevClient.request_limit
+        )
+        for invalid in (
+            replace(source, history=(*source.history, History("8.5", "UFABLE", "n"))),
+            replace(source, history=(replace(source.history[0], text="x" * 6001), *source.history[1:])),
+        ):
+            with self.assertRaises(SemanticError):
+                prepare(invalid)
+
+    def test_specific_root_fallback_recent_priority_and_unresolved_root(self):
+        source = replace(
+            snapshot("Please revise the summary."),
+            history=(
+                History("1.0", "UFABLE", "Birch reviews diagrams; Atlas prepares the summary."),
+                *[History(f"{i}.0", "UFABLE", "Thanks.") for i in range(2, 9)],
+            ),
+            identity="9.0",
+        )
+        choices = {
+            "coverage": "complete",
+            "main": "unknown",
+            "u0_kind": "action",
+            "u0_destination": "specific",
+            "u0_basis": "root",
+            "u0_ref0": "yes",
+            "u0_to0": "yes",
+        }
+        plan = self.plan(source, choices)
+        self.assertEqual(plan.status, "ready", plan.reason)
+        self.assertEqual(plan.units[0].recipients, (A,))
+        changed = replace(
+            source,
+            history=(
+                *source.history[:-1],
+                History("8.0", "UFABLE", "Birch now takes over the summary from Atlas."),
+            ),
+        )
+        priority = {
+            **choices,
+            "u0_basis": "recent-handoff",
+            "u0_ref0": "no",
+            "u0_ref7": "yes",
+            "u0_to0": "no",
+            "u0_to1": "yes",
+        }
+        self.assertEqual(self.plan(changed, priority).units[0].recipients, (B,))
+        for delta in (
+            {"u0_basis": "conflict"},
+            {"u0_basis": "unknown"},
+            {"u0_basis": "root"},
+            {"u0_ref7": "unknown"},
+        ):
+            self.assertEqual(self.plan(changed, {**priority, **delta}).status, "unresolved")
+        # Main/basis/source uncertainty is irrelevant to wholly specific work.
+        batch = prepare(changed)
+        raw = controlled_answers(batch, priority)
+        for name in ("main", "main_basis", "main_source"):
+            raw["answers"][name]["confidence"] = 0.1
+        self.assertEqual(assemble(changed, validate_answers(batch, raw)).status, "ready")
 
     def test_two_topics_exact_scopes_and_source_references_without_stored_topics(self):
         source = snapshot()
@@ -495,7 +646,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         return Stream()
 
     async def test_oversized_or_nonfinite_request_never_connects(self):
-        for batch in ({"state": "x" * 262145, "questions": {}}, {"state": float("nan")}):
+        for batch in ({"state": "x" * 524289, "questions": {}}, {"state": float("nan")}):
             with self.assertRaisesRegex(JevError, "serialized"):
                 await JevClient().ask(batch)
         self.assertEqual(self.clients, [])
