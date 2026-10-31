@@ -10,8 +10,11 @@ and CLI usable, but native wiring reports that routing is not active.
 
 The exercised official host is Hermes v0.22.5 revision
 `bf0203a794a07aac3ff764972ab9087baa4e4f4e`, CPython 3.14.7, Slack Bolt 1.30.0 and
-Slack SDK 3.44.1. Core CI declares Python 3.11–3.14; native CI uses Python 3.14 and
-the exact official host's declared Slack extra. Hosted CI has not yet run.
+Slack SDK 3.44.1. Core CI declares Python 3.11–3.14; native CI uses Python 3.14,
+`tests/requirements-native.txt` and the exact official checkout through
+`HERMES_TEST_SOURCE`. This bounded test import surface is not a full host/browser
+installation. It preserves the host ref and exercises all required native and
+isolated-wheel tests. Hosted results must be checked on the final candidate head.
 
 ## Executed local evidence
 

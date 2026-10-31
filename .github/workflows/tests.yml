@@ -44,7 +44,7 @@ jobs:
       - name: Isolated test home and dependencies
         run: |
           mkdir -m 700 "$RUNNER_TEMP/native-home"
-          python -m pip install -e '.native-host[slack]' . build
+          python -m pip install -r tests/requirements-native.txt . build
       - name: Required native acceptance (missing setup/imports must fail)
         env:
           HERMES_REQUIRE_NATIVE: '1'
