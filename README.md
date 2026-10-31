@@ -1,2 +1,150 @@
-# hermes-slack-thread-assignee
-Stable main-assignee routing for multi-agent Slack threads in Hermes, with persistent ownership and explicit secondary mentions.
+# Hermes Slack Agent Router
+
+Context-aware multi-agent Slack message routing for Hermes, powered by Jev.
+Jev identifies which earlier message, person
+and topic each current instruction addresses. Each eligible agent receives only
+its own actionable CURRENT spans and selected, explicitly inert PRIOR references.
+A message can address several agents with different work.
+
+## Install and use
+
+Requires Python 3.11+, Hermes v0.22.5 at
+`bf0203a794a07aac3ff764972ab9087baa4e4f4e`, and its working Slack integration.
+The native integration uses private host seams and is tested against that exact
+revision. Package metadata alone does not establish compatibility with other hosts.
+
+Install into the same Python environment that runs Hermes:
+
+```sh
+python -m pip install 'git+https://github.com/u1-liquid/hermes-slack-agent-router.git@feat/stable-thread-assignee'
+hermes plugins enable slack-agent-router
+hermes plugins doctor slack-agent-router --ci
+```
+
+The distribution is `hermes-slack-agent-router`, the Python package is
+`hermes_slack_agent_router`, and the native plugin/entry point is `slack-agent-router`.
+The installation ref above is the existing Git branch, not a package identifier.
+No legacy package or plugin alias is installed.
+
+Enable it for every receiving profile that should use selective routing. Use the
+normal Hermes secret setup to make `TYPESAFE_API_KEY` available to each profile
+that actually executes requests. The plugin resolves that key inside the serving
+runtime's native secret scope, which may differ from the receiving bot's profile.
+It does not use a Jev executable or a TypeSafe SDK.
+
+There is no plugin configuration file, participant list, input-policy registry,
+initialization command or manual thread-owner setup. After native activation,
+eligible messages use the connected Slack transports already owned by the gateway.
+Plugin Doctor checks registration; it does not prove socket readiness or delivery.
+
+For example, if native history establishes that Atlas prepared a summary and Birch
+prepared a diagram, “Atlas, revise the summary; Birch, check the diagram” can produce
+two different recipient inputs. “Please continue” needs unambiguous prior evidence
+of a general conversational lead. It does not establish a permanent owner.
+
+## Participation and external processing
+
+Candidates come from the current GatewayRunner's primary and multiplexed-profile
+Slack adapters. Each candidate needs authenticated identity in the same Slack
+workspace, a live native socket and a served runtime. Native source routing is
+resolved separately for each transport and this sender/channel/thread; configured
+profiles, display names, history authors and human allowlists are not participants.
+
+Discovery is limited to one GatewayRunner. It does not discover agents in other
+processes or on other hosts. A shared bot contributes one event-specific native
+runtime, not one candidate per configured profile. A disconnected bot is not a
+candidate. Unknown or ambiguous identity, duplicate bot ownership, or a topology
+change during evaluation yields no ordinary work. There is no hidden all-agent
+or receiver-only fallback. Native policy still decides whether each receiver may act;
+a discovered peer is not proof of channel membership or delivery.
+
+Eligible current text, bounded prior text, source authors and candidate bot/runtime
+identities are sent to `https://api.typesafe.ai/v1/systemone` using `jev-latest`.
+Enable this plugin only where you are authorized to send that conversation to
+TypeSafe. Slack read access is not external-processing consent. There is no plugin
+privacy classifier or per-channel egress-policy setting. Missing serving-profile
+credentials or invalid responses result in no ordinary work. Production does not
+log keys, transcripts or service error bodies, or store routing decisions.
+
+## Behavior and limits
+
+- Jev returns closed-set typed decisions, not executable text. Relevant confidence
+  must be at least 0.8; source grounding and complete instruction coverage are checked.
+  Uncertainty in any actionable unit rejects the whole message, not just one clause.
+- Replies use the actual latest seven messages strictly before the trigger, plus
+  the verified root even outside that window. Overlap is represented once. Slack's
+  ascending cursor pages are exhausted before selecting the latest window; the first
+  page is not assumed to be latest. Older pages alone do not reject a thread.
+- Informative recent message/person/topic evidence takes priority. Root context is
+  used only when recent messages provide no relevant assignee support. A newer clear
+  handoff overrides an older assignment; unresolved conflict or failed retrieval does
+  not become root fallback. A human root author or first mention is not automatically
+  the owner. Current explicit specific instructions retain priority. Topic-only recent
+  context does not erase a supported root assignee. Historical joint assignments
+  preserve their exact recipient set, rather than becoming an all-agent fallback.
+- Retrieval is bounded to four SDK calls of at most 100 records and one second,
+  ending before the ingress deadline minus 1.3 seconds. Missing roots, malformed,
+  foreign/future/conflicting records, cursor loops or unexhausted pages yield no work.
+  Pages are accepted up to 1 MiB each/4 MiB total after SDK JSON decoding; these are
+  not pre-download memory caps. Native SDK retries may add wire attempts. Slack does
+  not provide an atomic history snapshot; unseen concurrent edits/deletions can race.
+- Current input is limited to 6,000 characters, six units, four recipients and
+  174 questions. Up to eight distinct prior records have 6,000 characters each
+  (48,000 aggregate), with a 64 KiB retained original-record limit. The Jev request
+  limit is 524,288 bytes; its response limit is 262,144 bytes. Nothing is silently
+  truncated. Selected media and inseparable authored/reference composition are unsupported.
+- The ingress budget is 2.5 seconds, including context and the at-most-1.2-second
+  Jev request. These are engineering deadlines, not hard real-time guarantees.
+  Jev TLS is verified; redirects, environment proxies and automatic Jev retries are disabled.
+- Original and projected native sender/channel/mention/wake policy must permit the
+  request. Commands, DMs/MPIMs, bots/self and native pending approval, clarification,
+  confirmation and update controls retain native handling. Inferred recipients do
+  not grant authority. Monitoring bots follow native bot policy.
+- Normal, busy, queue, merge and replay paths receive scoped text. A nonrecipient or
+  unresolved ordinary message gets an empty transport acknowledgement, no main-model
+  call, queue/steering action or silence warning. Fixed local diagnostics explain
+  unresolved input without exposing its content.
+- The plugin keeps only request-local state. Hermes owns history, sessions, queues
+  and deduplication. Separate ingress events can classify again and stochastic
+  decisions can differ; there is no cross-process consensus or exactly-once promise.
+
+## Troubleshooting and disabling
+
+If registration succeeds but routing does not, check the native Slack connection,
+served profile, serving-profile key and bounded cursor-complete root/recent view. Local codes such as
+`incomplete-context`, `native-topology-unresolved`, `native-topology-changed`, `classifier-failed` and
+`coverage-or-grounding-unresolved` distinguish bounded failures. `ingress-failed`
+can indicate unavailable native identity/lifecycle seams. Do not paste private input
+or credentials into diagnostics to investigate them.
+
+New connected adapters are discovered on later requests. Reconnecting to a rebuilt
+native app rewires the factory. On this pinned host, disabling disposes retained
+callbacks into pass-through, but does not physically remove them. Same-client
+unload/re-enable is not a supported hot replacement: native factory deduplication
+can prevent a new callback from attaching. Use a normally managed fresh gateway
+lifecycle when activating a replacement; plugin commands alone do not prove it active.
+A disabled or broken plugin is not a universal fail-closed enforcement boundary.
+
+```sh
+hermes plugins disable slack-agent-router
+python -m pip uninstall hermes-slack-agent-router
+```
+
+## Development and verification
+
+See [design](docs/design.md) for data flow and native boundaries and
+[testing](docs/native-acceptance.md) for runnable offline and opt-in fictional tests.
+CI has distinct `core` and `native` jobs, both on Python 3.14, using
+`actions/checkout@v7` and `actions/setup-python@v7`. Offline tests require
+no real TypeSafe key. Passing controlled tests is not a live Slack deployment check
+or a guarantee of classifier accuracy.
+
+The Dependabot configuration groups version-update proposals by ecosystem, with
+separate security-update groups. It checks Actions and Python dependencies weekly
+on Monday at 09:00 Asia/Tokyo. The root Python updater covers `pyproject.toml` and
+`tests/requirements-native.txt`; arbitrary version strings in shell commands are
+not Python manifest coverage. Dependabot reads this configuration from the default
+branch: a feature-branch file alone is not activation or proof of updater execution.
+There is no automatic merge policy.
+
+MIT license, copyright u1-liquid.

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-slack-agent-router"
+version = "0.1.0"
+description = "Context-aware multi-agent Slack message routing for Hermes, powered by Jev."
+readme = "README.md"
+keywords = ["hermes-agent", "slack", "multi-agent", "message-routing", "context-aware", "jev", "typesafe-ai"]
+requires-python = ">=3.11"
+dependencies = ["httpx>=0.28.1,<0.29"]
+license = "MIT"
+authors = [{name = "u1-liquid"}]
+
+[project.urls]
+Homepage = "https://github.com/u1-liquid/hermes-slack-agent-router"
+Repository = "https://github.com/u1-liquid/hermes-slack-agent-router"
+Issues = "https://github.com/u1-liquid/hermes-slack-agent-router/issues"
+
+[project.entry-points."hermes_agent.plugins"]
+slack-agent-router = "hermes_slack_agent_router:register"
+
+[tool.setuptools.package-data]
+hermes_slack_agent_router = ["plugin.yaml"]
+
+[tool.setuptools.packages.find]
+include = ["hermes_slack_agent_router*"]
+
+[tool.ruff]
+line-length = 110

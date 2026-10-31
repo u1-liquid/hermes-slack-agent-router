@@ -1,0 +1,63 @@
+name: tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+      - run: python -m pip install . ruff==0.17.3 build
+      - name: Core suites only (native job is separate and mandatory)
+        run: |
+          python -W error::ResourceWarning -m unittest discover -s tests -p test_core.py -v
+          python -W error::ResourceWarning -m unittest discover -s tests -p test_semantic.py -v
+          python -W error::ResourceWarning -m unittest discover -s tests -p test_boundaries.py -v
+      # Only fixed source/config values enter commands; no PR/event text interpolation.
+      - run: ruff check hermes_slack_agent_router tests
+      - run: ruff format --check hermes_slack_agent_router tests
+      - run: python -m build
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+      - name: Pinned official host (not an installed/live profile)
+        uses: actions/checkout@v7
+        with:
+          repository: NousResearch/hermes-agent
+          ref: bf0203a794a07aac3ff764972ab9087baa4e4f4e
+          path: .native-host
+          persist-credentials: false
+      - name: Isolated test home and dependencies
+        run: |
+          mkdir -m 700 "$RUNNER_TEMP/native-home"
+          python -m pip install -r tests/requirements-native.txt . build
+      - name: Required native acceptance (missing setup/imports must fail)
+        env:
+          HERMES_REQUIRE_NATIVE: '1'
+          HERMES_TEST_SOURCE: ${{ github.workspace }}/.native-host
+          HERMES_HOME: ${{ runner.temp }}/native-home
+        run: |
+          python -W error::ResourceWarning -m unittest discover -s tests -p test_native.py -v
+          python -W error::ResourceWarning -m unittest discover -s tests -p test_plugin_surface.py -v
+      - name: Build and install wheel into a separate target
+        run: |
+          python -m build
+          python -m pip install --target "$RUNNER_TEMP/wheel-target" dist/*.whl
+      - name: Installed wheel only (outside source cwd)
+        working-directory: ${{ runner.temp }}
+        env:
+          HERMES_TEST_SOURCE: ${{ github.workspace }}/.native-host
+          HERMES_WHEEL_TARGET: ${{ runner.temp }}/wheel-target
+          HERMES_DIST_DIR: ${{ github.workspace }}/dist
+          HERMES_REQUIRE_WHEEL: '1'
+        run: python -I -W error::ResourceWarning -m unittest discover -s "$GITHUB_WORKSPACE/tests" -p test_installed.py -v
