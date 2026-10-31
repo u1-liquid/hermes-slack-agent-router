@@ -126,7 +126,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.peer._socket_mode_task = asyncio.Future()
         self.peer._handler = SimpleNamespace(client=SimpleNamespace(is_connected=lambda: True))
         self.peer._app = self.app
-        self.peer.set_message_handler(AsyncMock())
+        self.peer.set_message_handler(AsyncMock(return_value=None))
         # Two independently authenticated transports can serve the same runtime.
         # Production multiplex owns each via a profile map; the shared runtime is routed below.
         self.peer_home = self.home / "profiles" / "peer"
@@ -269,6 +269,9 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertIn("SUMMARY_ONLY", self.peer._message_handler.await_args.args[0].text)
         self.assertNotIn("DIAGRAM_ONLY", self.peer._message_handler.await_args.args[0].text)
         self.assertEqual(self.gate.jev.ask.await_args_list[0], self.gate.jev.ask.await_args_list[1])
+        self.client.chat_postMessage.assert_not_awaited()
+        self.assertFalse(self.adapter._session_tasks)
+        self.assertFalse(self.peer._session_tasks)
 
     async def test_native_factory_no_config_late_rewire_unload_and_same_client_limit(self):
         from hermes_slack_thread_assignee.plugin import register
@@ -461,6 +464,33 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             calls += 1
             if calls == 3:
                 self.peer._team_bot_user_ids["TDEMO"] = "UCHANGED"
+            return True
+
+        with patch.object(self.peer, "_socket_transport_connected", side_effect=observe):
+            await self.assert_rejected(self.message("<@UALPHA> summary; <@UBETA> diagram."))
+        self.assertEqual(calls, 3)
+        self.gate.jev.ask.assert_awaited_once()
+
+    async def test_primary_route_change_during_final_peer_socket_observation_is_no_work(self):
+        from gateway.profile_routing import ProfileRoute
+
+        self.enable_semantic()
+        calls = 0
+
+        async def observe():
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                self.runner.config.profile_routes.append(
+                    ProfileRoute(
+                        "new-primary-route",
+                        "slack",
+                        "peer",
+                        bot_profile="default",
+                        user_id="UHUMAN",
+                        thread_id="100.001",
+                    )
+                )
             return True
 
         with patch.object(self.peer, "_socket_transport_connected", side_effect=observe):
@@ -1420,18 +1450,33 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         os.environ.get("JEV_FICTIONAL_CANARY_DIR"), "explicit fictional external native canary"
     )
     async def test_real_jev_contextual_generic_and_multitopic_native_inputs(self):
+        await self.exercise_native_canaries(
+            Path(os.environ["JEV_FICTIONAL_CANARY_DIR"]) / "native", real=True
+        )
+
+    @unittest.skipUnless(os.environ.get("JEV_RECORDED_CANARY_DIR"), "explicit recorded fictional evidence")
+    async def test_recorded_jev_contextual_generic_and_multitopic_native_inputs(self):
+        await self.exercise_native_canaries(
+            Path(os.environ["JEV_RECORDED_CANARY_DIR"]) / "native", real=False
+        )
+
+    async def exercise_native_canaries(self, root, *, real):
         from agent.secret_scope import reset_secret_scope, set_secret_scope
         from test_semantic import RecordingJev
 
-        token = set_secret_scope(self.canary_secrets)
-        self.addCleanup(reset_secret_scope, token)
-        # Only fixture hydration is injected: native per-source async scope and
-        # get_secret still execute. Never copy the real key into a fixture home.
-        hydration = patch("agent.secret_scope.build_profile_secret_scope", return_value=self.canary_secrets)
-        hydration.start()
-        self.addCleanup(hydration.stop)
+        from hermes_slack_thread_assignee.jev import validate_answers
+
+        if real:
+            token = set_secret_scope(self.canary_secrets)
+            self.addCleanup(reset_secret_scope, token)
+            # Only fixture hydration is injected: native per-source async scope and
+            # get_secret still execute. Never copy the real key into a fixture home.
+            hydration = patch(
+                "agent.secret_scope.build_profile_secret_scope", return_value=self.canary_secrets
+            )
+            hydration.start()
+            self.addCleanup(hydration.stop)
         self.enable_semantic()
-        root = Path(os.environ["JEV_FICTIONAL_CANARY_DIR"]) / "native"
         history = [
             {
                 "ts": "100.001",
@@ -1484,13 +1529,28 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                         {"ts": "101.001", "user": "UBETA", "text": "I prepared the diagram."},
                     ],
                 }
-                self.gate.jev = RecordingJev(root / name)
+                if real:
+                    self.gate.jev = RecordingJev(root / name)
+                else:
+
+                    async def replay(batch, case=root / name):
+                        self.assertEqual(
+                            {"model": RecordingJev.model, **batch},
+                            json.loads((case / "jev-request.json").read_text()),
+                        )
+                        return validate_answers(batch, json.loads((case / "jev-result.json").read_text()))
+
+                    self.gate.jev = AsyncMock()
+                    self.gate.jev.ask.side_effect = replay
                 response = await self.dispatch(self.message(text))
                 await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
                 self.assertEqual(response.status, 200)
                 self.model.assert_awaited_once()
                 received = self.model.await_args.args[0].text
-                (root / name / "native-received.txt").write_text(received)
+                if real:
+                    (root / name / "native-received.txt").write_text(received)
+                else:
+                    self.assertEqual(received, (root / name / "native-received.txt").read_text())
                 self.assertIn(expected, received)
                 if excluded:
                     self.assertNotIn(excluded, received)

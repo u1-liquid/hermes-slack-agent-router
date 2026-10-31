@@ -172,6 +172,19 @@ class Bridge:
                 raise TopologyError("native runtime name/home mismatch")
             return value
 
+        def identity_for(adapter):
+            # Native identities pin their source. Rebuild it to observe route changes.
+            thread = bound.event.thread
+            source = adapter.build_source(
+                chat_id=thread.channel,
+                chat_type="group",
+                user_id=bound.event.sender,
+                thread_id=thread.root,
+                scope_id=team,
+                message_id=bound.source.message_id,
+            )
+            return adapter._canonicalize(source)
+
         for owner, adapter in slots:
             if adapter is None:
                 continue
@@ -196,16 +209,7 @@ class Bridge:
                 raise TopologyError("unknown native socket state")
             if not connected or adapter._socket_ping_pong_stale():
                 continue
-            thread = bound.event.thread
-            source = adapter.build_source(
-                chat_id=thread.channel,
-                chat_type="group",
-                user_id=bound.event.sender,
-                thread_id=thread.root,
-                scope_id=team,
-                message_id=bound.source.message_id,
-            )
-            identity = adapter._canonicalize(source)
+            identity = identity_for(adapter)
             if (
                 identity is None
                 or identity.adapter() is not adapter
@@ -242,6 +246,7 @@ class Bridge:
                 or task.done()
                 or not adapter.is_connected
                 or adapter._message_handler is None
+                or identity_for(adapter) != identity
                 or authority(identity.authorization_home, identity.transport_profile) is not transport
                 or authority(identity.runtime_home, identity.runtime_profile) is not runtime
             ):

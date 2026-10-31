@@ -91,6 +91,13 @@ failed assertions and inspect their actual source/answers; do not lower threshol
 or retry an unchanged request solely to manufacture green. These examples measure
 bounded behavior, not calibrated classifier accuracy or deployment readiness.
 
+To check an existing fictional native recording against changed source without
+another HTTP request, set `JEV_RECORDED_CANARY_DIR` to its evidence root and run
+`test_native.py -k recorded_jev` with the same unittest discovery command. This
+requires exact equality with each saved request, validates its typed response,
+executes native scoped delivery and compares the received text. It does not modify
+the recordings or establish a fresh external-service result.
+
 ## Operational boundaries
 
 These tests do not install into a live gateway, process private Slack, restart a
