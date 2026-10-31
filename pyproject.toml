@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-slack-thread-assignee"
+version = "0.1.0"
+description = "Stable local Slack thread recipient policy for Hermes"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "u1-liquid"}]
+
+[project.scripts]
+hermes-thread-assignee = "hermes_slack_thread_assignee.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["hermes_slack_thread_assignee*"]
+
+[tool.ruff]
+line-length = 110
