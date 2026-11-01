@@ -805,6 +805,48 @@ class SourceLocalProof(unittest.TestCase):
 
 
 class APITransportTests(unittest.IsolatedAsyncioTestCase):
+    def test_fixed_failure_diagnostics_do_not_echo_messages(self):
+        self.assertEqual(JevError("malformed native Jev answer").diagnostic, ("answer-malformed", 0))
+        self.assertEqual(
+            JevError("uncertain relevant answer: synthetic-private-content").diagnostic,
+            ("answer-confidence", 0),
+        )
+        self.assertEqual(JevError("synthetic-private-body-key").diagnostic, ("unclassified", 0))
+
+    async def test_transport_status_and_deadline_have_distinct_safe_diagnostics(self):
+        import sys
+        from types import SimpleNamespace
+
+        import httpx
+
+        factory = httpx.AsyncClient
+        response = httpx.Response(401, content=b"synthetic-private-body-key")
+
+        async def respond(request):
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        def client(**kwargs):
+            return factory(transport=httpx.MockTransport(respond), **kwargs)
+
+        with (
+            patch.dict(
+                sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=lambda name: "fictional")}
+            ),
+            patch("httpx.AsyncClient", side_effect=client),
+        ):
+            for outcome, expected in (
+                (response, ("http-rejected", 401)),
+                (httpx.ReadTimeout("synthetic-private-key"), ("transport-deadline", 0)),
+                (httpx.ConnectError("synthetic-private-key"), ("transport-failed", 0)),
+            ):
+                response = outcome
+                with self.assertRaises(JevError) as caught:
+                    await JevClient().ask(prepare(snapshot()))
+                self.assertEqual(caught.exception.diagnostic, expected)
+                self.assertNotIn("synthetic-private", str(caught.exception))
+
     async def test_official_http_contract_without_cli_and_request_local_key(self):
         import sys
         from types import SimpleNamespace

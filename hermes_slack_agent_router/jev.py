@@ -6,7 +6,36 @@ import math
 
 
 class JevError(ValueError):
-    pass
+    def __init__(self, message, *, status=0):
+        super().__init__(message)
+        self.status = status if type(status) is int and 100 <= status <= 599 else 0
+
+    @property
+    def diagnostic(self):
+        # Only source-owned categories leave this boundary, never exception text.
+        message = str(self)
+        code = {
+            "invalid serialized request": "request-invalid",
+            "oversized serialized request": "request-oversized",
+            "Hermes Jev credential scope unavailable": "scope-unavailable",
+            "Hermes Jev credential unavailable": "credential-unavailable",
+            "Jev HTTP request failed": "http-rejected",
+            "Jev HTTPS transport failed": "transport-failed",
+            "Jev HTTPS deadline exceeded": "transport-deadline",
+            "unsupported Jev response encoding": "response-encoding",
+            "oversized or invalid Jev response length": "response-length",
+            "oversized Jev response": "response-oversized",
+            "invalid Jev JSON": "answer-json",
+            "answer keys do not match request": "answer-coverage",
+            "invalid Choice answer": "answer-choice",
+            "nonfinite or out-of-range probability": "answer-probability",
+            "invalid probability distribution": "answer-distribution",
+            "uncertain or contradictory answer": "answer-contradiction",
+            "malformed native Jev answer": "answer-malformed",
+        }.get(message, "unclassified")
+        if message.startswith("uncertain relevant answer: "):
+            code = "answer-confidence"
+        return code, self.status if code == "http-rejected" else 0
 
 
 def validate_answers(batch, result, confidence=0.8):
@@ -106,7 +135,7 @@ class JevClient:
         ):
             # Never follow redirects, retry errors, or expose service error bodies.
             if response.status_code != 200:
-                raise JevError("Jev HTTP request failed")
+                raise JevError("Jev HTTP request failed", status=response.status_code)
             if response.headers.get("Content-Encoding", "identity").lower() != "identity":
                 raise JevError("unsupported Jev response encoding")
             length = response.headers.get("Content-Length")
@@ -149,7 +178,9 @@ class JevClient:
             except (ValueError, UnicodeError):
                 raise JevError("invalid Jev JSON") from None
             return validate_answers(batch, result)
-        except (TimeoutError, httpx.HTTPError, OSError, ValueError) as exc:
+        except (TimeoutError, httpx.TimeoutException):
+            raise JevError("Jev HTTPS deadline exceeded") from None
+        except (httpx.HTTPError, OSError, ValueError) as exc:
             if isinstance(exc, JevError):
                 raise
             raise JevError("Jev HTTPS transport failed") from None

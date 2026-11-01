@@ -282,13 +282,42 @@ class Gate:
             copy.deepcopy(body["event"]),
             provenance,
         )
+        started, stage, questions = time.monotonic(), "scope", 0
+        batch = None
         try:
             async with asyncio.timeout_at(deadline):
                 # The serving runtime may differ from the receiving adapter's profile.
                 async with adapter.gateway_runner._async_profile_scope_for_source(bound.source):
-                    plan = assemble(source, await self.jev.ask(prepare(source)))
-        except (JevError, SemanticError, TimeoutError):
-            return self.unresolved("classifier-failed")
+                    stage = "prepare"
+                    batch = prepare(source)
+                    questions = len(batch["questions"])
+                    stage = "inference"
+                    answers = await self.jev.ask(batch)
+                    stage = "assemble"
+                    plan = assemble(source, answers)
+        except (JevError, SemanticError, TimeoutError) as exc:
+            reason, status = (
+                exc.diagnostic
+                if isinstance(exc, JevError)
+                else ("ingress-deadline" if isinstance(exc, TimeoutError) else "semantic-invalid", 0)
+            )
+            question = "none"
+            if reason == "answer-confidence" and stage == "inference" and batch is not None:
+                candidate = str(exc).removeprefix("uncertain relevant answer: ")
+                if candidate in batch["questions"]:
+                    question = candidate  # Generated local key, never an arbitrary exception suffix.
+            # Source-owned codes/keys and numeric measurements, never exception payloads.
+            logger.warning(
+                "agent-router unresolved: classifier-failed stage=%s reason=%s status=%d "
+                "elapsed_ms=%d questions=%d question=%s",
+                stage,
+                reason,
+                status,
+                (time.monotonic() - started) * 1000,
+                questions,
+                question,
+            )
+            return None
         if await bridge.participants(bound) != topology:
             return self.unresolved("native-topology-changed")
         if plan.status != "ready":

@@ -156,6 +156,42 @@ Every case must have a qualified ready plan and nonempty matching saved delivery
 Recorded confidence abstentions remain failed deliveries, not passing bridge cases;
 older protocol recordings require their matching historical source for exact replay.
 
+## Classifier failure isolation
+
+`classifier-failed` now includes a fixed stage (`scope`, `prepare`, `inference`,
+`assemble`), source-owned reason code, bounded HTTP status (zero when unavailable),
+elapsed milliseconds and question count. A confidence failure also identifies the
+generated question key, only after matching it against the locally prepared question
+set; arbitrary exception suffixes become `none`. `transport-deadline` distinguishes
+the client budget from `ingress-deadline`; `scope-unavailable`, `credential-unavailable`,
+`http-rejected` and `answer-confidence` distinguish the other major hypotheses.
+No exception messages, server bodies, transcript text or credential names/values
+are logged. The routing policy, confidence threshold and both deadlines are unchanged.
+A sanitized synthetic failure does not establish the cause of a historical live
+failure whose old log contains only the collapsed code.
+
+Two additional opt-in probes emit sanitized receipts, not request/response files:
+
+```sh
+export MIZUKI_CLASSIFIER_PROBE=1
+export MIZUKI_CLASSIFIER_HOME=/absolute/path/to/authorized/.hermes/profiles/mizuki
+export PYTHONPATH="$HERMES_TEST_SOURCE"
+# Select ONE initial case, not a retry loop: contextual, native-sized,
+# native-japanese, or japanese-improvement. Positive assertions remain strict.
+export MIZUKI_CLASSIFIER_CASE=native-japanese
+python -W error::ResourceWarning -m unittest discover -s tests -p test_live_classifier.py -v
+python -W error::ResourceWarning -m unittest discover -s tests -p test_native.py -k real_mizuki_scoped -v
+```
+
+Run only under explicit authorization for that exact serving profile and external
+synthetic inference. The native probe keeps Slack transport, topology and final
+receiver in isolated fixtures; only the synthetic Jev call enters the named real
+secret scope with native set/reset interfaces. It does not install keys in fixture
+homes, post to Slack, or prove live profile routing/reply. The unmentioned current
+instruction must reach the native receiver with exact selected prior references
+and no unselected progress text. Failed positive probes remain failures; do not
+change their expected outcome to an abstention or retry unchanged inputs for green.
+
 ## Operational boundaries
 
 These tests do not install into a live gateway, process private Slack, restart a

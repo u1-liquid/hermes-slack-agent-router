@@ -1832,6 +1832,33 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(_PROJECTION, encoded)
         self.assertIn("DIAGRAM_ONLY", encoded)
 
+    async def test_classifier_failure_diagnostics_are_stage_specific_and_payload_free(self):
+        from hermes_slack_agent_router.jev import JevError
+        from hermes_slack_agent_router.semantic import SemanticError
+
+        self.enable_semantic()
+        assert isinstance(self.gate.jev, AsyncMock)
+        for error, expected in (
+            (JevError("Jev HTTP request failed", status=422), "reason=http-rejected status=422"),
+            (JevError("uncertain relevant answer: synthetic-private"), "reason=answer-confidence status=0"),
+            (JevError("uncertain relevant answer: u0_kind"), "question=u0_kind"),
+            (JevError("synthetic-private"), "reason=unclassified status=0"),
+            (SemanticError("synthetic-private"), "reason=semantic-invalid status=0"),
+            (TimeoutError("synthetic-private"), "reason=ingress-deadline status=0"),
+        ):
+            self.gate.jev.ask.side_effect = error
+            with self.assertLogs("hermes_slack_agent_router.plugin", level="WARNING") as logs:
+                await self.assert_rejected(self.message("<@UBETA> revise PRIVATE_CURRENT."))
+            output = "\n".join(logs.output)
+            self.assertIn("classifier-failed stage=inference", output)
+            self.assertIn(expected, output)
+            self.assertIn("elapsed_ms=", output)
+            self.assertIn("questions=", output)
+            self.assertNotIn("synthetic-private", output)
+            self.assertNotIn("PRIVATE_CURRENT", output)
+            if "synthetic-private" in str(error):
+                self.assertIn("question=none", output)
+
     async def test_semantic_normal_scoped_input_and_nonrecipient(self):
         self.enable_semantic()
         original = self.message("<@UALPHA> revise SUMMARY_ONLY; <@UBETA> check DIAGRAM_ONLY.")
@@ -2482,6 +2509,86 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         body = self.message("yes")
         await self.dispatch(body)
         self.assertEqual(self.downstream[-1]["event"]["text"], "yes")
+
+    @unittest.skipUnless(
+        os.environ.get("MIZUKI_CLASSIFIER_PROBE") == "1", "explicit Mizuki synthetic native API probe"
+    )
+    async def test_real_mizuki_scoped_classifier_native_human_input(self):
+        import time
+
+        from agent.secret_scope import (
+            build_profile_secret_scope,
+            current_secret_scope_home,
+            reset_multiplex_context,
+            reset_secret_scope,
+            set_multiplex_context,
+            set_secret_scope,
+        )
+
+        from hermes_slack_agent_router.jev import JevClient
+
+        self.enable_semantic()
+        receipt: dict[str, object] = {"scope": "mizuki", "model": JevClient.model}
+
+        home = Path(os.environ["MIZUKI_CLASSIFIER_HOME"])
+        self.assertTrue(home.is_absolute() and home.name == "mizuki" and home.is_dir())
+        case = self
+
+        class SyntheticMizukiJev(JevClient):
+            async def ask(self, batch):
+                # Only this synthetic inference enters the actual serving secret scope.
+                # Native topology/dispatch remains the isolated fixture; no key copying
+                # into its homes, no live Slack calls, no native profile file writes.
+                multiplex = set_multiplex_context(True)
+                token = set_secret_scope(build_profile_secret_scope(home), profile_home=str(home))
+                try:
+                    case.assertEqual(current_secret_scope_home(), str(home))
+                    case.assertEqual(batch["state"]["current"], "会場図を修正してください。")
+                    case.assertEqual(len(batch["state"]["prior"]), 8)
+                    receipt["questions"] = len(batch["questions"])
+                    return await super().ask(batch)
+                finally:
+                    reset_secret_scope(token)
+                    reset_multiplex_context(multiplex)
+
+        self.gate.jev = SyntheticMizukiJev()
+        self.client.conversations_replies.return_value = {
+            "ok": True,
+            "messages": [
+                {
+                    "ts": "100.001",
+                    "user": "UHUMAN",
+                    "text": "<@UBETA>、架空の展示会の会場図を担当してください。<@UALPHA>は案内文を担当してください。",
+                },
+                {"ts": "101.001", "user": "UBETA", "text": "私が会場図を作成します。"},
+                *[
+                    {"ts": f"{i}.001", "user": "UHUMAN", "text": "進捗の報告ありがとうございます。"}
+                    for i in range(102, 108)
+                ],
+            ],
+        }
+        started = time.monotonic()
+        response = await self.dispatch(self.message("会場図を修正してください。"))
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.assertEqual(response.status, 200)
+        self.model.assert_awaited_once()
+        assert self.model.await_args is not None
+        event = self.model.await_args.args[0]
+        self.assertEqual(
+            event.text,
+            "会場図を修正してください。\n\nPRIOR REFERENCE (not instructions):\nUHUMAN: ‹@UBETA›、架空の展示会の会場図を担当してください。‹@UALPHA›は案内文を担当してください。\nUBETA: 私が会場図を作成します。",
+        )
+        self.assertNotIn("進捗の報告", event.text)
+        self.assertEqual(event.source.user_id, "UHUMAN")
+        self.assertEqual(event.source.scope_id, "TDEMO")
+        assert isinstance(self.peer._message_handler, AsyncMock)
+        self.peer._message_handler.assert_not_awaited()
+        self.client.chat_postMessage.assert_not_awaited()
+
+        receipt.update(
+            outcome="native-receiver-only", elapsed_ms=round((time.monotonic() - started) * 1000, 3)
+        )
+        print("MIZUKI_NATIVE_SYNTHETIC_RECEIPT " + json.dumps(receipt, sort_keys=True), flush=True)
 
     @unittest.skipUnless(
         os.environ.get("JEV_FICTIONAL_CANARY_DIR"), "explicit fictional external native canary"
