@@ -35,7 +35,9 @@ def snapshot(text="Atlas, revise the summary; Birch, check the diagram."):
 def controlled_answers(batch, choices):
     # Explicit local facts supplied by each fixture; no inferred tier/witness oracle.
     defaults = {
-        name: ("nonexplicit" if "nonexplicit" in q["criteria"] else "absent")
+        name: "prior"
+        if name.endswith("_context")
+        else ("nonexplicit" if "nonexplicit" in q["criteria"] else "absent")
         if name.endswith("_address")
         else "none"
         if "none" in q["criteria"]
@@ -123,6 +125,75 @@ class SemanticTests(unittest.TestCase):
         raw = two_topic_answers(batch) if choices is None else controlled_answers(batch, choices)
         return assemble(source, validate_answers(batch, raw))
 
+    def test_selfcontained_explicit_assignment_does_not_consume_uncertain_optional_history(self):
+        source = replace(snapshot("Atlas, revise the summary."), recipient_labels=((A.bot_user, ("Atlas",)),))
+        batch = prepare(source)
+        raw = controlled_answers(
+            batch,
+            {
+                "coverage": "complete",
+                "u0_kind": "action",
+                "u0_destination": "specific",
+                "u0_specific_address": "explicit",
+                "u0_address": "explicit",
+                "u0_to0": "yes",
+                "u0_context": "selfcontained",
+            },
+        )
+        # A related old discussion is not needed to identify the complete current task.
+        raw["answers"]["u0_link1"]["confidence"] = 0.2
+        plan = assemble(source, validate_answers(batch, raw))
+        self.assertEqual(plan.status, "ready", plan.reason)
+        self.assertEqual(plan.view(A), source.text)
+        self.assertFalse(plan.view(B))
+        self.assertEqual(plan.units[0].references, ())
+        # Complete current-address proof and context independence are still required.
+        for name in ("u0_specific_address", "u0_context", "u0_to0", "u0_to1"):
+            uncertain = json.loads(json.dumps(raw))
+            uncertain["answers"][name]["confidence"] = 0.79
+            with self.subTest(gate=name), self.assertRaises(JevError):
+                validate_answers(batch, uncertain)
+        for address in ("outside", "mixed", "unknown"):
+            changed = controlled_answers(
+                batch, {**{k: v["choice"] for k, v in raw["answers"].items()}, "u0_specific_address": address}
+            )
+            self.assertEqual(assemble(source, validate_answers(batch, changed)).status, "unresolved")
+        prior = controlled_answers(batch, {k: v["choice"] for k, v in raw["answers"].items()})
+        prior["answers"]["u0_context"]["choice"] = "prior"
+        prior["answers"]["u0_context"]["probabilities"] = {"prior": 1.0, "selfcontained": 0.0, "unknown": 0.0}
+        prior["answers"]["u0_link1"]["confidence"] = 0.2
+        with self.assertRaises(JevError):
+            validate_answers(batch, prior)
+
+    def test_native_names_require_unique_identity_and_preserve_joint_sets(self):
+        source = replace(
+            snapshot("榎森あおいさんと柚原こはるさん、会場図を修正してください。"),
+            recipient_labels=((A.bot_user, ("榎森あおい",)), (B.bot_user, ("柚原こはる",))),
+        )
+        choices = {
+            "coverage": "complete",
+            "u0_kind": "action",
+            "u0_destination": "specific",
+            "u0_specific_address": "explicit",
+            "u0_context": "selfcontained",
+            "u0_to0": "yes",
+            "u0_to1": "yes",
+        }
+        plan = self.plan(source, choices)
+        self.assertEqual(plan.status, "ready", plan.reason)
+        self.assertEqual(plan.units[0].recipients, (A, B))
+        duplicate = replace(
+            source,
+            text="柚原こはるさん、会場図を修正してください。",
+            recipient_labels=((A.bot_user, ("柚原こはる",)), (B.bot_user, ("柚原こはる",))),
+        )
+        self.assertEqual(self.plan(duplicate, {**choices, "u0_to0": "no"}).status, "unresolved")
+        missing = replace(source, recipient_labels=())
+        self.assertEqual(self.plan(missing, choices).status, "unresolved")
+        for labels in ((("UOUTSIDE", ("柚原こはる",)),), ((B.bot_user, ("x" * 129,)),)):
+            with self.assertRaises(SemanticError):
+                prepare(replace(source, recipient_labels=labels))
+
     def test_root_fallback_and_newer_explicit_handoff(self):
         source = replace(
             snapshot("Please continue."),
@@ -174,12 +245,23 @@ class SemanticTests(unittest.TestCase):
             history=tuple(History(f"{i}.0", "UFABLE", "x" * 6000) for i in range(1, 9)),
         )
         batch = prepare(source)
-        self.assertEqual(len(batch["questions"]), 174)
+        self.assertEqual(len(batch["questions"]), 180)
         self.assertEqual(batch["state"]["recent"], [f"h{i}" for i in range(1, 8)])
         self.assertEqual(batch["state"]["root"], "h0")
         self.assertLess(
             len(json.dumps({"model": JevClient.model, **batch}).encode()), JevClient.request_limit
         )
+        wide = replace(
+            source,
+            text=("あ" * 999 + ";") * 6,
+            history=tuple(replace(h, text="🦊" * 6000) for h in source.history),
+            recipient_labels=tuple(
+                (r.bot_user, tuple(str(i) + "界" * 127 for i in range(3))) for r in source.recipients
+            ),
+        )
+        size = len(json.dumps({"model": JevClient.model, **prepare(wide)}, ensure_ascii=False).encode())
+        self.assertLess(size, JevClient.request_limit)
+        print(f"NATIVE_LABEL_MAX_REQUEST bytes={size} questions={len(prepare(wide)['questions'])}")
         for invalid in (
             replace(source, history=(*source.history, History("8.5", "UFABLE", "n"))),
             replace(source, history=(replace(source.history[0], text="x" * 6001), *source.history[1:])),
@@ -520,7 +602,9 @@ class SourceLocalProof(unittest.TestCase):
     def plan(self, source, **choices):
         batch = prepare(source)
         defaults = {
-            name: ("nonexplicit" if "nonexplicit" in q["criteria"] else "absent")
+            name: "prior"
+            if name.endswith("_context")
+            else ("nonexplicit" if "nonexplicit" in q["criteria"] else "absent")
             if name.endswith("_address")
             else "none"
             if "none" in q["criteria"]

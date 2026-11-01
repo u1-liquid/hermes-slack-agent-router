@@ -166,6 +166,65 @@ class Bridge:
     async def call(self, awaitable):
         return await asyncio.wait_for(awaitable, self.timeout)
 
+    async def recipient_labels(self, bound, topology):
+        """Reuse native presentation data; cold lookup is request-local, never a registry.
+
+        Topology establishes eligibility. Labels cannot add or authorize a candidate.
+        Cold users.info uses that candidate's authenticated workspace client, with
+        exact returned user/workspace validation rather than native fallback names.
+        """
+        team = bound.event.thread.workspace
+
+        def bounded(values):
+            return tuple(
+                sorted(
+                    {
+                        v
+                        for v in values
+                        if isinstance(v, str)
+                        and v.strip()
+                        and len(v) <= 128
+                        and not any(ord(c) < 32 for c in v)
+                    }
+                )
+            )[:3]
+
+        async def resolve(recipient, witness):
+            # Witness pins the actual participating transport, not a profile-name lookup.
+            runner = self.adapter.gateway_runner
+            maps = [runner._primary_adapters(), *runner._profile_adapters_map().values()]
+            from gateway.config import Platform
+
+            adapter = next(
+                m[Platform.SLACK] for m in maps if Platform.SLACK in m and id(m[Platform.SLACK]) == witness[0]
+            )
+            handle = adapter._team_bot_names.get(team)
+            cached = adapter._user_name_cache.get((team, recipient.bot_user))
+            if isinstance(cached, str) and cached and cached != recipient.bot_user:
+                return recipient.bot_user, bounded((handle, cached))
+            from slack_sdk.errors import SlackClientError
+
+            try:
+                response = await self.call(adapter._team_clients[team].users_info(user=recipient.bot_user))
+                user = response.get("user") or {}
+                if (
+                    response.get("ok") is not True
+                    or user.get("id") != recipient.bot_user
+                    or user.get("team_id") != team
+                    or user.get("is_bot") is not True
+                ):
+                    return recipient.bot_user, bounded((handle,))
+                profile = user.get("profile") or {}
+                return recipient.bot_user, bounded(
+                    (handle, profile.get("display_name"), profile.get("real_name") or user.get("real_name"))
+                )
+            except (TimeoutError, SlackClientError, OSError):
+                return recipient.bot_user, bounded((handle,))
+
+        async with asyncio.TaskGroup() as group:
+            lookups = [group.create_task(resolve(r, w)) for r, w in zip(*topology)]
+        return tuple(task.result() for task in lookups)
+
     async def participants(self, bound):
         """Resolve this event on each live local transport, without retaining a registry."""
         from gateway.config import Platform
@@ -248,6 +307,8 @@ class Bridge:
                 identity,
                 id(transport),
                 id(runtime),
+                adapter._team_bot_names.get(team),
+                adapter._user_name_cache.get((team, bot)),
             )
             result.append((recipient, witness))
             observed.append((adapter, bot, client, app, handler, task, identity, transport, runtime))

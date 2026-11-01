@@ -20,6 +20,19 @@ the host canonicalizer. Transport ownership and runtime name/home must agree wit
 served, non-retiring authorities. Two distinct bots may route to the same runtime;
 two transports claiming the same workspace/bot are ambiguous.
 
+The experimental human-name correction binds request-local presentation labels to
+those already eligible workspace/user identities. It reuses each native adapter's
+`_team_bot_names` and workspace/user `_user_name_cache`; cold display/real-name
+lookup uses that adapter's existing workspace client and validates `ok`, exact user
+ID, exact team ID and bot status. At most four parallel `users.info` lookups share
+the existing one-second acquisition allowance with unchanged history fetching,
+with the existing 0.75-second per-call bound. No plugin cache or native cache write
+is introduced. Missing/invalid labels cannot create recipients. Labels are untrusted
+semantic data, not instructions, permissions or authority; duplicate names alone
+cannot prove a unique current recipient. The local source witness accepts only a
+unique literal supplied label/runtime identifier or an exact mention, after the
+complete semantic addressee audit. Topology witnesses include native label values.
+
 The request-local view contains canonical recipients and identity/lifetime witnesses
 for adapters, clients, native apps, sockets and authorities. It is checked again
 after history and after inference. A changed view rejects the whole message. These
@@ -96,6 +109,18 @@ its multiplexed profiles; independent processes are outside its native inventory
    linked topic context stays inert. Human root authorship, first mention and mere
    participation are not ownership rules. Specific/joint work is independent of
    irrelevant general-lead uncertainty. No separate global tier/source verdict is asked.
+   The experimental `choice-native-labels-v5` protocol distinguishes `runtime_profile`
+   from native human-facing `labels` and permits CURRENT address questions to read
+   this identity dictionary, not historical assignments. A new CURRENT-only context
+   Choice proves whether the requested operation/object is self-contained. Only a
+   confidence-qualified explicit/self-contained action omits historical facts/links
+   and receives no injected prior references. Contextual/unstated assignments and
+   prior-dependent explicit work retain the historical proof. Complete CURRENT
+   address, each positive/negative recipient, coverage, kind, mixed and topic gates
+   remain required. This protocol is NOT rollout-ready: the first actual API
+   preservation qualification rejected the existing multi-topic positive on the
+   new context confidence and the contextual positive on unresolved local assignment.
+   Controlled suite success does not override those failures.
 5. Validate exact keys/types, finite distributions, relevant confidence of 0.8,
    source grounding, transitive topic relations and complete coverage. Assemble
    atomically: no invented instructions or identifiers, partial omission or fan-out
@@ -130,7 +155,7 @@ The request owns and closes its asynchronous response/client on cancellation.
 
 Current text is capped at 6,000 characters; selected history at eight distinct
 records/6,000 characters each/48,000 total; current units at six, recipients at four,
-questions at 174 (the maximum six-unit/eight-prior/four-recipient shape). Serialized Jev request and
+questions at 180 (the maximum six-unit/eight-prior/four-recipient shape). Serialized Jev request and
 response limits are 524,288 and 262,144 bytes respectively. Retained original records
 are capped at 64 KiB; decoded Slack responses at 1 MiB each (at most 4 MiB across
 four SDK calls, including optional exact root). SDK JSON buffering precedes those checks: these

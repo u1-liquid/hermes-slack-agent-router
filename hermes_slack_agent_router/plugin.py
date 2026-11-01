@@ -227,7 +227,19 @@ class Gate:
         from slack_sdk.errors import SlackApiError, SlackClientError
 
         try:
-            history = await self.history(client, thread, bound.source.message_id, deadline)
+            # Both acquisitions share the existing retrieval allowance; do not
+            # serialize up to four cold presentation lookups ahead of inference.
+            async with asyncio.timeout_at(min(deadline - 1.3, time.monotonic() + 1.0)):
+                requests = [
+                    asyncio.create_task(self.history(client, thread, bound.source.message_id, deadline)),
+                    asyncio.create_task(bridge.recipient_labels(bound, topology)),
+                ]
+                try:
+                    history, labels = await asyncio.gather(*requests)
+                finally:
+                    for request in requests:
+                        request.cancel()
+                    await asyncio.gather(*requests, return_exceptions=True)
         except SlackApiError as exc:
             code = exc.response.get("error")
             if code in {
@@ -281,6 +293,7 @@ class Gate:
             topology[0],
             copy.deepcopy(body["event"]),
             provenance,
+            recipient_labels=labels,
         )
         started, stage, questions = time.monotonic(), "scope", 0
         batch = None

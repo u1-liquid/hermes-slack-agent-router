@@ -2590,6 +2590,269 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         )
         print("MIZUKI_NATIVE_SYNTHETIC_RECEIPT " + json.dumps(receipt, sort_keys=True), flush=True)
 
+    async def test_native_label_cold_lookup_scope_rejection_and_parallel_budget(self):
+        import time
+
+        from hermes_slack_agent_router.bridge import Bridge
+
+        bridge = Bridge(self.adapter)
+        bound = await bridge.bind(self.message("柚原こはるさん、図を修正してください。"))
+        topology = await bridge.participants(bound)
+        before = dict(self.adapter._user_name_cache)
+        active = set()
+
+        async def info(*, user):
+            active.add(user)
+            loop = asyncio.get_running_loop()
+            ready = loop.create_future()
+            timer = loop.call_later(0.12, ready.set_result, None)
+            try:
+                await ready
+            finally:
+                timer.cancel()
+            return {
+                "ok": True,
+                "user": {
+                    "id": user,
+                    "team_id": "TDEMO",
+                    "is_bot": True,
+                    "profile": {"display_name": "柚原こはる" if user == "UBETA" else "榎森あおい"},
+                },
+            }
+
+        self.client.users_info.side_effect = info
+        started = time.monotonic()
+        labels = dict(await bridge.recipient_labels(bound, topology))
+        elapsed = time.monotonic() - started
+        self.assertEqual(active, {"UALPHA", "UBETA"})
+        self.assertGreaterEqual(elapsed, 0.12)
+        self.assertLess(elapsed, 0.4)
+        self.assertEqual(labels["UBETA"], ("柚原こはる",))
+        self.assertEqual(self.adapter._user_name_cache, before)
+        self.client.users_info.side_effect = None
+        for wrong in (
+            {"id": "UOTHER", "team_id": "TDEMO", "is_bot": True},
+            {"id": "UBETA", "team_id": "TFOREIGN", "is_bot": True},
+            {"id": "UBETA", "team_id": "TDEMO", "is_bot": False},
+        ):
+            self.client.users_info.return_value = {
+                "ok": True,
+                "user": {**wrong, "profile": {"display_name": "柚原こはる"}},
+            }
+            self.assertNotIn("柚原こはる", dict(await bridge.recipient_labels(bound, topology))["UBETA"])
+        print(f"NATIVE_LABEL_COLD_RECEIPT participants=2 elapsed_ms={elapsed * 1000:.3f}")
+
+    def install_scoped_receiver(self):
+        from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+
+        from hermes_slack_agent_router.plugin import register
+
+        manager = PluginManager()
+        register(PluginContext(PluginManifest(name="slack-agent-router"), manager))
+        assembled = []
+
+        async def receive(event):
+            async with self.runner._async_profile_scope_for_source(event.source):
+                with patch("hermes_cli.plugins.get_plugin_manager", return_value=manager):
+                    admitted = await self.runner._hm_pre_gateway_dispatch_hook(event, event.source)
+                self.assertIsNotNone(admitted)
+                assembled.append(
+                    self.runner._prefix_inbound_sender_context(admitted, admitted.source, admitted.text)
+                )
+                await self.model(admitted)
+
+        self.adapter.set_message_handler(receive)
+        return assembled
+
+    async def test_plain_japanese_name_native_labels_and_exact_receiver(self):
+        self.enable_semantic()
+        assembled = self.install_scoped_receiver()
+        self.adapter._team_bot_names["TDEMO"] = "birch"
+        self.peer._team_bot_names["TDEMO"] = "atlas"
+        self.adapter._user_name_cache[("TDEMO", "UBETA")] = "柚原こはる"
+        self.peer._user_name_cache[("TDEMO", "UALPHA")] = "榎森あおい"
+        text = "柚原こはるさん、会場図を修正してください。"
+        self.client.conversations_replies.return_value = {
+            "ok": True,
+            "messages": [{"ts": "100.001", "user": "UHUMAN", "text": "架空の展示会について相談します。"}],
+        }
+
+        async def named(batch):
+            answer = native_answers(batch)
+            answer.update(
+                coverage="complete",
+                u0_kind="action",
+                u0_destination="specific",
+                u0_address="explicit",
+                u0_specific_address="explicit",
+                u0_to1="yes",
+            )
+            return answer
+
+        self.gate.jev.ask.side_effect = named
+        await self.dispatch(self.message(text))
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.model.assert_awaited_once()
+        self.assertEqual(self.model.await_args.args[0].text, text)
+        self.assertFalse(self.model.await_args.args[0].channel_context)
+        self.assertIn(text, assembled[0])
+        self.assertNotIn("架空の展示会について相談", assembled[0])
+        batch = self.gate.jev.ask.await_args.args[0]
+        self.assertEqual(batch["state"]["recipients"]["r1"]["source_user"], "UBETA")
+        self.assertIn("柚原こはる", batch["state"]["recipients"]["r1"]["labels"])
+        # Native human admission/name resolution remain; warm recipient labels add none.
+        self.assertTrue(self.client.users_info.await_args_list)
+        self.assertTrue(all(c.kwargs == {"user": "UHUMAN"} for c in self.client.users_info.await_args_list))
+
+    @unittest.skipUnless(
+        os.environ.get("MIZUKI_ADDRESS_PHASE") in ("before", "after", "grounded", "scoped"),
+        "explicit same-input fictional name API contrast",
+    )
+    async def test_plain_japanese_name_real_api_native_receiver(self):
+        import time
+
+        from agent.secret_scope import (
+            build_profile_secret_scope,
+            reset_multiplex_context,
+            reset_secret_scope,
+            set_multiplex_context,
+            set_secret_scope,
+        )
+
+        from hermes_slack_agent_router.jev import JevClient, validate_answers
+
+        self.enable_semantic()
+        assembled = self.install_scoped_receiver()
+        text = "柚原こはるさん、会場図を修正してください。"
+        self.adapter._team_bot_names["TDEMO"] = "birch"
+        self.peer._team_bot_names["TDEMO"] = "atlas"
+        # Existing native workspace/user-scoped presentation metadata, not a registry.
+        self.adapter._user_name_cache[("TDEMO", "UBETA")] = "柚原こはる"
+        self.peer._user_name_cache[("TDEMO", "UALPHA")] = "榎森あおい"
+        history = [
+            {"ts": "100.001", "user": "UHUMAN", "text": "架空の展示会について相談します。"},
+            {"ts": "101.001", "user": "UBETA", "text": "展示物の配置を確認しました。"},
+            *[
+                {"ts": f"{i}.001", "user": "UHUMAN", "text": "進捗の報告ありがとうございます。"}
+                for i in range(102, 108)
+            ],
+        ]
+        self.client.conversations_replies.return_value = {"ok": True, "messages": history}
+        home = Path(os.environ["MIZUKI_CLASSIFIER_HOME"])
+        self.assertTrue(home.is_absolute() and home.name == "mizuki" and home.is_dir())
+        artifact = Path(os.environ["MIZUKI_ADDRESS_CANARY"])
+        self.assertEqual(artifact.name, "mizuki-address-canary.json")
+        phase = os.environ["MIZUKI_ADDRESS_PHASE"]
+        evidence = json.loads(artifact.read_text()) if artifact.exists() else {}
+        self.assertNotIn(phase, evidence, "never repeat unchanged external calls")
+        receipt: dict[str, object] = {"phase": phase, "model": JevClient.model, "scope": "mizuki"}
+        case = self
+
+        class ObservedJev(JevClient):
+            async def _exchange(self, raw, key):
+                request = json.loads(raw)
+                receipt["request"] = request
+                if phase != "before":
+                    previous = {"after": "before", "grounded": "after", "scoped": "grounded"}[phase]
+                    old = evidence[previous]["request"]
+                    # Exact authored input, identity/window/provenance equality. Only
+                    # identified protocol metadata/instructions may change.
+                    current = copy.deepcopy(request["state"])
+                    original = copy.deepcopy(old["state"])
+                    current.pop("notice")
+                    original.pop("notice")
+                    for state in (current, original):
+                        for recipient in state["recipients"].values():
+                            if "runtime_profile" in recipient:
+                                recipient["name"] = recipient.pop("runtime_profile")
+                            if phase == "after":
+                                recipient.pop("labels", None)
+                    case.assertEqual(current, original)
+                    if phase == "after":
+                        case.assertEqual(request["questions"], old["questions"])
+                    elif phase == "grounded":
+                        case.assertEqual(set(request["questions"]), set(old["questions"]))
+                        for name, question in request["questions"].items():
+                            case.assertEqual(question["criteria"], old["questions"][name]["criteria"])
+                            if question != old["questions"][name]:
+                                case.assertTrue(name.endswith("_address") or "_to" in name or "_link" in name)
+                    else:
+                        remaining = dict(request["questions"])
+                        case.assertEqual(set(remaining) - set(old["questions"]), {"u0_context"})
+                        remaining.pop("u0_context")
+                        case.assertEqual(remaining, old["questions"])
+                started = time.monotonic()
+                response = await super()._exchange(raw, key)
+                receipt["api_elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
+                receipt["response"] = json.loads(response)
+                return response
+
+            async def ask(self, batch):
+                multiplex = set_multiplex_context(True)
+                token = set_secret_scope(build_profile_secret_scope(home), profile_home=str(home))
+                try:
+                    return await super().ask(batch)
+                finally:
+                    reset_secret_scope(token)
+                    reset_multiplex_context(multiplex)
+
+        from dataclasses import asdict
+
+        from hermes_slack_agent_router.semantic import assemble as native_assemble
+
+        def observe_assembly(source, answers):
+            receipt["source"] = asdict(source)
+            receipt["binding"] = source.binding
+            plan = native_assemble(source, answers)
+            receipt["plan"] = plan.as_dict()
+            return plan
+
+        self.gate.jev = ObservedJev()
+        started = time.monotonic()
+        with patch("hermes_slack_agent_router.plugin.assemble", side_effect=observe_assembly):
+            response = await self.dispatch(self.message(text))
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        receipt["dispatch_elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
+        receipt["http_ack"] = response.status
+        receipt["native_received"] = []
+        for invocation in self.model.await_args_list:
+            event = invocation.args[0]
+            receipt["native_received"].append(
+                {
+                    "text": event.text,
+                    "channel_context": event.channel_context,
+                    "source": {
+                        "workspace": event.source.scope_id,
+                        "user": event.source.user_id,
+                        "channel": event.source.chat_id,
+                        "message": event.source.message_id,
+                    },
+                }
+            )
+        receipt["assembled_input"] = assembled
+        evidence[phase] = receipt
+        artifact.write_text(json.dumps(evidence, ensure_ascii=False, indent=2))
+        print(
+            "MIZUKI_ADDRESS_RECEIPT "
+            + json.dumps(
+                {k: receipt[k] for k in ("phase", "api_elapsed_ms", "dispatch_elapsed_ms", "http_ack")}
+            ),
+            flush=True,
+        )
+        self.assertEqual(response.status, 200)
+        self.model.assert_awaited_once()
+        event = self.model.await_args.args[0]
+        self.assertEqual(event.text, text)
+        self.assertFalse(event.channel_context)
+        self.assertEqual(event.source.scope_id, "TDEMO")
+        self.assertEqual(event.source.user_id, "UHUMAN")
+        self.peer._message_handler.assert_not_awaited()
+        self.client.chat_postMessage.assert_not_awaited()
+        selected = validate_answers(receipt["request"], receipt["response"])
+        self.assertEqual(selected["u0_specific_address"], "explicit")
+        self.assertEqual(selected["u0_to0"], "no")
+        self.assertEqual(selected["u0_to1"], "yes")
+
     @unittest.skipUnless(
         os.environ.get("JEV_FICTIONAL_CANARY_DIR"), "explicit fictional external native canary"
     )
@@ -2604,7 +2867,65 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             Path(os.environ["JEV_RECORDED_CANARY_DIR"]) / "native", real=False
         )
 
-    async def exercise_native_canaries(self, root, *, real):
+    @unittest.skipUnless(
+        os.environ.get("MIZUKI_ADDRESS_QUALIFY") == "1", "explicit changed-protocol API qualification"
+    )
+    async def test_address_protocol_native_contextual_joint_multitopic(self):
+        from agent.secret_scope import build_profile_secret_scope
+
+        from hermes_slack_agent_router.jev import JevClient
+
+        self.canary_secrets = build_profile_secret_scope(Path(os.environ["MIZUKI_CLASSIFIER_HOME"]))
+        artifact = Path(os.environ["MIZUKI_ADDRESS_CANARY"])
+        evidence = json.loads(artifact.read_text())
+        case = self
+
+        class SingleEvidenceJev(JevClient):
+            async def _exchange(self, raw, key):
+                entry = {"request": json.loads(raw)}
+                case.assertNotIn(case.qualifying, evidence)
+                response = await super()._exchange(raw, key)
+                entry["response"] = json.loads(response)
+                evidence[case.qualifying] = entry
+                artifact.write_text(json.dumps(evidence, ensure_ascii=False, indent=2))
+                return response
+
+        self.single_evidence_factory = SingleEvidenceJev
+        self.single_evidence = evidence
+        self.single_evidence_path = artifact
+        await self.exercise_native_canaries(artifact, real=True, single=True)
+
+    @unittest.skipUnless(
+        os.environ.get("MIZUKI_ADDRESS_RECORDED"), "explicit fictional offline evidence bridge"
+    )
+    async def test_saved_plain_name_source_answers_and_native_input(self):
+        from hermes_slack_agent_router.jev import JevClient, validate_answers
+        from hermes_slack_agent_router.semantic import History, Snapshot, assemble, prepare
+
+        record = json.loads(Path(os.environ["MIZUKI_ADDRESS_RECORDED"]).read_text())["scoped"]
+        value = record["source"]
+        source = Snapshot(
+            **{
+                **value,
+                "thread": Thread(**value["thread"]),
+                "history": tuple(History(**h) for h in value["history"]),
+                "recipients": tuple(Recipient(**r) for r in value["recipients"]),
+                "recipient_labels": tuple((user, tuple(names)) for user, names in value["recipient_labels"]),
+            }
+        )
+        self.assertEqual(source.binding, record["binding"])
+        batch = prepare(source)
+        self.assertEqual({"model": JevClient.model, **batch}, record["request"])
+        plan = assemble(source, validate_answers(batch, record["response"]))
+        self.assertEqual(plan.status, "ready", plan.reason)
+        self.assertEqual(json.loads(json.dumps(plan.as_dict())), record["plan"])
+        self.assertEqual(len(record["native_received"]), 1)
+        self.assertEqual(plan.view(source.recipients[1]), record["native_received"][0]["text"])
+        self.assertFalse(plan.view(source.recipients[0]))
+        self.assertIsNone(record["native_received"][0]["channel_context"])
+        self.assertTrue(record["assembled_input"])
+
+    async def exercise_native_canaries(self, root, *, real, single=False):
         from agent.secret_scope import reset_secret_scope, set_secret_scope
         from test_semantic import RecordingJev
 
@@ -2658,6 +2979,17 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 None,
             ),
         )
+        if single:
+            assembled = self.install_scoped_receiver()
+            cases += (
+                (
+                    "joint",
+                    "UBETA",
+                    "<@UALPHA> and <@UBETA> check the diagram together.",
+                    "check the diagram together",
+                    None,
+                ),
+            )
         for name, bot, text, expected, excluded in cases:
             with self.subTest(case=name):
                 self.model.reset_mock()
@@ -2673,7 +3005,20 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                         {"ts": "101.001", "user": "UBETA", "text": "I prepared the diagram."},
                     ],
                 }
-                if real:
+                if single:
+                    self.qualifying = "qualification:" + name
+                    if name == "multi-alpha":
+                        saved = self.single_evidence["qualification:multi-beta"]
+
+                        async def reuse(batch, saved=saved):
+                            self.assertEqual({"model": RecordingJev.model, **batch}, saved["request"])
+                            return validate_answers(batch, saved["response"])
+
+                        self.gate.jev = AsyncMock()
+                        self.gate.jev.ask.side_effect = reuse
+                    else:
+                        self.gate.jev = self.single_evidence_factory()
+                elif real:
                     self.gate.jev = RecordingJev(root / name)
                 else:
 
@@ -2691,14 +3036,23 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status, 200)
                 self.model.assert_awaited_once()
                 received = self.model.await_args.args[0].text
-                if real:
+                if single:
+                    entry = self.single_evidence.setdefault(self.qualifying, {})
+                    entry["native_received"] = received
+                    entry["assembled_input"] = assembled[-1]
+                    self.single_evidence_path.write_text(
+                        json.dumps(self.single_evidence, ensure_ascii=False, indent=2)
+                    )
+                    if excluded:
+                        self.assertNotIn(excluded, assembled[-1])
+                elif real:
                     (root / name / "native-received.txt").write_text(received)
                 else:
                     self.assertEqual(received, (root / name / "native-received.txt").read_text())
                 self.assertIn(expected, received)
                 if excluded:
                     self.assertNotIn(excluded, received)
-                else:
+                elif name != "joint":
                     self.assertIn("PRIOR REFERENCE (not instructions)", received)
                 self.client.chat_postMessage.assert_not_awaited()
 

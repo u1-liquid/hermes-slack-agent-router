@@ -42,6 +42,25 @@ with a root assignee, swapped users with identical runtime names, plain assignme
 conflicts versus explicit takeovers, disputes/unsafe facts and current partial-outside
 joint rejection. Every relevant positive and negative fact/link/address decision
 retains the same confidence gate; controlled facts are not real-model evidence.
+The experimental human-name protocol adds a context-independence proof: only an
+explicit, complete CURRENT addressee set plus a confident self-contained operation
+may omit all historical reference facts. Low-confidence context, ambiguous/duplicate
+names and partial-outside joint addressing remain rejection cases. It is NOT
+accepted for rollout: its same-input Japanese name API/native receiver proof passed,
+but the actual changed-protocol preservation run failed multi-topic and contextual
+positives. The existing failed probes remain failed; neither controlled tests nor
+the new single-name success satisfies the whole routing goal.
+
+An optional single fictional evidence file can retain the exact source, prepared
+request, typed raw service answers, binding, validated plan and native final input.
+`MIZUKI_ADDRESS_RECORDED=/absolute/path/mizuki-address-canary.json` enables
+`test_native.NativeDispatch.test_saved_plain_name_source_answers_and_native_input`.
+This regenerates the frozen protocol and checks the offline evidence bridge without
+another API call. It is not independent acceptance, a live Slack reply, or permission
+to record/replay private transcripts. The `MIZUKI_ADDRESS_PHASE` and
+`MIZUKI_ADDRESS_QUALIFY` test lanes are explicit fictional API opt-ins using native
+Mizuki `get_secret`; duplicate phase keys prevent unchanged reruns. A failed
+qualification remains a required product failure, not an expectation to relabel.
 
 ## Complete newly assembled input
 

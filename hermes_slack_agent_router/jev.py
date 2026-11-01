@@ -76,6 +76,21 @@ def validate_answers(batch, result, confidence=0.8):
                 )
                 if field == "address" and selected.get(unit + "_kind") == "action":
                     relevant = False  # Specific actions consume the complete coarse specific_address audit.
+                explicit = selected.get(unit + "_specific_address") == "explicit"
+                if field == "context":
+                    relevant = (
+                        selected.get(unit + "_kind") == "action"
+                        and selected.get(unit + "_destination") == "specific"
+                        and explicit
+                    )
+                if (
+                    field.startswith(("link", "fact"))
+                    and explicit
+                    and selected.get(unit + "_context") == "selfcontained"
+                    and selected.get(unit + "_kind") == "action"
+                    and selected.get(unit + "_destination") == "specific"
+                ):
+                    relevant = False  # No historical reference enters this proven self-contained view.
                 if selected.get(unit + "_destination") == "generic" and field not in (
                     "kind",
                     "mixed",
