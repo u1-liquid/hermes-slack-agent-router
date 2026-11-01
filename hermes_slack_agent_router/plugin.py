@@ -6,7 +6,6 @@ import hashlib
 import json
 import logging
 import time
-from collections import deque
 from decimal import Decimal
 from types import FunctionType
 
@@ -86,101 +85,90 @@ class Gate:
 
     @staticmethod
     async def history(client, thread, cutoff, deadline):
-        """Exhaust ascending cursors before calling the rolling window latest.
+        """Read the supported native endpoint's newest page, not its older cursors.
 
-        Slack SDK buffers JSON before returning: page caps are post-decode
-        acceptance bounds, not socket/RSS limits. Shared SDK retry policy is native.
+        Selection is newest-before-cutoff; order inside that page is ascending.
+        SDK JSON buffering/retry behavior remains native; caps are post-decode.
         """
         if cutoff == thread.root:
             return ()  # The root is CURRENT, never its own prior reference.
-        root, cursor = None, None
-        recent = deque(maxlen=7)
-        seen, cursors = {}, set()
+        root = None
+        recent, seen = [], {}
         last = Decimal(thread.root)
-        total = 0
+
+        def records(response, limit, extra_root=False):
+            data = getattr(response, "data", response)
+            size = len(json.dumps(data, ensure_ascii=False, allow_nan=False).encode())
+            messages = data.get("messages")
+            metadata = data.get("response_metadata", {})
+            if (
+                data.get("ok") is not True
+                or not isinstance(messages, list)
+                or len(messages) > limit + int(extra_root)
+                or (
+                    len(messages) > limit
+                    and sum(isinstance(m, dict) and m.get("ts") == thread.root for m in messages) != 1
+                )
+                or size > 1048576
+                or not isinstance(metadata, dict)
+                or type(data.get("has_more", False)) is not bool
+            ):
+                raise SemanticError("incomplete-context")
+            cursor = metadata.get("next_cursor", "")
+            if (
+                not isinstance(cursor, str)
+                or len(cursor) > 2048
+                or (extra_root and data.get("has_more") and not cursor)
+            ):
+                raise SemanticError("incomplete-context")
+            return messages
+
+        def validate(message):
+            ts = message["ts"]
+            Thread(thread.workspace, thread.channel, ts)
+            if (
+                Decimal(ts) > Decimal(cutoff)
+                or Decimal(ts) < Decimal(thread.root)
+                or ("thread_ts" in message and message["thread_ts"] != thread.root)
+                or ("channel" in message and message["channel"] != thread.channel)
+                or ("team" in message and message["team"] != thread.workspace)
+            ):
+                raise SemanticError("foreign-or-future-context")
+            return ts
+
         async with asyncio.timeout_at(min(time.monotonic() + 1.0, deadline - 1.3)):
-            for _ in range(4):
-                args = {
-                    "channel": thread.channel,
-                    "ts": thread.root,
-                    "latest": cutoff,
-                    "inclusive": False,
-                    "limit": 100,
-                }
-                if cursor:
-                    args["cursor"] = cursor
-                response = await client.conversations_replies(**args)
-                data = getattr(response, "data", response)
-                size = len(json.dumps(data, ensure_ascii=False, allow_nan=False).encode())
-                total += size
-                messages = data.get("messages")
-                metadata = data.get("response_metadata", {})
-                if (
-                    data.get("ok") is not True
-                    or not isinstance(messages, list)
-                    # Slack can return the requested replies PLUS the thread root.
-                    or len(messages) > args["limit"] + 1
-                    or (
-                        len(messages) > args["limit"]
-                        and sum(isinstance(m, dict) and m.get("ts") == thread.root for m in messages) != 1
-                    )
-                    or size > 1048576
-                    or total > 4194304
-                    or not isinstance(metadata, dict)
-                    or type(data.get("has_more", False)) is not bool
-                ):
-                    raise SemanticError("incomplete-context")
-                next_cursor = metadata.get("next_cursor", "")
-                if (
-                    not isinstance(next_cursor, str)
-                    or len(next_cursor) > 2048
-                    or (data.get("has_more") and not next_cursor)
-                    or next_cursor in cursors
-                ):
-                    raise SemanticError("incomplete-context")
-                progress = False
-                for message in messages:
-                    ts = message["ts"]
-                    Thread(thread.workspace, thread.channel, ts)
-                    if (
-                        Decimal(ts) > Decimal(cutoff)
-                        or Decimal(ts) < Decimal(thread.root)
-                        or (message.get("thread_ts") and message["thread_ts"] != thread.root)
-                        or (message.get("channel") and message["channel"] != thread.channel)
-                        or (message.get("team") and message["team"] != thread.workspace)
-                    ):
-                        raise SemanticError("foreign-or-future-context")
-                    if ts == cutoff:
-                        continue
-                    encoded = json.dumps(
-                        message, sort_keys=True, ensure_ascii=False, allow_nan=False
-                    ).encode()
-                    digest = hashlib.sha256(encoded).digest()
-                    if ts in seen:
-                        if seen[ts] != digest:
-                            raise SemanticError("conflicting-context")
-                        continue
+            response = await client.conversations_replies(
+                channel=thread.channel, ts=thread.root, latest=cutoff, inclusive=False, limit=7
+            )
+            for message in records(response, 7, extra_root=True):
+                ts = validate(message)
+                if ts == cutoff:
+                    continue
+                encoded = json.dumps(message, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()
+                digest = hashlib.sha256(encoded).digest()
+                if ts in seen:
+                    if seen[ts] != digest:
+                        raise SemanticError("conflicting-context")
+                    continue
+                seen[ts] = digest
+                if ts == thread.root:
+                    root = message  # Identify by known ID, independently of page placement/count.
+                else:
                     if Decimal(ts) < last:
                         raise SemanticError("unordered-context")
                     last = Decimal(ts)
-                    seen[ts] = digest
-                    progress = True
                     recent.append(message)
-                    if ts == thread.root:
-                        root = message
-                if not next_cursor:
-                    break
-                if not progress:
-                    raise SemanticError("incomplete-context")
-                cursors.add(next_cursor)
-                cursor = next_cursor
-            else:
-                raise SemanticError("context-page-limit")
-        if root is None:
-            raise SemanticError("missing-root-context")
-        selected = {m["ts"]: m for m in (root, *recent)}
+            if root is None:
+                # Slack's documented exact-known-message lookup; never scan channel history.
+                response = await client.conversations_history(
+                    channel=thread.channel, oldest=thread.root, inclusive=True, limit=1
+                )
+                messages = records(response, 1)
+                if len(messages) != 1 or validate(messages[0]) != thread.root:
+                    raise SemanticError("missing-root-context")
+                root = messages[0]
         history = []
-        for message in selected.values():
+        for message in (root, *recent):
             if message.get("files") or message.get("attachments"):
                 raise SemanticError("unsupported-prior-media-or-identity")
             if len(json.dumps(message, ensure_ascii=False).encode()) > 65536:
@@ -249,7 +237,6 @@ class Gate:
                     "missing-root-context",
                     "oversized-prior-context",
                     "unsupported-prior-media-or-identity",
-                    "context-page-limit",
                 }
                 else "unsupported-prior-composition"
             )

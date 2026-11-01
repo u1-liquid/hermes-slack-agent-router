@@ -32,26 +32,32 @@ its multiplexed profiles; independent processes are outside its native inventory
 1. Canonicalize supported authored text/rich text while preserving exact half-open
    Unicode ranges and source-field provenance. Quotes/code/forwarded material is
    inert reference. Reject unsupported media or inseparable composition.
-2. Fetch ascending `conversations_replies` cursor pages through the receiving
-   workspace client with exact channel/root, pinned `latest=current timestamp`,
-   `inclusive=False`, `limit=100` replies. A response may include the root in addition
-   to those replies: accept at most 101 records, and require exactly one root when
-   the record count exceeds 100. Validate that root's scope/identity/order normally;
-   an extra root is not permission for excess replies or an unfinished cursor.
-   Exhaust cursors within four SDK calls/one second
-   before selecting a latest window. Retain a rolling seven strictly-prior distinct
-   records and pin root independently, deduplicating their union to at most eight.
-   Reject missing root, current/future confusion, foreign/malformed/unordered records,
-   conflicting duplicates, cursor loops/nonprogress or unexhausted bounds. Exclude
-   current even if returned; root-trigger input has no prior self-reference or fetch.
-   Keep at most one page, eight bodies and 401 distinct ID/fingerprint witnesses
-   (400 replies plus the root). Canonicalize
-   selected root/recent bodies with original authors/IDs/field provenance; evicted
-   older media does not veto the selected view. Historical native bot `markdown`
-   and text-only `section` blocks retain their actual visible leaf text and source
-   paths; notification fallback never overrides them. Unknown composition and
-   missing authors still fail closed. CURRENT rich-text admission is unchanged.
-   No pagination cache/store exists.
+2. Fetch one `conversations_replies` page through the receiving workspace client
+   with exact channel/root, pinned `latest=current timestamp`, `inclusive=False`,
+   `limit=7`, no cursor and no time-window scan. Native HTTP qualification observed
+   selection of the newest seven before cutoff in ascending internal order, plus
+   the root (eight records); a verbatim cursor returned strictly older replies.
+   Same-cutoff `limit=100` corroborated the selected seven. This supported-endpoint
+   observation differs from inferring oldest-first selection from Slack's documented
+   earliest-first ordering; it is not a global Slack behavior guarantee.
+   Accept at most eight records, requiring exactly one known-ID root for an extra
+   record. Identify root by `thread.root`, never position or count. When absent,
+   use only documented `conversations_history(channel, oldest=root, inclusive=True,
+   limit=1)`, requiring exactly the matching timestamp and valid supplied thread,
+   workspace/channel fields. Never substitute an arbitrary channel record. Both
+   calls share the existing one-second retrieval budget. Root-trigger input makes
+   no history call. Do not interpret live `reply_count`/`latest_reply` as a cutoff
+   snapshot: they may reflect newer replies.
+   Validate timestamps, scope, ascending reply order and duplicate fingerprints;
+   reject future/foreign/malformed/conflicting records. Exact-cutoff records are
+   excluded, identical duplicates deduplicated, and root is pinned independently
+   of the seven strictly-prior replies. Older cursors do not require retrieval or
+   cause a page-limit failure. Malformed response/cursor metadata still fails closed.
+   Canonicalize only selected root/recent bodies with original authors/IDs/field
+   provenance. Historical native bot `markdown` and text-only `section` blocks keep
+   their visible leaf text/source paths, not notification fallback. Unknown blocks,
+   selected media and missing authors fail closed; older unrequested media does
+   not veto this view. CURRENT rich-text admission is unchanged. No cache/store exists.
 3. Build one typed question batch over current units, prior source authors/text and
    sorted recipients. There is no receiving-agent preference in the model input.
    Questions classify action/reference/acknowledgement, destination, CURRENT-only
@@ -115,13 +121,15 @@ Current text is capped at 6,000 characters; selected history at eight distinct
 records/6,000 characters each/48,000 total; current units at six, recipients at four,
 questions at 174 (the maximum six-unit/eight-prior/four-recipient shape). Serialized Jev request and
 response limits are 524,288 and 262,144 bytes respectively. Retained original records
-are capped at 64 KiB; decoded Slack pages at 1 MiB each/4 MiB total. SDK JSON buffering
-precedes those checks: they are acceptance limits, not hard socket/RSS limits. Native
-SDK retry behavior is unchanged, so four SDK invocations need not mean four wire attempts.
-The 2.5-second ingress budget includes context, with at most one second for retrieval
-(also bounded by ingress deadline minus 1.3 seconds) and 1.2 seconds for Jev. Deadlines
-are not hard real-time scheduling claims. Slack history has no atomic snapshot;
-unseen concurrent edits/deletions can race even a cursor-complete view.
+are capped at 64 KiB; decoded Slack responses at 1 MiB each (at most 2 MiB for
+replies plus optional exact root). SDK JSON buffering precedes those checks: these
+are acceptance limits, not hard socket/RSS limits. SDK retry behavior is unchanged,
+so one replies invocation need not mean one wire attempt. The 2.5-second ingress
+budget includes context, with at most one second for retrieval (also bounded by
+ingress deadline minus 1.3 seconds) and 1.2 seconds for Jev. Deadlines are not hard
+real-time scheduling claims or proof of Slack acknowledgement safety on a live host.
+Slack history has no atomic snapshot; unseen concurrent edits/deletions can race
+even a valid newest-page view.
 
 ## Integration boundaries
 
@@ -154,3 +162,4 @@ References: [Hermes plugins](https://hermes-agent.nousresearch.com/docs/develope
 [Bolt middleware](https://docs.slack.dev/tools/bolt-python/concepts/global-middleware/),
 and [testing](native-acceptance.md).
 Slack ordering and pagination: [conversations.replies](https://docs.slack.dev/reference/methods/conversations.replies/).
+Known-root lookup: [conversations.history](https://docs.slack.dev/reference/methods/conversations.history/).

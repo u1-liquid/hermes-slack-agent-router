@@ -20,10 +20,17 @@ spans, selected prior authors, topic groups, joint recipients, generic continuat
 multilingual acknowledgement/new-work separation, atomic uncertainty and typed
 confidence. Controlled HTTP tests check official URL/authentication, missing-key
 no-egress, body caps, faults and async cancellation/resource closure.
-Root/recent tests cover root outside the latest seven, ascending old-first cursor
-pages, pinned cutoff/current exclusion, overlap/dedup, edits/field provenance,
-malformed/foreign/missing/failed retrieval, bounds, fallback and explicit handoff
-precedence. Incomplete retrieval never becomes semantically unhelpful context.
+Root/recent tests cover root outside the latest seven, the observed newest-selected
+page with ascending internal order and an older cursor (not exhausted), pinned
+cutoff/current exclusion, overlap/dedup, edits/field provenance, independently
+identified root and exact-known-root history fallback. Malformed/foreign/missing/
+failed retrieval and bounds remain negative controls. A controlled 0.42-second
+native acquisition plus 0.12-second classifier release measures positive Bolt
+middleware-to-model delivery under unchanged deadlines; blocked fetch cancellation
+is tested separately. These causal timers model network latency, not real Slack
+traffic or a live human end-to-end result. See [design](design.md) for the supported
+endpoint qualification versus Slack's documented page ordering. Incomplete retrieval
+never becomes semantically unhelpful context.
 Source-local proof tests cover historical joint sets, recent topic-only context
 with a root assignee, swapped users with identical runtime names, plain assignment
 conflicts versus explicit takeovers, disputes/unsafe facts and current partial-outside

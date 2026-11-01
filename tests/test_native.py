@@ -227,21 +227,22 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(key, self.runner._session_key_for_source(source))
         return source, key
 
-    async def test_latest_seven_plus_root_from_old_cursor_page(self):
+    async def test_latest_seven_plus_root_ignores_older_cursor_page(self):
         self.enable_semantic()
         records = [
             {"ts": f"{100 + i}.001", "user": "UHUMAN", "text": f"Fictional note {i}"} for i in range(13)
         ]
-        # Old media outside the selected view must not restore the short-thread veto.
+        # Observed native shape: ascending WITHIN newest page, cursor moves older.
+        records[0].update(reply_count=173, latest_reply="301.001", thread_ts="100.001")
         records[1]["files"] = [{"id": "FOLD"}]
         self.client.conversations_replies.side_effect = [
             {
                 "ok": True,
-                "messages": records[:6],
+                "messages": [records[0], *records[-7:]],
                 "has_more": True,
-                "response_metadata": {"next_cursor": "fictional-next"},
+                "response_metadata": {"next_cursor": "fictional-older"},
             },
-            {"ok": True, "messages": records[6:], "has_more": False},
+            {"ok": True, "messages": [records[0], *records[1:6]], "has_more": False},
         ]
         await self.dispatch(self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY."))
         await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
@@ -258,66 +259,122 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             for c in self.client.conversations_replies.await_args_list
             if c.kwargs.get("latest") == "201.001"
         ]
-        self.assertEqual(len(invocations), 2)
-        for invocation in invocations:
-            self.assertEqual(invocation.kwargs["latest"], "201.001")
-            self.assertFalse(invocation.kwargs["inclusive"])
-        self.assertEqual(invocations[-1].kwargs["cursor"], "fictional-next")
+        self.assertEqual(len(invocations), 1)
+        self.assertEqual(
+            invocations[0].kwargs,
+            {
+                "channel": "CDEMO",
+                "ts": "100.001",
+                "latest": "201.001",
+                "inclusive": False,
+                "limit": 7,
+            },
+        )
         self.assertNotIn("SUMMARY_ONLY", self.model.await_args.args[0].text)
 
-    async def test_root_plus_requested_replies_page_keeps_actual_latest_seven_and_scoped_input(self):
+    async def test_newest_page_with_network_latency_delivers_exact_scoped_input(self):
+        import time
+
         self.enable_semantic()
         records = [
-            {"ts": f"{100 + i}.001", "user": "UHUMAN", "text": f"Fictional note {i}"} for i in range(140)
+            {
+                "ts": "100.001",
+                "user": "UHUMAN",
+                "text": "Fictional root",
+                "reply_count": 173,
+                "latest_reply": "301.001",
+                "thread_ts": "100.001",
+            },
+            *[
+                {
+                    "type": "message",
+                    "ts": ts,
+                    "user": "UHUMAN",
+                    "text": "Fictional note",
+                    "thread_ts": "100.001",
+                    "team": "TDEMO",
+                }
+                for ts in ("105.001", "106.950", "121.003", "169.901", "201.003", "298.001", "299.999")
+            ],
         ]
         body = self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY.", ts="300.001")
-        pages = [
-            {
-                "ok": True,
-                "messages": records[:101],
-                "has_more": True,
-                "response_metadata": {"next_cursor": "fictional-page-two"},
-            },
-            {"ok": True, "messages": [*records[101:], body["event"]], "has_more": False},
-        ]
+        elapsed = {}
+
+        async def latency(seconds):
+            # Causal response release models observed native HTTP latency; no sleep/polling.
+            loop = asyncio.get_running_loop()
+            response_ready = loop.create_future()
+            timer = loop.call_later(seconds, response_ready.set_result, None)
+            try:
+                await response_ready
+            finally:
+                timer.cancel()
 
         async def page(**kwargs):
             if "latest" not in kwargs:
-                return {"ok": True, "messages": []}  # Native downstream history is separate.
-            self.assertEqual(kwargs["limit"], 100)
-            self.assertEqual(kwargs["latest"], "300.001")
-            self.assertFalse(kwargs["inclusive"])
-            return pages[1 if kwargs.get("cursor") else 0]
+                return {"ok": True, "messages": []}  # Separate downstream native hydration.
+            started = time.monotonic()
+            await latency(0.42)
+            elapsed["acquisition"] = time.monotonic() - started
+            # Root identity must not depend on being the first element.
+            return {
+                "ok": True,
+                "messages": [*records[1:], records[0]],
+                "has_more": True,
+                "response_metadata": {"next_cursor": "opaque-older-page"},
+            }
 
+        classifier = self.gate.jev
+        assert isinstance(classifier, AsyncMock)
+        classify = classifier.ask.side_effect
+
+        async def delayed_classifier(batch):
+            await latency(0.12)
+            return await classify(batch)
+
+        classifier.ask.side_effect = delayed_classifier
         self.client.conversations_replies.side_effect = page
-        await self.dispatch(body)
-        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        started = time.monotonic()
+        async with asyncio.timeout(2.5):
+            await self.dispatch(body)
+            elapsed["dispatch"] = time.monotonic() - started
+            await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        elapsed["complete"] = time.monotonic() - started
+        print("controlled native latency seconds:", json.dumps(elapsed, sort_keys=True))
+        self.assertGreaterEqual(elapsed["acquisition"], 0.42)
         self.model.assert_awaited_once()
         self.assertEqual(self.model.await_args.args[0].text, "DIAGRAM_ONLY.")
         state = self.gate.jev.ask.await_args.args[0]["state"]
-        self.assertEqual(
-            [h["source_id"] for h in state["prior"].values()],
-            [records[0]["ts"], *[m["ts"] for m in records[-7:]]],
-        )
+        self.assertEqual([h["source_id"] for h in state["prior"].values()], [m["ts"] for m in records])
         self.assertEqual(state["root"], "h0")
         self.assertEqual(state["recent"], [f"h{i}" for i in range(1, 8)])
         calls = [c for c in self.client.conversations_replies.await_args_list if "latest" in c.kwargs]
-        self.assertEqual(len(calls), 2)
-        self.assertNotIn("cursor", calls[0].kwargs)
-        self.assertEqual(calls[1].kwargs["cursor"], "fictional-page-two")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            calls[0].kwargs,
+            {
+                "channel": "CDEMO",
+                "ts": "100.001",
+                "latest": "300.001",
+                "inclusive": False,
+                "limit": 7,
+            },
+        )
+        self.client.conversations_history.assert_not_awaited()
         self.client.chat_postMessage.assert_not_awaited()
         self.client.chat_postEphemeral.assert_not_awaited()
 
     async def test_extra_page_record_requires_exactly_one_root_and_retains_context_guards(self):
         self.enable_semantic()
-        records = [{"ts": f"{100 + i}.001", "user": "UHUMAN", "text": "Fictional note"} for i in range(103)]
+        records = [{"ts": f"{100 + i}.001", "user": "UHUMAN", "text": "Fictional note"} for i in range(10)]
+        self.client.conversations_history.return_value = {"ok": True, "messages": []}
         for data in (
-            {"ok": True, "messages": records[1:102]},  # 101 replies with no root.
-            {"ok": True, "messages": records[:102]},  # Root is not permission for 102 records.
-            {"ok": True, "messages": [records[0], *records[:100]]},  # Two roots in an extra-sized page.
-            {"ok": True, "messages": [{**records[0], "team": "TOTHER"}, *records[1:101]]},
-            {"ok": True, "messages": records[:101], "has_more": True},  # Unfinished cursor.
-            {"ok": True, "messages": records[1:101]},  # Missing root even within nominal count.
+            {"ok": True, "messages": records[1:9]},  # Eight replies with no root.
+            {"ok": True, "messages": records[:9]},  # Root is not permission for nine records.
+            {"ok": True, "messages": [records[0], *records[:7]]},  # Two roots in an extra-sized page.
+            {"ok": True, "messages": [{**records[0], "team": "TOTHER"}, *records[1:8]]},
+            {"ok": True, "messages": records[:8], "has_more": True},  # Malformed cursor metadata.
+            {"ok": True, "messages": records[1:8]},  # Missing root with unsuccessful exact lookup.
             {"ok": True, "messages": [records[0], None]},
             {"ok": True, "messages": [records[0], {**records[0], "text": "Conflicting root"}]},
             {"ok": True, "messages": [records[0], {**records[1], "ts": "301.001"}]},
@@ -472,13 +529,25 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 cancelled.set()
                 raise
 
-        client.conversations_replies.side_effect = blocked
-        with self.assertRaises(TimeoutError):
-            await self.gate.history(client, self.key, "201.001", time.monotonic() + 1.32)
-        self.assertTrue(started.is_set() and cancelled.is_set())
-        client.conversations_replies.assert_awaited_once()
+        for stage in ("replies", "root"):
+            with self.subTest(stage=stage):
+                started, cancelled = asyncio.Event(), asyncio.Event()
+                client = AsyncMock()
+                if stage == "replies":
+                    client.conversations_replies.side_effect = blocked
+                else:
+                    client.conversations_replies.return_value = {"ok": True, "messages": []}
+                    client.conversations_history.side_effect = blocked
+                with self.assertRaises(TimeoutError):
+                    await self.gate.history(client, self.key, "201.001", time.monotonic() + 1.32)
+                self.assertTrue(started.is_set() and cancelled.is_set())
+                client.conversations_replies.assert_awaited_once()
+                if stage == "root":
+                    client.conversations_history.assert_awaited_once_with(
+                        channel="CDEMO", oldest="100.001", inclusive=True, limit=1
+                    )
 
-    async def test_history_cursor_cutoff_overlap_and_failures(self):
+    async def test_history_cutoff_duplicates_exact_root_and_failures(self):
         import time
 
         from hermes_slack_agent_router.semantic import SemanticError
@@ -486,64 +555,117 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         root = {"ts": "100.001", "user": "UHUMAN", "text": "Fictional root", "edited": {"ts": "110.001"}}
         child = {"ts": "101.001", "user": "UBETA", "text": "Fictional prior"}
 
-        async def collect(pages):
+        async def collect(page, fallback=None, key=None, cutoff="201.001"):
             client = AsyncMock()
-            client.conversations_replies.side_effect = pages
-            result = await self.gate.history(client, self.key, "201.001", time.monotonic() + 2.5)
+            client.conversations_replies.return_value = page
+            client.conversations_history.return_value = fallback or {"ok": True, "messages": []}
+            result = await self.gate.history(client, key or self.key, cutoff, time.monotonic() + 2.5)
             return result, client
 
         result, client = await collect(
-            [
-                {"ok": True, "messages": [root], "has_more": True, "response_metadata": {"next_cursor": "a"}},
-                {"ok": True, "messages": [root, child, {"ts": "201.001", "text": "CURRENT"}]},
-            ]
+            {"ok": True, "messages": [root, root, child, child, {"ts": "201.001", "text": "CURRENT"}]}
         )
         self.assertEqual([h.identity for h in result], ["100.001", "101.001"])
         self.assertEqual(result[0].original, root)
         self.assertEqual(result[0].provenance[0]["field"], "text")
-        self.assertEqual(len(result), 2)  # Root overlaps the recent window, represented once.
-        self.assertEqual(client.conversations_replies.await_count, 2)
+        client.conversations_replies.assert_awaited_once()
+        client.conversations_history.assert_not_awaited()
         self.assertEqual(await self.gate.history(client, self.key, "100.001", time.monotonic() + 2.5), ())
-        self.assertEqual(client.conversations_replies.await_count, 2)
-        bad_pages = [
-            [{"ok": False, "messages": [root]}],
-            [{"ok": True, "messages": [child]}],
-            [{"ok": True, "messages": [root, {**child, "team": "TOTHER"}]}],
-            [{"ok": True, "messages": [root, {**child, "channel": "COTHER"}]}],
-            [{"ok": True, "messages": [root, {**child, "thread_ts": "99.001"}]}],
-            [{"ok": True, "messages": [root, {**child, "ts": "202.001"}]}],
-            [{"ok": True, "messages": [child, root]}],
-            [{"ok": True, "messages": [root, {**root, "text": "edited differently"}]}],
-            [{"ok": True, "messages": [root, {**child, "ts": "NaN"}]}],
-            [{"ok": True, "messages": [root, {**child, "user": None}]}],
-            [{"ok": True, "messages": [root, {**child, "text": "x" * 6001}]}],
-            [{"ok": True, "messages": [root], "has_more": True}],
-            [{"ok": True, "messages": [root], "response_metadata": {"next_cursor": 1}}],
-            [
-                {"ok": True, "messages": [root], "response_metadata": {"next_cursor": "a"}},
-                {"ok": True, "messages": [root], "response_metadata": {"next_cursor": "a"}},
-            ],
-            [
-                {"ok": True, "messages": [root], "response_metadata": {"next_cursor": "a"}},
-                {"ok": True, "messages": [], "response_metadata": {"next_cursor": "b"}},
-            ],
-            [{"ok": True, "messages": [root], "extra": "x" * 1048576}],
-            [{"ok": True, "messages": [root, {**child, "files": [{"id": "FNEW"}]}]}],
-            [
-                {
-                    "ok": True,
-                    "messages": [{"ts": f"{100 + i}.001", "user": "UHUMAN", "text": "n"}],
-                    "response_metadata": {"next_cursor": f"page{i}"},
-                }
-                for i in range(4)
-            ],
+        client.conversations_replies.assert_awaited_once()
+        for messages in ([root], [root, child]):
+            result, _ = await collect({"ok": True, "messages": messages})
+            self.assertEqual([h.identity for h in result], [m["ts"] for m in messages])
+
+        # Preserve observed native timestamps/metadata; private bodies/authors are not fixtures.
+        timestamps = [
+            "1793407089.735139",
+            "1793528555.349569",
+            "1793528646.854749",
+            "1793528708.749289",
+            "1793528729.649269",
+            "1793528730.841309",
+            "1793528827.079949",
+            "1793528956.853099",
         ]
-        for pages in bad_pages:
+        wire: list[dict] = [
+            {
+                "type": "message",
+                "ts": ts,
+                "thread_ts": timestamps[0],
+                "team": "TDEMO",
+                "user": "UHUMAN",
+                "text": "Fictional public fixture",
+            }
+            for ts in timestamps
+        ]
+        wire[0].update(reply_count=173, latest_reply="1793529442.829789")
+        result, client = await collect(
+            {
+                "ok": True,
+                "messages": wire,
+                "has_more": True,
+                "response_metadata": {"next_cursor": "opaque-older"},
+            },
+            key=Thread("TDEMO", "CDEMO", timestamps[0]),
+            cutoff="1793528957.605949",
+        )
+        self.assertEqual([h.identity for h in result], timestamps)
+        client.conversations_replies.assert_awaited_once()
+        client.conversations_history.assert_not_awaited()
+
+        result, client = await collect(
+            {"ok": True, "messages": [child]}, {"ok": True, "messages": [root], "has_more": True}
+        )
+        self.assertEqual([h.identity for h in result], [root["ts"], child["ts"]])
+        client.conversations_replies.assert_awaited_once()
+        client.conversations_history.assert_awaited_once_with(
+            channel="CDEMO", oldest="100.001", inclusive=True, limit=1
+        )
+        for bad_root in (
+            [],
+            [child],
+            [root, child],
+            [{**root, "team": "TOTHER"}],
+            [{**root, "channel": "COTHER"}],
+            [{**root, "thread_ts": "99.001"}],
+            [{**root, "files": [{"id": "FROOT"}]}],
+            [None],
+        ):
+            with self.subTest(root=bad_root), self.assertRaises((SemanticError, ValueError, TypeError)):
+                await collect({"ok": True, "messages": [child]}, {"ok": True, "messages": bad_root})
+
+        bad_pages = [
+            {"ok": False, "messages": [root]},
+            {"ok": True, "messages": [child]},
+            *[
+                {"ok": True, "messages": [root, {**child, field: value}]}
+                for field, value in (
+                    ("team", "TOTHER"),
+                    ("channel", "COTHER"),
+                    ("thread_ts", "99.001"),
+                    ("ts", "202.001"),
+                    ("ts", "NaN"),
+                    ("user", None),
+                    ("text", "x" * 6001),
+                    ("files", [{"id": "FNEW"}]),
+                    ("attachments", [{"text": "hidden"}]),
+                )
+            ],
+            {"ok": True, "messages": [root, {**child, "ts": "102.001"}, child]},
+            {"ok": True, "messages": [root, {**root, "text": "edited differently"}]},
+            {"ok": True, "messages": [root, child, {**child, "text": "conflicting reply"}]},
+            {"ok": True, "messages": [root], "has_more": True},
+            {"ok": True, "messages": [root], "has_more": "true"},
+            {"ok": True, "messages": [root], "response_metadata": {"next_cursor": 1}},
+            {"ok": True, "messages": [root], "response_metadata": {"next_cursor": "x" * 2049}},
+            {"ok": True, "messages": [root], "extra": "x" * 1048576},
+        ]
+        for page in bad_pages:
             with (
-                self.subTest(pages=repr(pages)[:120]),
+                self.subTest(page=repr(page)[:120]),
                 self.assertRaises((SemanticError, ValueError, TypeError)),
             ):
-                await collect(pages)
+                await collect(page)
         self.enable_semantic()
 
         async def failed(**kwargs):
@@ -613,17 +735,15 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 self.peer._team_bot_user_ids["TDEMO"] = "UALPHA" if bot == "UBETA" else "UBETA"
                 self.model.reset_mock()
 
-                # Distinguish the plugin's cursor fetch from native downstream history.
+                # Distinguish plugin tail acquisition from native downstream hydration.
                 async def page(records=records, **kwargs):
                     if "latest" not in kwargs:
                         return {"ok": True, "messages": []}
-                    if kwargs.get("cursor"):
-                        return {"ok": True, "messages": records[4:], "has_more": False}
                     return {
                         "ok": True,
-                        "messages": records[:4],
+                        "messages": [records[0], *records[-7:]],
                         "has_more": True,
-                        "response_metadata": {"next_cursor": "fictional-next"},
+                        "response_metadata": {"next_cursor": "fictional-older"},
                     }
 
                 self.client.conversations_replies.side_effect = page

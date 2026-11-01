@@ -81,9 +81,13 @@ log keys, transcripts or service error bodies, or store routing decisions.
   must be at least 0.8; source grounding and complete instruction coverage are checked.
   Uncertainty in any actionable unit rejects the whole message, not just one clause.
 - Replies use the actual latest seven messages strictly before the trigger, plus
-  the verified root even outside that window. Overlap is represented once. Slack's
-  ascending cursor pages are exhausted before selecting the latest window; the first
-  page is not assumed to be latest. Older pages alone do not reject a thread.
+  the verified root even outside that window. Overlap is represented once. On the
+  qualified native endpoint, one `conversations.replies` request with `limit=7`,
+  `latest=current timestamp`, `inclusive=false` and no cursor returns the newest
+  bounded subset in ascending internal order, normally root plus seven replies.
+  A returned cursor leads to older history and is not exhausted. This is an observed
+  supported-endpoint contract, not a universal guarantee inferred from page ordering:
+  Slack's documentation describes earliest-first order within the time range.
 - Informative recent message/person/topic evidence takes priority. Root context is
   used only when recent messages provide no relevant assignee support. A newer clear
   handoff overrides an older assignment; unresolved conflict or failed retrieval does
@@ -91,14 +95,15 @@ log keys, transcripts or service error bodies, or store routing decisions.
   the owner. Current explicit specific instructions retain priority. Topic-only recent
   context does not erase a supported root assignee. Historical joint assignments
   preserve their exact recipient set, rather than becoming an all-agent fallback.
-- Retrieval is bounded to four SDK calls requesting at most 100 replies each and one second,
-  accepting up to 101 records per page only when the extra record is the single
-  thread root (which still undergoes the full context validation). Retrieval ends
-  before the ingress deadline minus 1.3 seconds. Missing roots, malformed,
-  foreign/future/conflicting records, cursor loops or unexhausted pages yield no work.
-  Pages are accepted up to 1 MiB each/4 MiB total after SDK JSON decoding; these are
-  not pre-download memory caps. Native SDK retries may add wire attempts. Slack does
-  not provide an atomic history snapshot; unseen concurrent edits/deletions can race.
+- Retrieval uses one SDK replies call and, only if root is absent, one exact
+  `conversations.history(oldest=root, inclusive=true, limit=1)` lookup. Root identity
+  and every supplied thread/workspace/channel field must match; no arbitrary result
+  substitutes for it. Both share one second, ending before the ingress deadline
+  minus 1.3 seconds. Live root `reply_count`/`latest_reply` are not cutoff snapshots.
+  Missing/unverifiable roots and malformed, foreign/future/conflicting records yield
+  no work. Each decoded response is capped at 1 MiB (at most 2 MiB across both calls),
+  not a pre-download memory cap. Native SDK retries may add wire attempts. Slack has
+  no atomic history snapshot; unseen concurrent edits/deletions can race.
 - Current input is limited to 6,000 characters, six units, four recipients and
   174 questions. Up to eight distinct prior records have 6,000 characters each
   (48,000 aggregate), with a 64 KiB retained original-record limit. The Jev request
@@ -127,8 +132,8 @@ log keys, transcripts or service error bodies, or store routing decisions.
 ## Troubleshooting and disabling
 
 If registration succeeds but routing does not, check the native Slack connection,
-served profile, serving-profile key and bounded cursor-complete root/recent view. Local codes such as
-`context-page-limit`, `missing-root-context`, `unsupported-prior-composition`,
+served profile, serving-profile key and bounded newest-page root/recent view. Local codes such as
+`missing-root-context`, `unsupported-prior-composition`,
 `incomplete-context`, `native-topology-unresolved`, `native-topology-changed`, `classifier-failed` and
 `coverage-or-grounding-unresolved` distinguish bounded failures. Fetch diagnostics
 separate `context-fetch-not-permitted` (including unavailable channel access),
