@@ -85,16 +85,16 @@ class Gate:
 
     @staticmethod
     async def history(client, thread, cutoff, deadline):
-        """Read the supported native endpoint's newest page, not its older cursors.
+        """Read newest replies, following older cursors only to fill a short tail.
 
-        Selection is newest-before-cutoff; order inside that page is ascending.
+        Selection is newest-before-cutoff; order inside each page is ascending.
         SDK JSON buffering/retry behavior remains native; caps are post-decode.
         """
         if cutoff == thread.root:
             return ()  # The root is CURRENT, never its own prior reference.
         root = None
         recent, seen = [], {}
-        last = Decimal(thread.root)
+        cursor, cursors = "", set()
 
         def records(response, limit, extra_root=False):
             data = getattr(response, "data", response)
@@ -121,7 +121,7 @@ class Gate:
                 or (extra_root and data.get("has_more") and not cursor)
             ):
                 raise SemanticError("incomplete-context")
-            return messages
+            return messages, cursor
 
         def validate(message):
             ts = message["ts"]
@@ -137,33 +137,61 @@ class Gate:
             return ts
 
         async with asyncio.timeout_at(min(time.monotonic() + 1.0, deadline - 1.3)):
-            response = await client.conversations_replies(
-                channel=thread.channel, ts=thread.root, latest=cutoff, inclusive=False, limit=7
-            )
-            for message in records(response, 7, extra_root=True):
-                ts = validate(message)
-                if ts == cutoff:
-                    continue
-                encoded = json.dumps(message, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()
-                digest = hashlib.sha256(encoded).digest()
-                if ts in seen:
-                    if seen[ts] != digest:
-                        raise SemanticError("conflicting-context")
-                    continue
-                seen[ts] = digest
-                if ts == thread.root:
-                    root = message  # Identify by known ID, independently of page placement/count.
-                else:
-                    if Decimal(ts) < last:
-                        raise SemanticError("unordered-context")
-                    last = Decimal(ts)
-                    recent.append(message)
+            # At most four SDK calls/4 MiB decoded, INCLUDING optional exact root.
+            for page in range(4):
+                args: dict = {
+                    "channel": thread.channel,
+                    "ts": thread.root,
+                    "latest": cutoff,
+                    "inclusive": False,
+                    "limit": 7,
+                }
+                if cursor:
+                    args["cursor"] = cursor
+                response = await client.conversations_replies(**args)
+                messages, next_cursor = records(response, 7, extra_root=True)
+                last = Decimal(thread.root)
+                ceiling = Decimal(recent[0]["ts"]) if recent else Decimal(cutoff)
+                for message in messages:
+                    ts = validate(message)
+                    if ts == cutoff:
+                        continue
+                    if ts != thread.root:
+                        if Decimal(ts) < last:
+                            raise SemanticError("unordered-context")
+                        last = Decimal(ts)
+                    encoded = json.dumps(
+                        message, sort_keys=True, ensure_ascii=False, allow_nan=False
+                    ).encode()
+                    digest = hashlib.sha256(encoded).digest()
+                    if ts in seen:
+                        if seen[ts] != digest:
+                            raise SemanticError("conflicting-context")
+                        continue
+                    seen[ts] = digest
+                    if ts == thread.root:
+                        root = message  # Known ID, independent of page placement/count.
+                    else:
+                        if page and Decimal(ts) >= ceiling:
+                            raise SemanticError("unordered-context")
+                        recent.append(message)
+                recent = sorted(recent, key=lambda m: Decimal(m["ts"]))[-7:]
+                if len(recent) == 7 or not next_cursor:
+                    break  # Complete bounded tail, or proven genuinely short thread.
+                if next_cursor in cursors:
+                    raise SemanticError("incomplete-context")
+                cursors.add(next_cursor)
+                cursor = next_cursor  # Opaque older continuation, even on empty/filtered pages.
+            else:
+                raise SemanticError("incomplete-context")
             if root is None:
+                if page == 3:
+                    raise SemanticError("incomplete-context")
                 # Slack's documented exact-known-message lookup; never scan channel history.
                 response = await client.conversations_history(
                     channel=thread.channel, oldest=thread.root, inclusive=True, limit=1
                 )
-                messages = records(response, 1)
+                messages, _ = records(response, 1)
                 if len(messages) != 1 or validate(messages[0]) != thread.root:
                     raise SemanticError("missing-root-context")
                 root = messages[0]

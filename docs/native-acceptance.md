@@ -21,10 +21,16 @@ multilingual acknowledgement/new-work separation, atomic uncertainty and typed
 confidence. Controlled HTTP tests check official URL/authentication, missing-key
 no-egress, body caps, faults and async cancellation/resource closure.
 Root/recent tests cover root outside the latest seven, the observed newest-selected
-page with ascending internal order and an older cursor (not exhausted), pinned
-cutoff/current exclusion, overlap/dedup, edits/field provenance, independently
-identified root and exact-known-root history fallback. Malformed/foreign/missing/
-failed retrieval and bounds remain negative controls. A controlled 0.42-second
+page with ascending internal order and an older cursor (ignored once seven exist),
+short continuing pages completed by opaque older cursor only until seven/true
+exhaustion, pinned cutoff/current exclusion, overlap/dedup, edits/field provenance,
+independently identified root and exact-known-root history fallback. Ported reviewer
+detectors retain rejection of repeating incomplete acquisition before classifier/
+model work; positive short/dedup/current/cursor-only cases receive exact completed
+scope in two SDK calls, including a positive two-response latency case (0.30 seconds
+per response) under the unchanged shared one-second acquisition timeout. Empty/duplicate-only intermediate pages, terminal sparse
+threads, overfill selection, page-local ordering, cursor loops/four-call bounds and
+later-page malformed/foreign/future/conflicting responses are covered. A controlled 0.42-second
 native acquisition plus 0.12-second classifier release measures positive Bolt
 middleware-to-model delivery under unchanged deadlines; blocked fetch cancellation
 is tested separately. These causal timers model network latency, not real Slack

@@ -32,9 +32,9 @@ its multiplexed profiles; independent processes are outside its native inventory
 1. Canonicalize supported authored text/rich text while preserving exact half-open
    Unicode ranges and source-field provenance. Quotes/code/forwarded material is
    inert reference. Reject unsupported media or inseparable composition.
-2. Fetch one `conversations_replies` page through the receiving workspace client
+2. Start with one `conversations_replies` page through the receiving workspace client
    with exact channel/root, pinned `latest=current timestamp`, `inclusive=False`,
-   `limit=7`, no cursor and no time-window scan. Native HTTP qualification observed
+   `limit=7`, initially no cursor and no time-window scan. Native HTTP qualification observed
    selection of the newest seven before cutoff in ascending internal order, plus
    the root (eight records); a verbatim cursor returned strictly older replies.
    Same-cutoff `limit=100` corroborated the selected seven. This supported-endpoint
@@ -44,15 +44,26 @@ its multiplexed profiles; independent processes are outside its native inventory
    record. Identify root by `thread.root`, never position or count. When absent,
    use only documented `conversations_history(channel, oldest=root, inclusive=True,
    limit=1)`, requiring exactly the matching timestamp and valid supplied thread,
-   workspace/channel fields. Never substitute an arbitrary channel record. Both
-   calls share the existing one-second retrieval budget. Root-trigger input makes
-   no history call. Do not interpret live `reply_count`/`latest_reply` as a cutoff
-   snapshot: they may reflect newer replies.
+   workspace/channel fields. Never substitute an arbitrary channel record. Short
+   pages are permitted by Slack's pagination contract. After deduplication/cutoff
+   filtering, follow only the returned opaque older cursor if fewer than seven
+   distinct prior replies remain. Keep the query pinned, validate ascending order
+   within each page, and merge pages by exact timestamp, retaining the newest seven.
+   Later pages may overlap known IDs; new replies must be older than the previous
+   window. A nonempty cursor indicates continuation even with missing/false
+   `has_more`; an empty or duplicate-only continuing page is not exhaustion. Stop
+   immediately at seven, or allow a genuinely short thread on true terminal
+   exhaustion. Repeated cursors and uncompleted bounded fill reject as
+   `incomplete-context`, never partial semantic evidence. At most four SDK calls
+   including optional exact root share the unchanged one-second retrieval budget.
+   Root-trigger input makes no history call. Do not interpret live
+   `reply_count`/`latest_reply` as a cutoff snapshot: they may reflect newer replies.
    Validate timestamps, scope, ascending reply order and duplicate fingerprints;
    reject future/foreign/malformed/conflicting records. Exact-cutoff records are
    excluded, identical duplicates deduplicated, and root is pinned independently
-   of the seven strictly-prior replies. Older cursors do not require retrieval or
-   cause a page-limit failure. Malformed response/cursor metadata still fails closed.
+   of the seven strictly-prior replies. Once seven exist, older cursors do not
+   require retrieval or cause a page-limit failure. Malformed response/cursor
+   metadata still fails closed.
    Canonicalize only selected root/recent bodies with original authors/IDs/field
    provenance. Historical native bot `markdown` and text-only `section` blocks keep
    their visible leaf text/source paths, not notification fallback. Unknown blocks,
@@ -121,8 +132,8 @@ Current text is capped at 6,000 characters; selected history at eight distinct
 records/6,000 characters each/48,000 total; current units at six, recipients at four,
 questions at 174 (the maximum six-unit/eight-prior/four-recipient shape). Serialized Jev request and
 response limits are 524,288 and 262,144 bytes respectively. Retained original records
-are capped at 64 KiB; decoded Slack responses at 1 MiB each (at most 2 MiB for
-replies plus optional exact root). SDK JSON buffering precedes those checks: these
+are capped at 64 KiB; decoded Slack responses at 1 MiB each (at most 4 MiB across
+four SDK calls, including optional exact root). SDK JSON buffering precedes those checks: these
 are acceptance limits, not hard socket/RSS limits. SDK retry behavior is unchanged,
 so one replies invocation need not mean one wire attempt. The 2.5-second ingress
 budget includes context, with at most one second for retrieval (also bounded by
@@ -163,3 +174,4 @@ References: [Hermes plugins](https://hermes-agent.nousresearch.com/docs/develope
 and [testing](native-acceptance.md).
 Slack ordering and pagination: [conversations.replies](https://docs.slack.dev/reference/methods/conversations.replies/).
 Known-root lookup: [conversations.history](https://docs.slack.dev/reference/methods/conversations.history/).
+Short pages and continuation: [Slack pagination](https://docs.slack.dev/apis/web-api/pagination/).

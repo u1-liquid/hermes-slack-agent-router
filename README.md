@@ -85,7 +85,12 @@ log keys, transcripts or service error bodies, or store routing decisions.
   qualified native endpoint, one `conversations.replies` request with `limit=7`,
   `latest=current timestamp`, `inclusive=false` and no cursor returns the newest
   bounded subset in ascending internal order, normally root plus seven replies.
-  A returned cursor leads to older history and is not exhausted. This is an observed
+  A returned cursor leads to older history and is ignored once seven distinct
+  strictly-prior replies exist. Slack may return a short page: only when fewer than
+  seven remain after deduplication/current exclusion does acquisition follow that
+  opaque cursor, with the same query, until seven or true exhaustion. Empty or
+  duplicate-only pages with advancing cursors do not establish exhaustion; a cursor
+  continues even when `has_more` is false/missing. This is an observed
   supported-endpoint contract, not a universal guarantee inferred from page ordering:
   Slack's documentation describes earliest-first order within the time range.
 - Informative recent message/person/topic evidence takes priority. Root context is
@@ -95,15 +100,17 @@ log keys, transcripts or service error bodies, or store routing decisions.
   the owner. Current explicit specific instructions retain priority. Topic-only recent
   context does not erase a supported root assignee. Historical joint assignments
   preserve their exact recipient set, rather than becoming an all-agent fallback.
-- Retrieval uses one SDK replies call and, only if root is absent, one exact
-  `conversations.history(oldest=root, inclusive=true, limit=1)` lookup. Root identity
-  and every supplied thread/workspace/channel field must match; no arbitrary result
-  substitutes for it. Both share one second, ending before the ingress deadline
-  minus 1.3 seconds. Live root `reply_count`/`latest_reply` are not cutoff snapshots.
-  Missing/unverifiable roots and malformed, foreign/future/conflicting records yield
-  no work. Each decoded response is capped at 1 MiB (at most 2 MiB across both calls),
-  not a pre-download memory cap. Native SDK retries may add wire attempts. Slack has
-  no atomic history snapshot; unseen concurrent edits/deletions can race.
+- Retrieval normally uses one SDK replies call; short-tail fill and, only if root
+  is absent, one exact `conversations.history(oldest=root, inclusive=true, limit=1)`
+  lookup share a maximum of four SDK calls. Root identity and every supplied
+  thread/workspace/channel field must match; no arbitrary result substitutes for it.
+  All calls share one second, ending before the ingress deadline minus 1.3 seconds.
+  Live root `reply_count`/`latest_reply` are not cutoff snapshots.
+  Missing/unverifiable roots, cursor loops, exhausted bounds without a complete
+  tail, and malformed, foreign/future/conflicting records yield no work. Each decoded
+  response is capped at 1 MiB (at most 4 MiB across four calls), not a pre-download
+  memory cap. Native SDK retries may add wire attempts. Slack has no atomic history
+  snapshot; unseen concurrent edits/deletions can race.
 - Current input is limited to 6,000 characters, six units, four recipients and
   174 questions. Up to eight distinct prior records have 6,000 characters each
   (48,000 aggregate), with a 64 KiB retained original-record limit. The Jev request

@@ -515,6 +515,211 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             await self.assert_rejected(self.message("<@UBETA> continue"))
         self.gate.jev.ask.assert_not_awaited()
 
+    async def test_review_short_nonterminal_page_must_not_be_complete_latest_seven(self):
+        """Retained QA detector: a repeating incomplete response cannot confer completeness."""
+        import time
+
+        from hermes_slack_agent_router.semantic import SemanticError
+
+        root = {"ts": "100.001", "user": "UHUMAN", "text": "Fictional root"}
+        replies = [{"ts": f"{110 + i}.001", "user": "UHUMAN", "text": "Fictional recent"} for i in range(7)]
+        for messages in (
+            [root, *replies[-6:]],
+            [root, *replies[-6:], replies[-1]],
+            [root, *replies[-6:], {"ts": "201.001", "text": "CURRENT"}],
+        ):
+            with self.subTest(messages=messages):
+                client = AsyncMock()
+                client.conversations_replies.return_value = {
+                    "ok": True,
+                    "messages": messages,
+                    "has_more": True,
+                    "response_metadata": {"next_cursor": "opaque-older"},
+                }
+                with self.assertRaises(SemanticError):
+                    await self.gate.history(client, self.key, "201.001", time.monotonic() + 2.5)
+
+    async def test_review_short_nonterminal_native_input_must_not_reach_classifier(self):
+        """Retained QA native detector: an uncompletable tail must not dispatch partial work."""
+        self.enable_semantic()
+        self.client.conversations_replies.return_value = {
+            "ok": True,
+            "messages": [
+                {"ts": "100.001", "user": "UHUMAN", "text": "Fictional root"},
+                *[{"ts": f"{110 + i}.001", "user": "UHUMAN", "text": "Fictional recent"} for i in range(6)],
+            ],
+            "has_more": True,
+            "response_metadata": {"next_cursor": "opaque-older"},
+        }
+        await self.assert_rejected(self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY."))
+        assert isinstance(self.gate.jev, AsyncMock)
+        self.gate.jev.ask.assert_not_awaited()
+
+    async def test_short_tail_pages_complete_before_semantic_delivery(self):
+        self.enable_semantic()
+        assert isinstance(self.gate.jev, AsyncMock)
+        root = {"ts": "100.001", "user": "UHUMAN", "text": "Fictional root"}
+        recent = [{"ts": f"{110 + i}.001", "user": "UHUMAN", "text": "Fictional recent"} for i in range(6)]
+        older = {"ts": "109.001", "user": "UHUMAN", "text": "Fictional older"}
+        for index, (name, first, continuation) in enumerate(
+            (
+                ("short", [root, *recent], {"has_more": True}),
+                ("dedup", [root, *recent, recent[-1]], {"has_more": True}),
+                ("cutoff", [root, *recent, {"ts": "201.001", "text": "CURRENT"}], {"has_more": True}),
+                ("cursor_only", [root, *recent], {}),
+                ("cursor_over_false", [root, *recent], {"has_more": False}),
+            )
+        ):
+            with self.subTest(shape=name):
+                cutoff = f"{201 + index}.001"
+                if name == "cutoff":
+                    first[-1]["ts"] = cutoff
+                self.model.reset_mock()
+                self.gate.jev.ask.reset_mock()
+                self.client.conversations_replies.reset_mock()
+
+                async def page(name=name, first=first, continuation=continuation, **kwargs):
+                    if "latest" not in kwargs:
+                        return {"ok": True, "messages": []}
+                    if name == "short":
+                        loop = asyncio.get_running_loop()
+                        ready = loop.create_future()
+                        timer = loop.call_later(0.30, ready.set_result, None)
+                        try:
+                            await ready  # Causal network-response release, not idle polling.
+                        finally:
+                            timer.cancel()
+                    if "cursor" not in kwargs:
+                        return {
+                            "ok": True,
+                            "messages": first,
+                            **continuation,
+                            "response_metadata": {"next_cursor": "opaque-older"},
+                        }
+                    self.assertEqual(kwargs["cursor"], "opaque-older")
+                    return {
+                        "ok": True,
+                        "messages": [root, older],
+                        "has_more": True,
+                        "response_metadata": {"next_cursor": "unneeded-older"},
+                    }
+
+                self.client.conversations_replies.side_effect = page
+                started = asyncio.get_running_loop().time()
+                async with asyncio.timeout(2.5):
+                    await self.dispatch(
+                        self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY.", ts=cutoff)
+                    )
+                    await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+                if name == "short":
+                    print(
+                        "short-tail controlled native complete seconds:",
+                        asyncio.get_running_loop().time() - started,
+                    )
+                self.model.assert_awaited_once()
+                assert self.model.await_args is not None
+                self.assertEqual(self.model.await_args.args[0].text, "DIAGRAM_ONLY.")
+                state = self.gate.jev.ask.await_args.args[0]["state"]
+                self.assertEqual(
+                    [h["source_id"] for h in state["prior"].values()],
+                    [root["ts"], older["ts"], *[m["ts"] for m in recent]],
+                )
+                calls = [
+                    c.kwargs
+                    for c in self.client.conversations_replies.await_args_list
+                    if "latest" in c.kwargs
+                ]
+                query = {
+                    "channel": "CDEMO",
+                    "ts": "100.001",
+                    "latest": cutoff,
+                    "inclusive": False,
+                    "limit": 7,
+                }
+                self.assertEqual(calls, [query, {**query, "cursor": "opaque-older"}])
+                self.client.conversations_history.assert_not_awaited()
+
+    async def test_short_tail_continuation_bounds_and_validation(self):
+        import time
+
+        from hermes_slack_agent_router.semantic import SemanticError
+
+        root = {"ts": "100.001", "user": "UHUMAN", "text": "Fictional root"}
+        recent = [{"ts": f"{110 + i}.001", "user": "UHUMAN", "text": "Fictional recent"} for i in range(6)]
+        older = {"ts": "109.001", "user": "UHUMAN", "text": "Fictional older"}
+
+        def page(messages, cursor=""):
+            return {"ok": True, "messages": messages, "response_metadata": {"next_cursor": cursor}}
+
+        async def collect(pages):
+            client = AsyncMock()
+            client.conversations_replies.side_effect = pages
+            client.conversations_history.return_value = page([root])
+            result = await self.gate.history(client, self.key, "201.001", time.monotonic() + 2.5)
+            return result, client
+
+        first = page([root, *recent], "a")
+        # Empty and duplicate-only pages with advancing cursors are not terminal.
+        result, client = await collect(
+            [first, page([], "b"), page([root, recent[0]], "c"), page([root, older], "unneeded")]
+        )
+        self.assertEqual([h.identity for h in result], [root["ts"], older["ts"], *[m["ts"] for m in recent]])
+        self.assertEqual(client.conversations_replies.await_count, 4)
+        client.conversations_history.assert_not_awaited()
+        # The older page can overfill the missing slot; choose its newest, not first.
+        result, client = await collect(
+            [
+                first,
+                page(
+                    [
+                        root,
+                        {**older, "ts": "107.001", "files": [{"id": "FUNSELECTED"}]},
+                        {**older, "ts": "108.001"},
+                        older,
+                    ],
+                    "unneeded",
+                ),
+            ]
+        )
+        self.assertEqual([h.identity for h in result], [root["ts"], older["ts"], *[m["ts"] for m in recent]])
+        self.assertEqual(client.conversations_replies.await_count, 2)
+        for terminal in (page([]), page([root, recent[0]])):
+            result, client = await collect([first, terminal])
+            self.assertEqual([h.identity for h in result], [root["ts"], *[m["ts"] for m in recent]])
+            self.assertEqual(client.conversations_replies.await_count, 2)
+        result, client = await collect([page(recent, "a"), page([older], "unneeded")])
+        self.assertEqual([h.identity for h in result], [root["ts"], older["ts"], *[m["ts"] for m in recent]])
+        client.conversations_history.assert_awaited_once_with(
+            channel="CDEMO", oldest="100.001", inclusive=True, limit=1
+        )
+
+        for suffix in (
+            [page([], "a")],  # Repeated cursor, no progress.
+            [page([], "b"), page([], "a")],  # Cursor loop.
+            [page([], "b"), page([], "c"), page([], "d")],  # Four-call cap, still incomplete.
+            [page([{**root, "text": "conflicting root"}, older])],
+            [page([{**recent[0], "text": "conflicting reply"}])],
+            [page([older, {**older, "ts": "108.001"}])],  # Within-page disorder.
+            [page([{**older, "ts": "120.001"}])],  # New record is not older.
+            [page([{**older, "ts": "202.001"}])],
+            [page([{**older, "team": "TOTHER"}])],
+            [page([{**older, "thread_ts": "99.001"}])],
+            [page([{**older, "channel": "COTHER"}])],
+            [page([{**older, "ts": "NaN"}])],
+            [page([None])],
+            [{"ok": True, "messages": [], "has_more": True}],
+            [{"ok": True, "messages": [], "response_metadata": {"next_cursor": 1}}],
+            [{"ok": True, "messages": [older], "extra": "x" * 1048576}],
+        ):
+            with (
+                self.subTest(suffix=repr(suffix)[:120]),
+                self.assertRaises((SemanticError, ValueError, TypeError)),
+            ):
+                await collect([first, *suffix])
+        # Four replies calls leave no fifth call for a missing-root fallback.
+        with self.assertRaisesRegex(SemanticError, "incomplete-context"):
+            await collect([page(recent, "a"), page([], "b"), page([], "c"), page([older])])
+
     async def test_history_deadline_cancels_native_fetch(self):
         import time
 
@@ -529,19 +734,26 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 cancelled.set()
                 raise
 
-        for stage in ("replies", "root"):
+        async def fill(**kwargs):
+            if "cursor" in kwargs:
+                return await blocked(**kwargs)
+            return {"ok": True, "messages": [], "response_metadata": {"next_cursor": "older"}}
+
+        for stage in ("replies", "fill", "root"):
             with self.subTest(stage=stage):
                 started, cancelled = asyncio.Event(), asyncio.Event()
                 client = AsyncMock()
                 if stage == "replies":
                     client.conversations_replies.side_effect = blocked
+                elif stage == "fill":
+                    client.conversations_replies.side_effect = fill
                 else:
                     client.conversations_replies.return_value = {"ok": True, "messages": []}
                     client.conversations_history.side_effect = blocked
                 with self.assertRaises(TimeoutError):
                     await self.gate.history(client, self.key, "201.001", time.monotonic() + 1.32)
                 self.assertTrue(started.is_set() and cancelled.is_set())
-                client.conversations_replies.assert_awaited_once()
+                self.assertEqual(client.conversations_replies.await_count, 2 if stage == "fill" else 1)
                 if stage == "root":
                     client.conversations_history.assert_awaited_once_with(
                         channel="CDEMO", oldest="100.001", inclusive=True, limit=1
