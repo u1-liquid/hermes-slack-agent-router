@@ -64,54 +64,28 @@ def validate_answers(batch, result, confidence=0.8):
             if distribution[choice] < max(distribution.values()):
                 raise JevError("uncertain or contradictory answer")
             selected[name] = choice
+        from .semantic import proof_manifest
+
+        proof = proof_manifest(batch, selected)
         for name, answer in answers.items():
-            relevant = True
-            if name.startswith("u") and "_" in name:
-                unit, field = name.split("_", 1)
-                relevant = field in ("kind", "mixed", "destination", "address") or selected.get(
-                    unit + "_kind"
-                ) not in (
-                    "ack",
-                    "reference",
-                )
-                if field == "address" and selected.get(unit + "_kind") == "action":
-                    relevant = False  # Specific actions consume the complete coarse specific_address audit.
-                explicit = selected.get(unit + "_specific_address") == "explicit"
-                if field == "context":
-                    relevant = (
-                        selected.get(unit + "_kind") == "action"
-                        and selected.get(unit + "_destination") == "specific"
-                        and explicit
-                    )
-                if (
-                    field.startswith(("link", "fact"))
-                    and explicit
-                    and selected.get(unit + "_context") == "selfcontained"
-                    and selected.get(unit + "_kind") == "action"
-                    and selected.get(unit + "_destination") == "specific"
-                ):
-                    relevant = False  # No historical reference enters this proven self-contained view.
-                if selected.get(unit + "_destination") == "generic" and field not in (
-                    "kind",
-                    "mixed",
-                    "destination",
-                ):
-                    relevant = False  # Generic routing consumes only the local main_fact family.
-            elif name.startswith("same"):
-                left, right = name[4:].split("_")
-                relevant = all(selected.get(f"u{i}_kind") == "action" for i in (left, right))
-            elif name == "main" or name.startswith("main_"):
-                relevant = any(
-                    key.endswith("_destination")
-                    and value == "generic"
-                    and selected.get(key.replace("_destination", "_kind")) == "action"
-                    for key, value in selected.items()
-                )
-            if relevant and answer["confidence"] < confidence:
+            if name in proof.required and answer["confidence"] < confidence:
                 raise JevError("uncertain relevant answer: " + name)
         return selected
     except (KeyError, TypeError, AttributeError) as exc:
         raise JevError("malformed native Jev answer") from exc
+
+
+def serialize_request(batch):
+    """Exact production encoding, also used by bound/qualification tests."""
+    try:
+        raw = json.dumps(
+            {"model": JevClient.model, **batch}, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        ).encode()
+    except (ValueError, TypeError, UnicodeError):
+        raise JevError("invalid serialized request") from None
+    if len(raw) > JevClient.request_limit:
+        raise JevError("oversized serialized request")
+    return raw
 
 
 class JevClient:
@@ -165,12 +139,7 @@ class JevClient:
             return b"".join(chunks)
 
     async def ask(self, batch):
-        try:
-            raw = json.dumps({"model": self.model, **batch}, ensure_ascii=False, allow_nan=False).encode()
-        except (ValueError, TypeError, UnicodeError):
-            raise JevError("invalid serialized request") from None
-        if len(raw) > self.request_limit:
-            raise JevError("oversized serialized request")
+        raw = serialize_request(batch)
         # Import and resolve inside the calling request's native Hermes scope, not
         # at registration/construction or through CLI-specific auth/environment files.
         try:

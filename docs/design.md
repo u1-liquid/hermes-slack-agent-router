@@ -22,16 +22,17 @@ two transports claiming the same workspace/bot are ambiguous.
 
 The experimental human-name correction binds request-local presentation labels to
 those already eligible workspace/user identities. It reuses each native adapter's
-`_team_bot_names` and workspace/user `_user_name_cache`; cold display/real-name
-lookup uses that adapter's existing workspace client and validates `ok`, exact user
+`_team_bot_names`; display/real-name lookup on BOTH warm and cold paths
+uses that adapter's existing workspace client and validates `ok`, exact user
 ID, exact team ID and bot status. At most four parallel `users.info` lookups share
 the existing one-second acquisition allowance with unchanged history fetching,
 with the existing 0.75-second per-call bound. No plugin cache or native cache write
 is introduced. Missing/invalid labels cannot create recipients. Labels are untrusted
 semantic data, not instructions, permissions or authority; duplicate names alone
-cannot prove a unique current recipient. The local source witness accepts only a
-unique literal supplied label/runtime identifier or an exact mention, after the
-complete semantic addressee audit. Topology witnesses include native label values.
+cannot prove a unique current recipient. Opaque cached handles do not establish
+full native labels. Existing account-scoped handles alone remain the fallback on
+lookup failure; no name is fabricated and no structured given-name field is assumed.
+Topology witnesses include native label values. See the explicit v6 proof below.
 
 The request-local view contains canonical recipients and identity/lifetime witnesses
 for adapters, clients, native apps, sockets and authorities. It is checked again
@@ -85,7 +86,7 @@ its multiplexed profiles; independent processes are outside its native inventory
 3. Build one typed question batch over current units, prior source authors/text and
    sorted recipients. There is no receiving-agent preference in the model input.
    Questions classify action/reference/acknowledgement, destination, CURRENT-only
-   addressing/membership, local source context links and task/lead assignment facts.
+   addressing/membership, complete source references and task/lead assignment facts.
    Specific actions use a coarse complete-address Choice: explicit registered set,
    nonexplicit (contextual person or unstated assignee), outside, mixed or unknown.
    Contextual and unstated cases consume the same local historical proof. A separate
@@ -93,10 +94,14 @@ its multiplexed profiles; independent processes are outside its native inventory
    where contextual/explicit addressing contradicts nonaction; it is not consumed
    by specific actions. Generic actions consume neither address family, as before.
    Each historical fact describes only that message's own assignment, acceptance,
-   proposal author or explicit takeover. It never judges later supersession or a
+   concrete performed/prepared task actors (`authored`), proposal author or explicit takeover.
+   Authored task evidence never elects a whole-thread lead. A first-person report
+   binds its actor to the source sender; participation, quoted reports, unrelated
+   work and ambiguous incomplete actor sets are not an authored singleton.
+   Each fact never judges later supersession or a
    globally selected recipient. Closed-set labels encode complete recipient subsets,
    including historical joint assignments; outside/mixed/disputed/unknown facts cannot
-   silently become a partial registered set. Context links do not create membership.
+   silently become a partial registered set. Source references do not create membership.
 4. Code derives precedence from validated local facts in timestamp order: matching
    ordinary assignments establish/confirm a recipient set; a different plain set
    creates conflict. An explicit complete takeover replaces the set and resolves a
@@ -106,21 +111,39 @@ its multiplexed profiles; independent processes are outside its native inventory
    assignments control specific work, with local name/ID grounding. Generic work uses
    the same fold over whole-thread lead facts, independently of specific-task facts.
    Superseded incompatible assignment references are excluded deterministically;
-   linked topic context stays inert. Human root authorship, first mention and mere
+   selected topic context stays inert. A certificate selecting an excluded required
+   reference rejects the whole message rather than silently dropping that reference.
+   Human root authorship, first mention and mere
    participation are not ownership rules. Specific/joint work is independent of
    irrelevant general-lead uncertainty. No separate global tier/source verdict is asked.
-   The experimental `choice-native-labels-v5` protocol distinguishes `runtime_profile`
-   from native human-facing `labels` and permits CURRENT address questions to read
-   this identity dictionary, not historical assignments. A new CURRENT-only context
-   Choice proves whether the requested operation/object is self-contained. Only a
-   confidence-qualified explicit/self-contained action omits historical facts/links
-   and receives no injected prior references. Contextual/unstated assignments and
-   prior-dependent explicit work retain the historical proof. Complete CURRENT
-   address, each positive/negative recipient, coverage, kind, mixed and topic gates
-   remain required. This protocol is NOT rollout-ready: the first actual API
-   preservation qualification rejected the existing multi-topic positive on the
-   new context confidence and the contextual positive on unresolved local assignment.
-   Controlled suite success does not override those failures.
+   The experimental `choice-reference-suffix-v6` protocol replaces the v5
+   context-plus-link family with a complete selected-reference certificate:
+   `none/anchor/tail/anchor+tail/missing/mixed/unknown`, plus an exact nonempty subset
+   of h1..h7 when tail is consumed. h0 is a bit-set anchor, never a root/owner heuristic.
+   Each Choice remains below255 keys; no eight-history256-subset Choice exists.
+   Only an explicit complete CURRENT address plus confident `reference_scope=none`
+   makes historical facts dormant. Nonempty references require the historical
+   exclusion vector; nonexplicit routing always requires all task facts and adds
+   their controlling witnesses as inert prior. Generic routing consumes all main
+   facts, including negatives. Acknowledgement contradiction checks consume their
+   membership/fact/reference negatives at the same confidence as positives.
+
+   Membership itself carries one proof: `no/id/runtime/labelK/shortK/unknown`.
+   `shortK` attests a natural given-name suffix of immutable native labelK; a finite
+   original-Unicode start1..127 selects the suffix. Exact CURRENT/label overlap and
+   a conservative other-candidate label/runtime collision veto are local checks.
+   The linguistic boundary and address-vs-discussion distinction remain
+   model-attested, NOT mechanically native-certified given-name metadata.
+   Start confidence is consumed only for short mode; dormant answers still receive
+   full structural/distribution validation. The shared `proof_manifest` compiler
+   supplies the required/dormant questions and selected source references to BOTH
+   response validation and plan assembly. All sibling/coverage/native policy guards remain.
+
+   This candidate is NOT rollout-ready. Its one unchanged fictional full-name API
+   qualification failed reference_scope confidence0.38 and membership confidence0.59
+   under the unchanged0.8 gate. It produced no native receiver. The batch stopped
+   on this required failure; short-name and subsequent API cases remain unperformed.
+   Controlled GREEN is not service evidence, and all v5 results remain historical.
 5. Validate exact keys/types, finite distributions, relevant confidence of 0.8,
    source grounding, transitive topic relations and complete coverage. Assemble
    atomically: no invented instructions or identifiers, partial omission or fan-out
@@ -155,7 +178,7 @@ The request owns and closes its asynchronous response/client on cancellation.
 
 Current text is capped at 6,000 characters; selected history at eight distinct
 records/6,000 characters each/48,000 total; current units at six, recipients at four,
-questions at 180 (the maximum six-unit/eight-prior/four-recipient shape). Serialized Jev request and
+questions at 180 (v6 generates162 for the maximum six-unit/eight-prior/four-recipient shape). Serialized Jev request and
 response limits are 524,288 and 262,144 bytes respectively. Retained original records
 are capped at 64 KiB; decoded Slack responses at 1 MiB each (at most 4 MiB across
 four SDK calls, including optional exact root). SDK JSON buffering precedes those checks: these

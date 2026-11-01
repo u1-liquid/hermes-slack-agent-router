@@ -416,7 +416,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 main_fact0="assign:r1",
                 u0_kind="action",
                 u0_destination="generic",
-                u0_to1="yes",
+                u0_to1="id",
             )
             return result
 
@@ -445,7 +445,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
 
         async def referenced(batch):
             answer = await classify(batch)
-            answer["u1_link1"] = "yes"
+            answer.update(u1_reference_scope="tail", u1_reference_tail="h1")
             return answer
 
         self.gate.jev.ask.side_effect = referenced
@@ -1340,9 +1340,9 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                     answers[name] = "specific"
                 elif name.endswith("_person"):
                     answers[name] = "none"
-            answers["u0_to0"] = "yes"
+            answers["u0_to0"] = "id"
             if "u1_to1" in answers:
-                answers["u1_to1"] = "yes"
+                answers["u1_to1"] = "id"
             return answers
 
         self.gate.jev = AsyncMock()
@@ -1372,7 +1372,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                         "main": "none",
                         "u0_kind": "action",
                         "u0_destination": "specific",
-                        "u0_to1": "yes",
+                        "u0_to1": "id",
                         "u0_specific_address": "explicit",
                     },
                 ),
@@ -1530,10 +1530,12 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 u0_specific_address="explicit",
                 u1_destination="specific",
                 u1_specific_address="explicit",
-                u0_link1="yes",
-                u1_link2="yes",
-                u0_to0="yes",
-                u1_to1="yes",
+                u0_reference_scope="tail",
+                u0_reference_tail="h1",
+                u1_reference_scope="tail",
+                u1_reference_tail="h2",
+                u0_to0="id",
+                u1_to1="id",
                 same0_1="yes",
             )
             return answers
@@ -1567,10 +1569,10 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 u0_kind="action",
                 u0_destination="specific",
                 u0_specific_address="explicit",
-                u0_link1="yes",
-                u0_link2="yes",
-                u0_to0="yes",
-                u0_to1="yes",
+                u0_reference_scope="tail",
+                u0_reference_tail="h1+h2",
+                u0_to0="id",
+                u0_to1="id",
             )
             return answers
 
@@ -1611,20 +1613,20 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 u0_kind="action",
                 u0_destination="specific",
                 u0_address="absent",
-                u0_link0="yes",
+                u0_reference_scope="anchor",
                 u0_fact0="assign:r1",
             )
             if "u1_kind" in answers:
                 answers.update(
                     u0_to1="no",
-                    u0_to0="yes",
+                    u0_to0="id",
                     u0_specific_address="explicit",
                     u0_fact0="none",
                     u1_kind="action",
                     u1_destination="specific",
                     u1_specific_address="explicit",
-                    u1_link0="yes",
-                    u1_to1="yes",
+                    u1_reference_scope="anchor",
+                    u1_to1="id",
                 )
             return answers
 
@@ -1657,7 +1659,12 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
 
         async def selected(batch):
             answer = await classify(batch)
-            answer.update(u1_link1="yes", u1_fact1="assign:r0", u1_link2="yes", u1_fact2="takeover:r1")
+            answer.update(
+                u1_reference_scope="tail",
+                u1_reference_tail="h2",
+                u1_fact1="assign:r0",
+                u1_fact2="takeover:r1",
+            )
             return answer
 
         self.gate.jev.ask.side_effect = selected
@@ -1999,7 +2006,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
 
         async def grounded(batch):
             result = await classify(batch)
-            result["u1_link0"] = "yes"
+            result["u1_reference_scope"] = "anchor"
             return result
 
         self.gate.jev.ask.side_effect = grounded
@@ -2031,7 +2038,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
 
         async def referenced(batch):
             answer = await classify(batch)
-            answer["u1_link0"] = "yes"
+            answer["u1_reference_scope"] = "anchor"
             return answer
 
         self.gate.jev.ask.side_effect = referenced
@@ -2133,7 +2140,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 u0_kind="action",
                 u0_destination="specific",
                 u0_specific_address="explicit",
-                u0_to1="yes",
+                u0_to1="id",
             )
             return result
 
@@ -2151,7 +2158,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 main_fact0="assign:r0",
                 u0_kind="action",
                 u0_destination="generic",
-                u0_to0="yes",
+                u0_to0="id",
             )
             return result
 
@@ -2209,8 +2216,8 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 u0_kind="action",
                 u0_destination="specific",
                 u0_specific_address="explicit",
-                u0_to0="yes",
-                u0_to1="yes",
+                u0_to0="id",
+                u0_to1="id",
             )
             return result
 
@@ -2233,7 +2240,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 main_fact0="assign:r1",
                 u0_kind="action",
                 u0_destination="generic",
-                u0_to1="yes",
+                u0_to1="id",
             )
             return result
 
@@ -2467,12 +2474,12 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 u0_destination="specific",
                 u0_address="explicit",
                 u0_specific_address="explicit",
-                u0_link0="yes",
-                u0_to0="yes",
+                u0_reference_scope="anchor",
+                u0_to0="id",
                 u1_kind="action",
                 u1_destination="specific",
                 u1_specific_address="explicit",
-                u1_to1="yes",
+                u1_to1="id",
             )
             return answer
 
@@ -2642,6 +2649,55 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("柚原こはる", dict(await bridge.recipient_labels(bound, topology))["UBETA"])
         print(f"NATIVE_LABEL_COLD_RECEIPT participants=2 elapsed_ms={elapsed * 1000:.3f}")
 
+    def supply_native_names(self):
+        """Fictional verified users.info; empty display, no given-name fields."""
+        human = self.client.users_info.return_value
+
+        async def info(*, user):
+            if user == "UHUMAN":
+                return human
+            return {
+                "ok": True,
+                "user": {
+                    "id": user,
+                    "team_id": "TDEMO",
+                    "is_bot": True,
+                    "profile": {
+                        "display_name": "",
+                        "real_name": "柚原こはる" if user == "UBETA" else "榎森あおい",
+                    },
+                },
+            }
+
+        self.client.users_info.side_effect = info
+
+    async def test_warm_native_handle_cache_still_verifies_full_label(self):
+        from hermes_slack_agent_router.bridge import Bridge
+
+        self.adapter._team_bot_names["TDEMO"] = "birch"
+        self.adapter._user_name_cache[("TDEMO", "UBETA")] = "birch"
+        self.supply_native_names()
+        bridge = Bridge(self.adapter)
+        bound = await bridge.bind(self.message("こはるさん、会場図を修正してください。"))
+        topology = await bridge.participants(bound)
+        cache = dict(self.adapter._user_name_cache)
+        self.assertIn("柚原こはる", dict(await bridge.recipient_labels(bound, topology))["UBETA"])
+        self.assertEqual(self.adapter._user_name_cache, cache)
+        self.assertIn({"user": "UBETA"}, [c.kwargs for c in self.client.users_info.await_args_list])
+        self.client.users_info.side_effect = None
+        for malformed in (
+            None,
+            [],
+            "not-container",
+            {"display_name": [], "real_name": 10},
+            {"display_name": "", "real_name": ""},
+        ):
+            self.client.users_info.return_value = {
+                "ok": True,
+                "user": {"id": "UBETA", "team_id": "TDEMO", "is_bot": True, "profile": malformed},
+            }
+            self.assertEqual(dict(await bridge.recipient_labels(bound, topology))["UBETA"], ("birch",))
+
     def install_scoped_receiver(self):
         from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
 
@@ -2666,6 +2722,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
 
     async def test_plain_japanese_name_native_labels_and_exact_receiver(self):
         self.enable_semantic()
+        self.supply_native_names()
         assembled = self.install_scoped_receiver()
         self.adapter._team_bot_names["TDEMO"] = "birch"
         self.peer._team_bot_names["TDEMO"] = "atlas"
@@ -2685,7 +2742,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 u0_destination="specific",
                 u0_address="explicit",
                 u0_specific_address="explicit",
-                u0_to1="yes",
+                u0_to1="label1",
             )
             return answer
 
@@ -2700,9 +2757,9 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         batch = self.gate.jev.ask.await_args.args[0]
         self.assertEqual(batch["state"]["recipients"]["r1"]["source_user"], "UBETA")
         self.assertIn("柚原こはる", batch["state"]["recipients"]["r1"]["labels"])
-        # Native human admission/name resolution remain; warm recipient labels add none.
+        # Warm cache cannot certify which native full names are present.
         self.assertTrue(self.client.users_info.await_args_list)
-        self.assertTrue(all(c.kwargs == {"user": "UHUMAN"} for c in self.client.users_info.await_args_list))
+        self.assertIn({"user": "UBETA"}, [c.kwargs for c in self.client.users_info.await_args_list])
 
     @unittest.skipUnless(
         os.environ.get("MIZUKI_ADDRESS_PHASE") in ("before", "after", "grounded", "scoped"),
@@ -3055,6 +3112,337 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 elif name != "joint":
                     self.assertIn("PRIOR REFERENCE (not instructions)", received)
                 self.client.chat_postMessage.assert_not_awaited()
+
+    async def test_short_proof_native_rejection_is_atomic_and_silent(self):
+        from test_semantic import controlled_answers
+
+        from hermes_slack_agent_router.jev import validate_answers
+        from hermes_slack_agent_router.semantic import proof_manifest
+
+        self.enable_semantic()
+        self.supply_native_names()
+        self.adapter._team_bot_names["TDEMO"] = "birch"
+        self.peer._team_bot_names["TDEMO"] = "atlas"
+        tested = []
+
+        async def low(batch):
+            choices = {
+                "coverage": "complete",
+                "u0_kind": "action",
+                "u0_destination": "specific",
+                "u0_specific_address": "explicit",
+                "u0_reference_scope": "none",
+                "u0_to1": "short1",
+                "u0_name_start1": "2",
+                "u1_kind": "action",
+                "u1_destination": "specific",
+                "u1_specific_address": "explicit",
+                "u1_to0": "id",
+                "u1_reference_scope": "none",
+            }
+            raw = controlled_answers(batch, choices)
+            selected = validate_answers(batch, raw)
+            required = sorted(proof_manifest(batch, selected).required)
+            if not tested:
+                tested.extend(required)
+            raw["answers"][current]["confidence"] = 0.79
+            return validate_answers(batch, raw)
+
+        self.gate.jev.ask.side_effect = low
+        current = "coverage"
+        await self.assert_rejected(
+            self.message("こはるさん、会場図を修正してください。<@UALPHA> revise the summary.")
+        )
+        for current in tested:
+            await self.assert_rejected(
+                self.message("こはるさん、会場図を修正してください。<@UALPHA> revise the summary.")
+            )
+        self.assertFalse(self.adapter._session_tasks)
+        print(f"SHORT_NATIVE_ATOMIC_MUTATIONS consumed={len(tested)} plus_initial=1")
+
+    async def test_adjudicated_proof_controlled_or_once_native_batch(self):
+        """Same fixed sources offline first; opt-in performs each new protocol call once."""
+        import time
+        from dataclasses import asdict
+
+        from agent.secret_scope import (
+            build_profile_secret_scope,
+            reset_multiplex_context,
+            reset_secret_scope,
+            set_multiplex_context,
+            set_secret_scope,
+        )
+        from test_semantic import controlled_answers
+
+        from hermes_slack_agent_router.jev import JevClient, JevError, serialize_request, validate_answers
+        from hermes_slack_agent_router.semantic import assemble, prepare, proof_manifest
+
+        self.enable_semantic()
+        assembled = self.install_scoped_receiver()
+        real = os.environ.get("MIZUKI_PROOF_QUALIFY") == "1"
+        artifact = Path(os.environ["MIZUKI_ADDRESS_CANARY"]) if real else None
+        evidence = json.loads(artifact.read_text()) if real else {}
+        historical = copy.deepcopy(evidence)
+        captured = {}
+        fixed_history = [
+            {"ts": "100.001", "user": "UALPHA", "text": "I prepared the summary."},
+            {"ts": "101.001", "user": "UBETA", "text": "I prepared the diagram."},
+        ]
+        named_history = [
+            {"ts": "100.001", "user": "UHUMAN", "text": "架空の展示会について相談します。"},
+            {"ts": "101.001", "user": "UBETA", "text": "展示物の配置を確認しました。"},
+            *[
+                {"ts": f"{i}.001", "user": "UHUMAN", "text": "進捗の報告ありがとうございます。"}
+                for i in range(102, 108)
+            ],
+        ]
+        generic_history = [
+            {
+                "ts": "100.001",
+                "user": "UHUMAN",
+                "text": "<@UBETA>, lead this entire thread. <@UALPHA> only handles summaries.",
+            },
+            {
+                "ts": "101.001",
+                "user": "UBETA",
+                "text": "I will coordinate the thread and prepare the diagram.",
+            },
+            {"ts": "102.001", "user": "UALPHA", "text": "I prepared the summary."},
+        ]
+        cases = (
+            ("full-name", "UBETA", "柚原こはるさん、会場図を修正してください。", named_history, 200),
+            ("short-name", "UBETA", "こはるさん、会場図を修正してください。", named_history, 220),
+            (
+                "multi-beta",
+                "UBETA",
+                "<@UALPHA> revise the summary; <@UBETA> check the diagram.",
+                fixed_history,
+                200,
+            ),
+            (
+                "multi-alpha",
+                "UALPHA",
+                "<@UALPHA> revise the summary; <@UBETA> check the diagram.",
+                fixed_history,
+                201,
+            ),
+            ("contextual", "UBETA", "Please correct the diagram you prepared.", fixed_history, 202),
+            ("generic", "UBETA", "Please continue the general project work.", generic_history, 203),
+            ("joint", "UBETA", "<@UALPHA> and <@UBETA> check the diagram together.", fixed_history, 204),
+        )
+        old_prepare = prepare
+        old_assemble = assemble
+        entry = {}
+
+        def observe_prepare(source):
+            entry["source"] = asdict(source)
+            entry["binding"] = source.binding
+            batch = old_prepare(source)
+            entry["prepared_request"] = {"model": JevClient.model, **batch}
+            if real and name == "full-name":
+                original = copy.deepcopy(evidence["scoped"]["source"])
+                original["protocol"] = source.protocol
+                self.assertEqual(json.loads(json.dumps(asdict(source))), original)
+                entry["unchanged_source"] = "scoped.source; protocol-only delta"
+            elif real and name not in ("short-name", "multi-alpha"):
+                previous = evidence["qualification:" + name]["request"]["state"]
+                self.assertEqual(source.text, previous["current"])
+                for i, h in enumerate(source.history):
+                    old = previous["prior"][f"h{i}"]
+                    self.assertEqual(
+                        (h.identity, h.sender, h.text, list(h.provenance)),
+                        (old["source_id"], old["sender"], old["text"], old["provenance"]),
+                    )
+                self.assertEqual(batch["state"]["recipients"], previous["recipients"])
+                entry["unchanged_source"] = (
+                    "qualification:" + name + "; canonical/provenance/identity equality"
+                )
+            return batch
+
+        def observe_assemble(source, answers):
+            plan = old_assemble(source, answers)
+            proof = proof_manifest(old_prepare(source), answers)
+            entry["proof"] = {
+                "required": sorted(proof.required),
+                "dormant": dict(proof.dormant),
+                "references": dict(proof.references),
+            }
+            entry["plan"] = plan.as_dict()
+            return plan
+
+        home = Path(os.environ["MIZUKI_CLASSIFIER_HOME"]) if real else None
+        # Hydrate the exact serving scope before entering fixture-native profile scopes.
+        secrets = build_profile_secret_scope(home) if real else None
+
+        class OnceJev(JevClient):
+            async def _exchange(self, raw, key):
+                entry["raw_request"] = raw.decode()
+                entry["request"] = json.loads(raw)
+                started = time.monotonic()
+                try:
+                    response = await super()._exchange(raw, key)
+                    entry["raw_response"] = response.decode()
+                    entry["response"] = json.loads(response)
+                    return response
+                finally:
+                    entry["api_elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
+
+            async def ask(self, batch):
+                mode = set_multiplex_context(True)
+                token = set_secret_scope(secrets, profile_home=str(home))
+                try:
+                    return await super().ask(batch)
+                except JevError as exc:
+                    entry["failure"] = str(exc)
+                    entry["diagnostic"] = exc.diagnostic
+                    raise
+                finally:
+                    reset_secret_scope(token)
+                    reset_multiplex_context(mode)
+
+        for name, bot, text, history, sequence in cases:
+            key = "proof-v6:" + name
+            if real:
+                self.assertNotIn(key, evidence, "no retry of this source/protocol")
+            entry = {"case": name, "model": JevClient.model, "real_api": real}
+            # Independent immutable sources intentionally reuse historical IDs.
+            # Reset ONLY fixture replay dedup, never a production admission guard.
+            from gateway.platforms.helpers import MessageDeduplicator
+
+            self.adapter._dedup = MessageDeduplicator()
+            self.sequence = sequence
+            self.model.reset_mock()
+            assembled.clear()
+            self.peer._message_handler.reset_mock()
+            self.adapter._team_bot_user_ids["TDEMO"] = bot
+            self.adapter._bot_user_id = bot
+            self.peer._team_bot_user_ids["TDEMO"] = "UALPHA" if bot == "UBETA" else "UBETA"
+            self.adapter._team_bot_names.clear()
+            self.peer._team_bot_names.clear()
+            self.client.users_info.side_effect = None
+            if name in ("full-name", "short-name"):
+                self.adapter._team_bot_names["TDEMO"] = "birch"
+                self.peer._team_bot_names["TDEMO"] = "atlas"
+                self.adapter._user_name_cache[("TDEMO", "UBETA")] = "birch"
+                self.peer._user_name_cache[("TDEMO", "UALPHA")] = "atlas"
+                self.supply_native_names()
+            self.client.conversations_replies.return_value = {"ok": True, "messages": history}
+
+            async def offline(batch, name=name, entry=entry):
+                choices = {
+                    "coverage": "complete",
+                    "u0_kind": "action",
+                    "u0_destination": "specific",
+                    "u0_specific_address": "explicit",
+                    "u0_reference_scope": "none",
+                }
+                if name == "short-name":
+                    choices.update(u0_to1="short1", u0_name_start1="2")
+                elif name == "full-name":
+                    choices.update(u0_to1="label1")
+                elif name.startswith("multi"):
+                    choices.update(
+                        u0_to0="id",
+                        u1_kind="action",
+                        u1_destination="specific",
+                        u1_specific_address="explicit",
+                        u1_to1="id",
+                    )
+                elif name == "contextual":
+                    choices.update(
+                        u0_specific_address="nonexplicit",
+                        u0_reference_scope="tail",
+                        u0_reference_tail="h1",
+                        u0_fact1="authored:r1",
+                    )
+                elif name == "generic":
+                    choices.update(u0_destination="generic", main_fact0="assign:r1", main_fact1="assign:r1")
+                elif name == "joint":
+                    choices.update(u0_to0="id", u0_to1="id")
+                raw = controlled_answers(batch, choices)
+                entry["request"] = json.loads(serialize_request(batch))
+                entry["response"] = raw
+                return validate_answers(batch, raw)
+
+            if name == "multi-alpha":
+
+                async def reuse(batch, entry=entry):
+                    self.assertEqual(json.loads(serialize_request(batch)), captured["multi-beta"]["request"])
+                    entry["request"] = json.loads(serialize_request(batch))
+                    entry["response"] = captured["multi-beta"]["response"]
+                    entry["reused_exact_request"] = "proof-v6:multi-beta"
+                    return validate_answers(batch, entry["response"])
+
+                self.gate.jev = AsyncMock()
+                self.gate.jev.ask.side_effect = reuse
+            elif real:
+                self.gate.jev = OnceJev()
+            else:
+                self.gate.jev = AsyncMock()
+                self.gate.jev.ask.side_effect = offline
+            started = time.monotonic()
+            with (
+                patch("hermes_slack_agent_router.plugin.prepare", side_effect=observe_prepare),
+                patch("hermes_slack_agent_router.plugin.assemble", side_effect=observe_assemble),
+            ):
+                response = await self.dispatch(self.message(text))
+            await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+            entry["dispatch_elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
+            entry["http_ack"] = response.status
+            entry["assembled_input"] = list(assembled)
+            entry["native_received"] = [
+                {
+                    "text": c.args[0].text,
+                    "channel_context": c.args[0].channel_context,
+                    "source": {
+                        "workspace": c.args[0].source.scope_id,
+                        "user": c.args[0].source.user_id,
+                        "channel": c.args[0].source.chat_id,
+                        "message": c.args[0].source.message_id,
+                    },
+                }
+                for c in self.model.await_args_list
+            ]
+            entry["outbound_calls"] = self.client.chat_postMessage.await_count
+            entry["pending"] = bool(self.adapter._pending_messages or self.adapter._pending_text_batches)
+            captured[name] = copy.deepcopy(entry)
+            if real:
+                evidence[key] = copy.deepcopy(entry)
+                for old_key, old_value in historical.items():
+                    self.assertEqual(evidence[old_key], old_value)
+                artifact.write_text(json.dumps(evidence, ensure_ascii=False, indent=2))
+            print(
+                "PROOF_NATIVE_RECEIPT "
+                + json.dumps({k: entry[k] for k in ("case", "real_api", "dispatch_elapsed_ms")})
+                + " receivers="
+                + str(len(entry["native_received"]))
+            )
+            self.assertEqual(response.status, 200)
+            self.model.assert_awaited_once()
+            event = self.model.await_args.args[0]
+            self.assertIsNone(event.channel_context)
+            self.assertEqual(event.source.user_id, "UHUMAN")
+            self.assertFalse(entry["pending"])
+            self.client.chat_postMessage.assert_not_awaited()
+            self.client.chat_postEphemeral.assert_not_awaited()
+            self.peer._message_handler.assert_not_awaited()
+            if name.startswith("multi"):
+                expected = "revise the summary" if name == "multi-alpha" else "check the diagram"
+                excluded = "check the diagram" if name == "multi-alpha" else "revise the summary"
+                self.assertIn(expected, event.text)
+                self.assertNotIn(excluded, event.text)
+                self.assertNotIn(excluded, assembled[0])
+            elif name == "joint":
+                # Preserve native mention rendering at this boundary; the unchanged
+                # original qualification already records this exact final input.
+                self.assertEqual(event.text, "@Human and  check the diagram together.")
+            else:
+                self.assertIn(text, event.text)
+            if name in ("full-name", "short-name"):
+                self.assertEqual(event.text, text)
+            if name == "contextual":
+                self.assertIn("I prepared the diagram.", event.text)
+                self.assertNotIn("I prepared the summary.", event.text)
 
     async def test_original_video_rejects_before_native_fallback(self):
         self.client.files_info.return_value = {

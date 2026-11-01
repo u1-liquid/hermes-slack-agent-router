@@ -37,7 +37,7 @@ class Snapshot:
 
     original: dict | None = None
     provenance: tuple[dict, ...] = ()
-    protocol: str = "choice-native-labels-v5"
+    protocol: str = "choice-reference-suffix-v6"
     # Request-local presentation data keyed by exact bot user in thread.workspace.
     recipient_labels: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
@@ -150,6 +150,97 @@ def source_candidates(source):
     )
 
 
+def wire_provenance(provenance):
+    """Only semantic ranges cross the wire; the full raw witness stays bound locally.
+
+    Adjacent equal classifications are equivalent even when native leaves fragment
+    them. Original paths, mappings and raw values are never changed in Snapshot.
+    """
+    ranges = []
+    for part in provenance:
+        a, b, kind = part["start"], part["end"], part["kind"]
+        if ranges and ranges[-1][1] == a and ranges[-1][2] == kind:
+            ranges[-1][1] = b
+        else:
+            ranges.append([a, b, kind])
+    return ranges
+
+
+@dataclass(frozen=True)
+class Proof:
+    required: frozenset[str]
+    dormant: tuple[tuple[str, str], ...]
+    references: tuple[tuple[str, tuple[int, ...]], ...]
+
+
+def proof_manifest(batch, answers):
+    """One dependency compiler for confidence validation AND plan assembly.
+
+    Selectors themselves are always consumed before anything they make dormant.
+    All answers, including dormant selectors, still require structural validation.
+    """
+    required = {"coverage"}
+    reasons = {}
+    references = []
+    questions = batch["questions"]
+    for unit in batch["state"]["units"]:
+        fields = {k for k in questions if k.startswith(unit + "_")}
+        if not fields:
+            continue  # Locally quoted; the source cannot issue instructions.
+        kind = answers[unit + "_kind"]
+        destination = answers[unit + "_destination"]
+        used = {unit + "_kind", unit + "_mixed", unit + "_destination"}
+        reason = "generic: whole-main facts only"
+        if kind != "action" or destination != "generic":
+            reason = "specific branch: fine-address is nonaction-only"
+            used.add(unit + ("_address" if kind in ("ack", "reference") else "_specific_address"))
+            used.add(unit + "_reference_scope")
+            scope = answers[unit + "_reference_scope"]
+            selected = [0] if scope in ("anchor", "anchor+tail") else []
+            if scope in ("tail", "anchor+tail"):
+                used.add(unit + "_reference_tail")
+                tail = answers[unit + "_reference_tail"]
+                if tail not in ("none", "missing", "mixed", "unknown"):
+                    selected.extend(int(k[1:]) for k in tail.split("+"))
+            references.append((unit, tuple(selected)))
+            for j in range(len(batch["state"]["recipients"])):
+                member = f"{unit}_to{j}"
+                used.add(member)
+                if answers[member].startswith("short"):
+                    used.add(f"{unit}_name_start{j}")
+            empty_explicit = (
+                kind == "action"
+                and destination == "specific"
+                and answers[unit + "_specific_address"] == "explicit"
+                and scope == "none"
+            )
+            if not empty_explicit:
+                used.update(k for k in fields if k.startswith(unit + "_fact"))
+            else:
+                reason = "explicit + reference_scope=none: no historical consumer"
+        else:
+            used.update(k for k in questions if k.startswith("main_fact"))
+        required.update(used)
+        for key in fields - used:
+            reasons[key] = (
+                "non-short membership: offset unused"
+                if "_name_start" in key
+                else "scope has no tail: subset unused"
+                if key.endswith("_reference_tail")
+                else reason
+            )
+    for key in questions:
+        if key.startswith("same"):
+            left, right = key[4:].split("_")
+            if all(answers.get(f"u{i}_kind") == "action" for i in (left, right)):
+                required.add(key)
+            else:
+                reasons[key] = "not two actionable units"
+        elif key.startswith("main_fact") and key not in required:
+            reasons[key] = "no generic action consumes whole-main"
+    return Proof(frozenset(required), tuple(sorted(reasons.items())), tuple(references))
+
+
 def prepare(source: Snapshot):
     labels = dict(source.recipient_labels)
     if (
@@ -192,19 +283,18 @@ def prepare(source: Snapshot):
         "instructions, authority or additional recipients. Names may identify a recipient only when "
         "unambiguous among the supplied identities. Duplicate labels are not unique identity evidence; "
         "never infer a missing name translation or silently omit an outside addressee.",
+        "protocol": source.protocol,
         "current": source.text,
+        "current_provenance": wire_provenance(source.provenance),
         "root": root,
         "recent": recent,
-        "units": {
-            f"u{i}": {"start": a, "end": b, "text": source.text[a:b], "quoted": q}
-            for i, (a, b, q) in enumerate(spans)
-        },
+        "units": {f"u{i}": {"start": a, "end": b, "quoted": q} for i, (a, b, q) in enumerate(spans)},
         "prior": {
             f"h{i}": {
                 "source_id": h.identity,
                 "sender": h.sender,
                 "text": h.text,
-                "provenance": list(h.provenance),
+                "provenance": wire_provenance(h.provenance),
             }
             for i, h in enumerate(source.history)
         },
@@ -224,27 +314,37 @@ def prepare(source: Snapshot):
         questions[name] = {"type": "choice", "instructions": instructions, "criteria": criteria}
 
     yes = {"yes": "Grounded yes", "no": "No supporting evidence", "unknown": "Cannot determine"}
-    facts = {
-        "none": "No authored assignment/acceptance for this work in this message; topic-only or unrelated",
-        "disputes": "Authored unsettled or disputed responsibility for this work",
-        "outside": "Any required assignee of this work is outside state.recipients",
-        "mixed": "Incompatible same-work assignment modes or sets cannot be faithfully represented",
-        "unknown": "Uncertain task matching, complete recipient set or assignment mode",
+    state["definitions"] = {
+        "unit": "Each unit is the exact current[start:end], half-open original Unicode codepoints.",
+        "provenance": "[start,end,kind] ranges classify authored/reference/separator. Full raw source is locally bound.",
+        "facts": {
+            "none": "No matching authored responsibility or concrete task work; participation/topic/quoted claims alone.",
+            "assign": "Complete set assigned, accepting or proposing this matching work.",
+            "takeover": "Explicit complete replacement/handoff to this set; not an ordinary assignment.",
+            "authored": "Concrete performed/prepared work matching CURRENT operation/artifact or its explicitly addressed preparation author. Actual actors, NOT reporter; first-person I binds exact sender. Not mere participation, thanks, seeing work, quoted/forwarded claims, unrelated artifacts or whole-thread lead. Ambiguous we is not just sender. Task only, NEVER whole-main.",
+            "disputes": "Authored unsettled/disputed responsibility for matching work.",
+            "outside": "At least one required actor is outside recipients; never select a registered subset.",
+            "mixed": "Incompatible matching modes/sets cannot be represented.",
+            "unknown": "Uncertain matching, complete set or mode.",
+        },
+        "task_fact_rule": "Inspect ONLY designated prior against specific CURRENT unit; use facts and complete sets. A human naming a bot assigns that bot, not reporter/first mention. Exact source_user and sender bind identity; runtime names may collide. Concrete own-work is authored, not mere participation. Ignore quoted/forwarded claims and other artifacts. Whole-thread leadership alone is not task ownership. Classify this source statement only, not precedence; only explicit replacement is takeover. Generic/ack/reference has no specific task: none.",
+        "membership": "Read designated CURRENT unit as ONLY assignment statement, using recipients as native identity dictionary. source_user is Slack ID; labels are human-facing names for that same user, not outside people; runtime_profile is internal tag. Positive modes prove explicit membership, not history/whole-main/contextual you. id/runtime/labelK require exact mention/whole-runtime/whole-label address. shortK attests unambiguous natural GIVEN-NAME suffix of labelK: complete short personal name actually addressed, honorific outside. NOT arbitrary substring, invented nickname, translation, quotation or mention-about. name_start is original Unicode suffix start inside exact native label, NOT bytes/normalized text. The linguistic given-name boundary is model-attested, not native structured metadata. Complete joint address requires every member; outside/ambiguous people must still fail complete-address audit. Ack/reference/generic is no. unknown if uncertain.",
+        "lead_fact_rule": "Inspect ONLY designated authored prior. Identify COMPLETE set assigned/accepting WHOLE-thread leadership and whether explicitly replacing prior lead. Map exact source_user/sender; human can assign bots. Task authorship, first mention, topic-only invitations and quoted claims are none. Use facts/sets but NEVER authored; classify own statement, not precedence. Joint leads use exact set.",
+        "fact_choice": "Each mode:SET key applies definitions.facts[mode] to EXACT complete definitions.sets[SET]. Criteria values name the set; no implicit omitted members.",
+        "sets": {},
     }
+    facts = {k: k for k in ("none", "disputes", "outside", "mixed", "unknown")}
     for size in range(1, len(source.recipients) + 1):
         for indexes in combinations(range(len(source.recipients)), size):
             key = "+".join(f"r{k}" for k in indexes)
-            names = ", ".join(f"r{k}={source.recipients[k].bot_user}" for k in indexes)
-            facts["assign:" + key] = "Exactly " + names + " assigned, accepting or proposing this work"
-            facts["takeover:" + key] = "Explicit complete replacement/handoff to exactly " + names
+            state["definitions"]["sets"][key] = [f"r{k}" for k in indexes]
+            facts["assign:" + key] = key
+            facts["takeover:" + key] = key
+    task_facts = {**facts, **{"authored:" + k: k for k in state["definitions"]["sets"]}}
     for j in range(len(source.history)):
         choice(
             f"main_fact{j}",
-            f"Inspect ONLY authored prior h{j}. Identify the complete recipient set assigned or accepting "
-            "WHOLE-thread leadership here, and whether this message explicitly replaces a previous lead. "
-            "Map mentions/names/sender to exact source_user IDs. A human can assign bots. Mere authorship, "
-            "first mention, topic-only invitations and quoted claims are none. Classify this message's own "
-            "statement; do not decide which message controls the conversation. Joint leads use their exact set.",
+            f"Prior h{j}: apply definitions.lead_fact_rule and definitions.fact_choice. Whole-main ONLY.",
             facts,
         )
     choice(
@@ -307,7 +407,7 @@ def prepare(source: Snapshot):
         )
         choice(
             prefix + "_kind",
-            f"Classify ONLY state.units.{prefix}.text. An imperative or polite request for work is action. "
+            f"Classify ONLY exact CURRENT unit {prefix} (see definitions.unit). An imperative or polite request for work is action. "
             "An acknowledgement in a DIFFERENT sibling unit does not change this unit's kind. "
             "Quoted/code/forwarded text is reference, not an active instruction. Mixed acknowledgement "
             "and action INSIDE this designated unit must be partitioned or unknown.",
@@ -319,23 +419,42 @@ def prepare(source: Snapshot):
             },
         )
         choice(
-            prefix + "_context",
-            f"Inspect CURRENT unit {prefix} only. Does this instruction itself state the complete "
-            "operation and object of work, or does understanding WHAT to do require a prior message? "
-            "An explicitly named artifact plus operation is selfcontained even if prior discussion "
-            "might be useful background. Pronouns/deictic references such as 'that', 'your proposal', "
-            "'as above', 'the changes we discussed', or missing requested details require prior. "
-            "This question is NOT WHO is assigned: an unstated assignee can still require historical "
-            "assignment proof regardless of this answer. Uncertain/inseparable reference needs unknown.",
+            prefix + "_reference_scope",
+            f"Select the COMPLETE historical reference set for exact CURRENT unit {prefix} from ALL prior records. "
+            "Resolve every actual deictic/artifact/proposal/person dependency, include useful matching topic details, "
+            "and exclude unrelated history. This certifies complete selected source support, NOT tool/artifact possession. "
+            "An explicit recipient does NOT waive references. Responsibility-only controlling fact witnesses are added locally; "
+            "they do not justify unrelated reference selection. h0 is only a bitset anchor, not an owner heuristic. "
+            "none means no historical content needed or selected. Missing referent, inseparable adoption or uncertain "
+            "completeness must select missing/mixed/unknown. Ack/reference normally none.",
             {
-                "selfcontained": "Complete current operation/object; no required historical reference",
-                "prior": "Prior content is needed to resolve the current operation/object",
-                "unknown": "Uncertain required context",
+                "none": "Complete empty reference set",
+                "anchor": "Exactly h0",
+                "tail": "Nonempty tail only",
+                "anchor+tail": "h0 and nonempty tail",
+                "missing": "Required reference missing",
+                "mixed": "Inseparable/incompatible references",
+                "unknown": "Completeness unresolved",
             },
+        )
+        tails = {
+            "none": "Empty tail",
+            "missing": "Required reference missing",
+            "mixed": "Incompatible",
+            "unknown": "Uncertain",
+        }
+        for size in range(1, len(source.history)):
+            for indexes in combinations(range(1, len(source.history)), size):
+                key = "+".join(f"h{k}" for k in indexes)
+                tails[key] = "Selected"
+        choice(
+            prefix + "_reference_tail",
+            f"When {prefix}_reference_scope includes tail, select its exact complete nonempty subset of h1..h7. Otherwise none. Same complete-reference proposition, not a second topic classifier.",
+            tails,
         )
         choice(
             prefix + "_mixed",
-            f"Inspect ONLY state.units.{prefix}.text, not current as a whole "
+            f"Inspect ONLY exact CURRENT unit {prefix}, not current as a whole "
             "and not any other unit. Does this designated unit ITSELF contain two or more independent "
             "instructions requiring different actionable scopes, or inseparably adopt quoted instructions? "
             "A single instruction about one topic is no, even when OTHER units discuss other topics.",
@@ -361,42 +480,33 @@ def prepare(source: Snapshot):
 
         for j in range(len(source.history)):
             choice(
-                f"{prefix}_link{j}",
-                f"Using ONLY CURRENT unit {prefix} and prior h{j}, does this prior supply concrete context "
-                "for its referenced artifact, work proposal, person or task? Actual matching task content "
-                "is yes. Mere same-project/thread overlap, related preparatory work without the referenced "
-                "artifact/task, or the presence of an explicitly named CURRENT recipient as prior sender "
-                "is not a concrete reference: no. A contextual 'you' can refer to a matching proposal "
-                "author. Acknowledgement-only or unrelated text is no. Authored/reference provenance "
-                "distinguishes quoted context from instructions. Do not decide recipient membership or precedence.",
-                yes,
-            )
-            choice(
                 f"{prefix}_fact{j}",
-                f"Inspect ONLY prior h{j} against the specific work requested in CURRENT unit {prefix}. "
-                "What COMPLETE recipient set does this message assign to, accept or propose for that work? "
-                "A human author naming a bot assigns the bot, not the human or first mention. Map exact "
-                "source_user IDs; identical runtime names do not identify a recipient. If CURRENT addresses "
-                "the proposal/preparation author ('you'), identify that author from this matching proposal. "
-                "Distinguish ordinary assignment from an explicit complete replacement/handoff stated HERE. "
-                "Joint assignment uses the exact set. Ignore other tasks, mere participation and quoted claims; "
-                "topic-only context is none. Whole-thread leadership alone is not this task's assignment, "
-                "but a clause that also assigns this matching task counts. Do not compare other prior messages "
-                "or decide which assignment controls. Incompatible local modes/sets are mixed; any required "
-                "unregistered assignee is outside. Generic CURRENT/ack/reference has no specific task: none.",
-                facts,
+                f"Prior h{j}, CURRENT {prefix}: apply definitions.task_fact_rule and definitions.fact_choice.",
+                task_facts,
             )
         for j in range(len(source.recipients)):
             choice(
                 f"{prefix}_to{j}",
-                f"Read CURRENT unit {prefix} as the only assignment statement. Resolve identity using "
-                "state.recipients: source_user is the Slack ID and labels are human-facing names for "
-                "that same user, not outside people. runtime_profile is an internal tag, not necessarily "
-                f"their name. Does this unit ITSELF explicitly address/assign Slack user "
-                f"{source.recipients[j].bot_user} (r{j}), by ID or an unambiguous supplied name? "
-                "Do not infer from history, whole-thread leadership or a contextual 'you'. "
-                "Multiple explicit current assignees each get yes. Ack/reference/generic gets no.",
-                yes,
+                f"CURRENT {prefix}, candidate r{j}: apply definitions.membership. Choose its explicit membership PROOF, or no/unknown.",
+                {
+                    "no": "Not explicitly addressed",
+                    "id": "Exact <@source_user> address",
+                    "runtime": "Unambiguous whole runtime_profile address",
+                    **{
+                        f"label{k}": f"Whole native label{k} address"
+                        for k in range(len(labels.get(source.recipients[j].bot_user, ())))
+                    },
+                    **{
+                        f"short{k}": f"Given-name suffix of label{k}"
+                        for k in range(len(labels.get(source.recipients[j].bot_user, ())))
+                    },
+                    "unknown": "Uncertain membership/proof",
+                },
+            )
+            choice(
+                f"{prefix}_name_start{j}",
+                f"CURRENT {prefix}, r{j}: original Unicode suffix start 1..127 for shortK per definitions.membership; otherwise unknown.",
+                {**{str(k): str(k) for k in range(1, 128)}, "unknown": "Not used or unresolved"},
             )
     for i in range(len(spans)):
         for j in range(i + 1, len(spans)):
@@ -428,6 +538,10 @@ def assemble(source: Snapshot, answers):
         return unresolved("invalid local fact")
     if answers["coverage"] != "complete":
         return unresolved("coverage-gap or mixed source")
+    proof = proof_manifest(batch, answers)
+    if any(answers[k] in ("unknown", "outside", "mixed", "missing") for k in proof.required):
+        return unresolved("uncertain or unsafe consumed proof")
+    selected_references = dict(proof.references)
 
     def members(label):
         if ":" not in label:
@@ -467,36 +581,16 @@ def assemble(source: Snapshot, answers):
                 answers[prefix + "_mixed"] != "no"
                 or answers[prefix + "_destination"] != "none"
                 or answers[prefix + "_address"] != "absent"
-                or any(
-                    answers[f"{prefix}_link{j}"] != "no" or answers[f"{prefix}_fact{j}"] != "none"
-                    for j in range(len(source.history))
-                )
+                or answers[prefix + "_reference_scope"] != "none"
+                or any(answers[f"{prefix}_fact{j}"] != "none" for j in range(len(source.history)))
                 or any(answers[f"{prefix}_to{j}"] != "no" for j in range(len(source.recipients)))
             ):
                 return unresolved("nonaction contradiction")
             units.append(Unit(start, end, kind, f"current-u{i}", (), (), ()))
             continue
         destination = answers[prefix + "_destination"]
-        direct = (
-            destination == "specific"
-            and answers[prefix + "_specific_address"] == "explicit"
-            and answers[prefix + "_context"] == "selfcontained"
-        )
-        fields = {
-            key: value
-            for key, value in answers.items()
-            if key.startswith(prefix + "_")
-            and key != prefix + "_address"  # Original fine audit is consumed only by nonaction above.
-            and not (direct and key.startswith((prefix + "_link", prefix + "_fact")))
-            and (key != prefix + "_context" or answers[prefix + "_specific_address"] == "explicit")
-            and (
-                destination != "generic"
-                or key in (prefix + "_kind", prefix + "_mixed", prefix + "_destination")
-            )
-        }
-        if "unknown" in fields.values() or answers[prefix + "_mixed"] != "no":
+        if answers[prefix + "_mixed"] != "no":
             return unresolved("uncertain or inseparable unit")
-        recipients = tuple(r for j, r in enumerate(source.recipients) if answers[f"{prefix}_to{j}"] == "yes")
         if kind != "action" or destination not in ("specific", "generic"):
             return unresolved("action has no grounded recipient")
         if destination == "generic":
@@ -506,15 +600,22 @@ def assemble(source: Snapshot, answers):
                 return unresolved("generic-main-unresolved")
             refs = tuple(source.history[j] for j in witnesses)
         else:
-            labels = [answers[f"{prefix}_fact{j}"] for j in range(len(source.history))]
-            links = [answers[f"{prefix}_link{j}"] for j in range(len(source.history))]
+            labels = [
+                answers[f"{prefix}_fact{j}"] if f"{prefix}_fact{j}" in proof.required else "none"
+                for j in range(len(source.history))
+            ]
+            selected = selected_references[prefix]
+            scope = answers[prefix + "_reference_scope"]
+            if any(j >= len(source.history) for j in selected) or (
+                scope in ("tail", "anchor+tail") and answers[prefix + "_reference_tail"] == "none"
+            ):
+                return unresolved("impossible complete reference set")
             address = answers[prefix + "_specific_address"]
             if address not in ("explicit", "nonexplicit"):
                 return unresolved("incomplete-current-address")
-            if not direct and any(members(label) and links[j] != "yes" for j, label in enumerate(labels)):
-                return unresolved("assignment-link-contradiction")
-            if not direct and any(label in ("unknown", "outside", "mixed") for label in labels):
-                return unresolved("uncertain local assignment")
+            recipients = tuple(
+                r for j, r in enumerate(source.recipients) if answers[f"{prefix}_to{j}"] != "no"
+            )
             if address == "explicit":
                 native_labels = dict(source.recipient_labels)
                 names = {
@@ -524,16 +625,37 @@ def assemble(source: Snapshot, answers):
                     }
                     for r in source.recipients
                 }
-                if not recipients or not all(
-                    f"<@{r.bot_user}>" in source.text[start:end]
-                    or any(
-                        name in source.text[start:end].casefold()
-                        and all(name not in other for peer, other in names.items() if peer != r)
-                        for name in names[r]
-                    )
-                    for r in recipients
-                ):
+                if not recipients:
                     return unresolved("specific recipient has no source evidence")
+                for j, r in enumerate(source.recipients):
+                    mode = answers[f"{prefix}_to{j}"]
+                    if mode == "no":
+                        continue
+                    text = source.text[start:end]
+                    if mode == "id":
+                        valid = f"<@{r.bot_user}>" in text
+                    else:
+                        if mode == "runtime":
+                            witness = r.runtime_profile
+                        else:
+                            witness = native_labels[r.bot_user][int(mode[-1])]
+                            if mode.startswith("short"):
+                                offset = int(answers[f"{prefix}_name_start{j}"])
+                                if not 0 < offset < len(witness):
+                                    return unresolved("invalid native suffix offset")
+                                witness = witness[offset:]
+                        overlap = (
+                            witness in text
+                            if mode.startswith("short")
+                            else witness.casefold() in text.casefold()
+                        )
+                        valid = overlap and all(
+                            not any(witness.casefold() in n for n in other)
+                            for peer, other in names.items()
+                            if peer != r
+                        )
+                    if not valid:
+                        return unresolved("specific recipient has no unique source evidence")
                 witnesses = ()
             else:
                 if recipients:
@@ -541,21 +663,18 @@ def assemble(source: Snapshot, answers):
                 recipients, witnesses = resolve(labels)
                 if not recipients:
                     return unresolved("specific assignment unresolved")
-            # Topic context stays inert; superseded incompatible assignments do not.
-            refs = (
-                ()
-                if direct
-                else tuple(
-                    h
-                    for j, h in enumerate(source.history)
-                    if links[j] == "yes"
-                    and (
-                        labels[j] == "none"
-                        or j in witnesses
-                        or (address == "explicit" and members(labels[j]) == recipients)
-                    )
-                )
-            )
+            # A certificate cannot silently lose a required superseded/incompatible
+            # record. Fact witnesses supply their own same-work reference proof.
+            allowed = {
+                j
+                for j, label in enumerate(labels)
+                if label == "none"
+                or j in witnesses
+                or (address == "explicit" and members(label) == recipients)
+            }
+            if any(j not in allowed for j in selected):
+                return unresolved("required reference excluded by task fold")
+            refs = tuple(source.history[j] for j in sorted(set(selected) | set(witnesses)))
         # Assign semantic identities only after the validated CURRENT groups are complete.
         units.append(Unit(start, end, kind, "", refs, recipients, tuple(sorted({h.sender for h in refs}))))
     groups = [{i} for i in range(len(units))]

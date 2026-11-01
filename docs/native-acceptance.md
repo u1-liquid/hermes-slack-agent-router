@@ -40,27 +40,56 @@ never becomes semantically unhelpful context.
 Source-local proof tests cover historical joint sets, recent topic-only context
 with a root assignee, swapped users with identical runtime names, plain assignment
 conflicts versus explicit takeovers, disputes/unsafe facts and current partial-outside
-joint rejection. Every relevant positive and negative fact/link/address decision
+joint rejection. Every consumed positive and negative fact/reference/address decision
 retains the same confidence gate; controlled facts are not real-model evidence.
-The experimental human-name protocol adds a context-independence proof: only an
-explicit, complete CURRENT addressee set plus a confident self-contained operation
-may omit all historical reference facts. Low-confidence context, ambiguous/duplicate
-names and partial-outside joint addressing remain rejection cases. It is NOT
-accepted for rollout: its same-input Japanese name API/native receiver proof passed,
-but the actual changed-protocol preservation run failed multi-topic and contextual
-positives. The existing failed probes remain failed; neither controlled tests nor
-the new single-name success satisfies the whole routing goal.
+The experimental v6 protocol uses a complete anchor/tail reference certificate,
+task-only concrete authored work, and proof-bearing full-label/given-suffix membership.
+Only a complete explicit CURRENT address and confident empty-reference certificate
+make history dormant. `proof_manifest` supplies confidence dependencies AND assembly
+references. Nonaction contradiction consumers now qualify every fact/member they read.
+Controlled mutation tests cover all consumed short-name sibling gates, dormant
+selectors/history, exact suffix offsets/collisions, complete-reference failures,
+root/handoff/joint/task-vs-main and whole-message atomicity.
+
+Wire tests retain original Snapshot/raw provenance and use the production compact
+UTF-8 serializer, canonical text once, coalesced classification ranges and shared
+protocol definitions. Six/eight/four maximum shapes include native canonicalizer
+provenance from text-only and heavily fragmented rich text, full native labels,
+four-byte Unicode, escaped quotes/backslashes and control characters. The raw
+fragmentation stress fixtures exceed native original-record size admission; they
+stress semantic serialization, not a claim that such Slack payloads are admitted.
+The tested maximum control-character request is517895bytes; full response
+distributions129045bytes. No mathematical bound is claimed over unbounded IDs or
+arbitrary alternating semantic ranges. Existing byte rejection is retained; no
+new source bound, history/candidate reduction or larger transport cap is introduced.
+
+This candidate is NOT accepted for rollout. One unchanged full-name v6 API request
+failed reference-scope confidence0.38 (and membership0.59), before any native model
+delivery. Required subsequent cases, including short-name and japanese-improvement,
+were not called after that stop. Prior v5 name success and other failures remain
+unaltered at their old protocol; they cannot be replayed as v6 evidence.
 
 An optional single fictional evidence file can retain the exact source, prepared
 request, typed raw service answers, binding, validated plan and native final input.
-`MIZUKI_ADDRESS_RECORDED=/absolute/path/mizuki-address-canary.json` enables
+The historical v5-only `MIZUKI_ADDRESS_RECORDED=/absolute/path/mizuki-address-canary.json` enabled
 `test_native.NativeDispatch.test_saved_plain_name_source_answers_and_native_input`.
-This regenerates the frozen protocol and checks the offline evidence bridge without
-another API call. It is not independent acceptance, a live Slack reply, or permission
+That historical bridge must use its original frozen source, not regenerate v5 with
+v6 questions. The v6 failure bridge uses `MIZUKI_PROOF_RECORDED` and asserts the
+exact preserved source/request/raw-answer rejection without another API call.
+It is not independent acceptance, a live Slack reply, or permission
 to record/replay private transcripts. The `MIZUKI_ADDRESS_PHASE` and
 `MIZUKI_ADDRESS_QUALIFY` test lanes are explicit fictional API opt-ins using native
 Mizuki `get_secret`; duplicate phase keys prevent unchanged reruns. A failed
 qualification remains a required product failure, not an expectation to relabel.
+
+`test_native.NativeDispatch.test_adjudicated_proof_controlled_or_once_native_batch`
+normally exercises the fixed full-name, additive short-name, multi-beta/alpha,
+contextual, generic and joint sources with controlled answers. Explicit
+`MIZUKI_PROOF_QUALIFY=1`, `MIZUKI_CLASSIFIER_HOME` and `MIZUKI_ADDRESS_CANARY`
+switch ONLY that test to the authorized real serving scope/official API, preserving
+old records and refusing duplicate `proof-v6:*` keys. The first required failure
+terminates the batch: later cases are unperformed, never relabelled PASS. Separate
+full-suite/package/native-entrypoint acceptance requires successful whole qualification.
 
 ## Complete newly assembled input
 

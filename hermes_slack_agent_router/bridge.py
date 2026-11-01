@@ -167,7 +167,7 @@ class Bridge:
         return await asyncio.wait_for(awaitable, self.timeout)
 
     async def recipient_labels(self, bound, topology):
-        """Reuse native presentation data; cold lookup is request-local, never a registry.
+        """Verify native full presentation data on warm AND cold paths, request-local.
 
         Topology establishes eligibility. Labels cannot add or authorize a candidate.
         Cold users.info uses that candidate's authenticated workspace client, with
@@ -199,22 +199,23 @@ class Bridge:
                 m[Platform.SLACK] for m in maps if Platform.SLACK in m and id(m[Platform.SLACK]) == witness[0]
             )
             handle = adapter._team_bot_names.get(team)
-            cached = adapter._user_name_cache.get((team, recipient.bot_user))
-            if isinstance(cached, str) and cached and cached != recipient.bot_user:
-                return recipient.bot_user, bounded((handle, cached))
+
             from slack_sdk.errors import SlackClientError
 
             try:
                 response = await self.call(adapter._team_clients[team].users_info(user=recipient.bot_user))
-                user = response.get("user") or {}
+                user = response.get("user")
                 if (
                     response.get("ok") is not True
+                    or not isinstance(user, dict)
                     or user.get("id") != recipient.bot_user
                     or user.get("team_id") != team
                     or user.get("is_bot") is not True
                 ):
                     return recipient.bot_user, bounded((handle,))
-                profile = user.get("profile") or {}
+                profile = user.get("profile", {})
+                if not isinstance(profile, dict):
+                    return recipient.bot_user, bounded((handle,))
                 return recipient.bot_user, bounded(
                     (handle, profile.get("display_name"), profile.get("real_name") or user.get("real_name"))
                 )
