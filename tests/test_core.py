@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hermes_slack_agent_router.policy import Recipient, Thread, addresses
+from hermes_slack_agent_router.policy import Recipient, Thread
 
 A = Recipient("TDEMO", "UALPHA", "alpha")
 B = Recipient("TDEMO", "UBETA", "beta")
@@ -55,11 +55,6 @@ class CoreTests(unittest.TestCase):
         ctx.register_platform_handler.assert_called_once()
         # Actual factory activation is mandatory in the separate native/discovery/wheel lane.
         ctx.on_unload.call_args.args[0]()
-
-    def test_quote_code_and_forwarded_mentions_are_not_direct(self):
-        self.assertEqual(addresses("> <@UBETA>\n`<@UBETA>`\n```\n<@UBETA>\n```\n<@UALPHA>"), ("UALPHA",))
-        self.assertEqual(addresses("`<@UBETA>"), ())
-        self.assertEqual(addresses(">>> forwarded\n<@UBETA>"), ())
 
     def test_literal_identity_validation(self):
         for value in ("100", "100.001 extra", "1e2", 100.001):

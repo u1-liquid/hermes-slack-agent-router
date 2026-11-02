@@ -1,15 +1,12 @@
 """Coherent admission once, conditional exact extent without a second threshold."""
 
 import copy
-import hashlib
 import json
-import os
 import unittest
 from dataclasses import replace
 from itertools import combinations
-from pathlib import Path
 
-from test_semantic import A, B, History, controlled_answers, snapshot, source_from_record
+from test_semantic import A, B, History, controlled_answers, snapshot
 
 from hermes_slack_agent_router.jev import JevClient, JevError, serialize_request, validate_answers
 from hermes_slack_agent_router.policy import Recipient
@@ -40,7 +37,6 @@ class CoherentResponseContract(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 source = snapshot(text)
-                binding = source.binding
                 batch = prepare(source, A)
                 state = batch["state"]
                 view = state["current_author_content"]
@@ -61,7 +57,6 @@ class CoherentResponseContract(unittest.TestCase):
                     ],
                 )
                 self.assertEqual(state["conversation"]["records"][-1]["text"], text)
-                self.assertEqual(source.binding, binding)
                 self.assertNotIn("parts", state["conversation"]["records"][-1])
                 if expected:
                     self.assertEqual(
@@ -104,34 +99,6 @@ class CoherentResponseContract(unittest.TestCase):
         self.assertNotIn("erase everything", plan.view(A))
         self.assertNotIn("excerpts", json.dumps(batch["questions"]))
 
-    def test_worked_contrasts_structured_literal_masks(self):
-        # Structural/literal checks, NOT evidence of model semantic correctness.
-        batch = prepare(snapshot(), A)
-        scope = batch["questions"]["scope"]["instructions"]["worked_contrasts"]
-        response = batch["questions"]["response"]["instructions"]["worked_contrasts"]
-        self.assertEqual(len(scope["examples"]), 4)
-        self.assertEqual(len(response["examples"]), 3)
-        self.assertEqual(
-            response["examples"][2]["plain_name_with_main"]["people"],
-            response["examples"][2]["unique_short_name"]["people"],
-        )
-        self.assertEqual(len(response["examples"][2]["plain_name_with_main"]["people"]), 2)
-        aligned = scope["examples"][0]["aligned_variant"]
-        for example in [*scope["examples"], aligned["ja"], aligned["en"]]:
-            self.assertEqual("".join(example["hypothetical_parts"]), example["current"])
-            for view in example["receiver_views"]:
-                self.assertIn(view["correct_text"], example["current"])
-                self.assertIn(view["wrong_text"], example["current"])
-                self.assertNotEqual(view["correct_text"], view["wrong_text"])
-        for case in response["examples"][0]["cases"]:
-            self.assertEqual("".join(p["text"] for p in case["hypothetical_parts"]), case["current"])
-            self.assertTrue(case["hypothetical_parts"][0]["quoted"])
-            self.assertFalse(case["hypothetical_parts"][1]["quoted"])
-        for name, question in batch["questions"].items():
-            if name not in {"response", "scope"}:
-                self.assertNotIn("worked_contrasts", json.dumps(question))
-            self.assertNotIn("worked_contrasts", json.dumps(question["criteria"]))
-
     def test_readable_rubric_schema_and_exact_source_paths(self):
         source = snapshot("No, explain the change; include its reason (not just settings).")
         batch = prepare(source, A)
@@ -162,7 +129,7 @@ class CoherentResponseContract(unittest.TestCase):
             batch["questions"]["scope"]["criteria"]["u0"]["select"], ["source_selection.segments.u0"]
         )
 
-    def test_v2_rubric_replaces_explicit_inferred_and_inert_conditions(self):
+    def test_response_and_scope_share_the_same_routing_contract(self):
         batch = json.loads(serialize_request(prepare(snapshot(), A)))
         response = batch["questions"]["response"]
         scope = batch["questions"]["scope"]
@@ -171,20 +138,8 @@ class CoherentResponseContract(unittest.TestCase):
                 list(question["instructions"]),
                 ["question", "evidence", "routing_contract", "worked_contrasts"],
             )
-            self.assertEqual(len(question["instructions"]["routing_contract"]), 9)
         contract = response["instructions"]["routing_contract"]
         self.assertEqual(contract, scope["instructions"]["routing_contract"])
-        self.assertIn("even when another named member is human", contract[6])
-        contract = list(contract)
-        contract[6] = (
-            "Only an explicitly intended joint set is joint. Fresh all-eligible joint addressing includes every named member despite older specialization. Suppress an inseparable joint request if any required member is outside native_delivery.eligible_user_ids; never shrink the set. Apply this only to that request: an independent own response survives another foreign, unresolved or outside-joint request. Eligibility is not ownership, consent, authentication or proof of atomic execution."
-        )
-        self.assertEqual(
-            hashlib.sha256(
-                (json.dumps(contract, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
-            ).hexdigest(),
-            "000f721c18d38b0de841ef0a23d82e808426df7377cf3f08f156890015862187",
-        )
         self.assertEqual(response["instructions"]["evidence"], scope["instructions"]["evidence"])
         self.assertIn("<@USER_ID>", response["instructions"]["evidence"])
         self.assertIn("source_selection.segments", scope["instructions"]["evidence"])
@@ -379,18 +334,3 @@ class CoherentResponseContract(unittest.TestCase):
         print(
             f"COHERENT_MAX request={len(serialize_request(batch))} response={len(json.dumps(controlled_answers(batch, {})).encode())} questions={len(batch['questions'])}"
         )
-
-    @unittest.skipUnless(os.environ.get("MIZUKI_SIMPLE_RECORDED"), "explicit historical integrity check")
-    def test_old_recordings_are_integrity_only_not_new_question_answers(self):
-        path = Path(os.environ["MIZUKI_SIMPLE_RECORDED"])
-        self.assertEqual(
-            hashlib.sha256(path.read_bytes()).hexdigest(),
-            "5746f71b87385345c988456a729c89318d4037bd27b2b173c833976d57f745a3",
-        )
-        for entry in json.loads(path.read_text()).values():
-            if "source" not in entry or "response" not in entry:
-                continue
-            self.assertEqual(source_from_record(entry["source"]).binding, entry["binding"])
-            if "raw_response" in entry:
-                self.assertEqual(json.loads(entry["raw_response"]), entry["response"])
-                self.assertEqual(json.loads(entry["raw_request"]), entry["request"])

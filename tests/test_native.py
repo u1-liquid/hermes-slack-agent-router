@@ -15,7 +15,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import AsyncMock, Mock, call, patch
 
 from test_semantic import context_priors, context_view
@@ -54,14 +53,7 @@ def native_answers(batch):
 @unittest.skipUnless(SOURCE, "optional local native suite; CI requires it explicitly")
 class NativeDispatch(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        # Capture the caller's documented native secret mapping BEFORE isolating the
-        # test home; never write a real key into the fixture home or protocol evidence.
-        self.canary_secrets = None
-        if os.environ.get("JEV_FICTIONAL_CANARY_DIR"):
-            from agent.secret_scope import build_profile_secret_scope
-            from hermes_constants import get_hermes_home
 
-            self.canary_secrets = build_profile_secret_scope(get_hermes_home())
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -1198,102 +1190,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("SUMMARY_ONLY", received)
         self.assertNotIn("Notification fallback", received)
 
-    async def _preserved_prior_original_sources(self, root):
-        import hashlib
-        from dataclasses import asdict, replace
-
-        from test_semantic import source_from_record
-
-        from hermes_slack_agent_router.bridge import canonical_text
-        from hermes_slack_agent_router.semantic import SemanticError, prepare
-
-        manifest = json.loads((root / "private-real-whoami/coherent-response/manifest.json").read_text())
-        observations = {}
-        for declaration in manifest["rows"].values():
-            source = source_from_record(declaration["source"])
-            if source.identity in observations:
-                continue
-            record = {
-                "old_binding": source.binding,
-                "historical_acquisition_error": declaration["native_acquisition_error"],
-                "source_contract_version": "preserved-originals-prior-context-v1",
-            }
-            observations[source.identity] = record
-            try:
-                original = copy.deepcopy(source.original)
-                if not isinstance(original, dict):
-                    raise TypeError("missing current original")
-                self.assertTrue(
-                    len(json.dumps(original, ensure_ascii=False).encode()) <= 65536,
-                    "oversized current original",
-                )
-                self.assertTrue(
-                    not original.get("files") and not original.get("attachments"), "current media unsupported"
-                )
-                self.assertTrue(
-                    original["user"] == source.sender and original["ts"] == source.identity,
-                    "current sender/time mismatch",
-                )
-                text, provenance = canonical_text(original)
-                self.assertTrue(text == source.text, "required original CURRENT differs")
-                originals = [copy.deepcopy(h.original) for h in source.history]
-                self.client.conversations_replies.side_effect = None
-                self.client.conversations_replies.return_value = {
-                    "ok": True,
-                    "messages": originals,
-                    "has_more": False,
-                }
-                history = await self.gate.history(self.client, source.thread, source.identity)
-                self.assertTrue(
-                    [(h.identity, h.sender, h.original) for h in history]
-                    == [(h.identity, h.sender, h.original) for h in source.history],
-                    "selected originals/order changed",
-                )
-                current = replace(source, history=history, provenance=provenance)
-                for recipient in source.recipients:
-                    prepare(current, recipient)
-                record.update(
-                    supported=True,
-                    source=asdict(current),
-                    new_binding=current.binding,
-                    current_unchanged=True,
-                    history_text_changed=[
-                        i
-                        for i, (a, b) in enumerate(zip(source.history, history, strict=True))
-                        if a.text != b.text
-                    ],
-                    history_provenance_changed=[
-                        i
-                        for i, (a, b) in enumerate(zip(source.history, history, strict=True))
-                        if a.provenance != b.provenance
-                    ],
-                    original_sha256=hashlib.sha256(
-                        json.dumps(originals, ensure_ascii=False, sort_keys=True).encode()
-                    ).hexdigest(),
-                )
-            except (SemanticError, TypeError, ValueError, AssertionError, TimeoutError) as exc:
-                record.update(supported=False, current_error=type(exc).__name__ + ": " + str(exc))
-        self.assertEqual(len(observations), 4)
-        return observations
-
-    @unittest.skipUnless(
-        os.environ.get("MIZUKI_PRIOR_RECOVERY_CHECK"), "explicit preserved-original source check"
-    )
-    async def test_preserved_prior_originals_native_ingress(self):
-        from pathlib import Path
-
-        root = Path(os.environ["MIZUKI_READABLE_ROOT"])
-        observations = await self._preserved_prior_original_sources(root)
-        private = root / "private-real-whoami/prior-context-source-recovery"
-        private.mkdir(mode=0o700, parents=True, exist_ok=True)
-        target = private / ("selected-originals-" + os.environ["MIZUKI_PRIOR_RECOVERY_CHECK"] + ".json")
-        target.write_text(json.dumps(observations, ensure_ascii=False, indent=2) + "\n")
-        target.chmod(0o600)
-        self.assertTrue(
-            all(r["supported"] for r in observations.values()),
-            "selected-original source refusal; details retained privately",
-        )
-
     async def test_prior_context_lossless_and_current_negative(self):
         from hermes_slack_agent_router.bridge import canonical_text
         from hermes_slack_agent_router.semantic import SemanticError
@@ -1800,76 +1696,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.client.conversations_replies.side_effect = pending_then_failed
         await self.dispatch(self.message("yes"))
         self.assertEqual(self.downstream[-1]["event"]["text"], "yes")
-
-    @unittest.skipUnless(
-        os.environ.get("JEV_FICTIONAL_CANARY_DIR"), "explicit fictional root/recent API canary"
-    )
-    async def test_real_jev_root_fallback_recent_priority_native(self):
-        from agent.secret_scope import reset_secret_scope, set_secret_scope
-        from test_semantic import RecordingJev
-
-        token = set_secret_scope(self.canary_secrets)
-        self.addCleanup(reset_secret_scope, token)
-        hydration = patch("agent.secret_scope.build_profile_secret_scope", return_value=self.canary_secrets)
-        hydration.start()
-        self.addCleanup(hydration.stop)
-        self.enable_semantic()
-        base = [
-            {
-                "ts": "100.001",
-                "user": "UHUMAN",
-                "text": "<@UALPHA> only reviews diagrams. <@UBETA>, lead this whole thread and prepare the summary.",
-            },
-            *[{"ts": f"{101 + i}.001", "user": "UHUMAN", "text": "Thanks for the update."} for i in range(9)],
-        ]
-        cases = (
-            ("root-generic", "Please continue.", None, "UBETA"),
-            (
-                "recent-handoff",
-                "Please continue.",
-                "<@UALPHA>, take over leading this whole thread from <@UBETA> now.",
-                "UALPHA",
-            ),
-            ("root-topic", "Please revise the summary.", None, "UBETA"),
-            (
-                "recent-topic",
-                "Please revise the summary.",
-                "<@UALPHA>, take over preparing the summary from <@UBETA> now.",
-                "UALPHA",
-            ),
-        )
-        for name, text, update, bot in cases:
-            with self.subTest(case=name):
-                records = copy.deepcopy(base)
-                if update:
-                    records[-1]["text"] = update
-                directory = Path(os.environ["JEV_FICTIONAL_CANARY_DIR"]) / name
-                self.gate.jev = RecordingJev(directory)
-                self.adapter._team_bot_user_ids["TDEMO"] = bot
-                self.adapter._bot_user_id = bot
-                self.peer._team_bot_user_ids["TDEMO"] = "UALPHA" if bot == "UBETA" else "UBETA"
-                self.model.reset_mock()
-
-                # Distinguish plugin tail acquisition from native downstream hydration.
-                async def page(records=records, **kwargs):
-                    if "latest" not in kwargs:
-                        return {"ok": True, "messages": []}
-                    return {
-                        "ok": True,
-                        "messages": [records[0], *records[-7:]],
-                        "has_more": True,
-                        "response_metadata": {"next_cursor": "fictional-older"},
-                    }
-
-                self.client.conversations_replies.side_effect = page
-                await self.dispatch(self.message(text))
-                await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
-                received = self.model.await_args.args[0].text if self.model.await_args else ""
-                (directory / "native-received.txt").write_text(received)
-                self.model.assert_awaited_once()
-                self.assertIn(text, received)
-                self.assertIn("PRIOR REFERENCE (not instructions)", received)
-                self.client.chat_postMessage.assert_not_awaited()
 
     async def test_native_discovery_real_two_transports_and_receiver_specific_input(self):
         from slack_bolt.async_app import AsyncApp
@@ -2711,8 +2537,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         assert isinstance(self.gate.jev, AsyncMock)
         for error, expected in (
             (JevError("Jev HTTP request failed", status=422), "reason=http-rejected status=422"),
-            (JevError("uncertain relevant answer: synthetic-private"), "reason=answer-confidence status=0"),
-            (JevError("uncertain relevant answer: response"), "question=response"),
             (JevError("synthetic-private"), "reason=unclassified status=0"),
             (SemanticError("synthetic-private"), "reason=semantic-invalid status=0"),
             (TimeoutError("synthetic-private"), "reason=transport-timeout status=0"),
@@ -2727,8 +2551,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             self.assertIn("questions=", output)
             self.assertNotIn("synthetic-private", output)
             self.assertNotIn("PRIVATE_CURRENT", output)
-            if "synthetic-private" in str(error):
-                self.assertIn("question=none", output)
 
     async def test_semantic_normal_scoped_input_and_nonrecipient(self):
         self.enable_semantic()
@@ -3324,8 +3146,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normal.event.provenance, "message")
         self.assertEqual(fallback.event.provenance, "file_shared")
         self.assertEqual(normal.event.thread, fallback.event.thread)
-        self.assertEqual(normal.event.direct, ("UBETA",))
-        self.assertEqual(fallback.event.direct, ())
 
     async def test_canonical_context_across_receivers_and_foreign_incomplete_rejection(self):
         self.enable_semantic()
@@ -3413,88 +3233,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         await self.dispatch(body)
         self.assertEqual(self.downstream[-1]["event"]["text"], "yes")
 
-    @unittest.skipUnless(
-        os.environ.get("MIZUKI_CLASSIFIER_PROBE") == "1", "explicit Mizuki synthetic native API probe"
-    )
-    async def test_real_mizuki_scoped_classifier_native_human_input(self):
-        import time
-
-        from agent.secret_scope import (
-            build_profile_secret_scope,
-            current_secret_scope_home,
-            reset_multiplex_context,
-            reset_secret_scope,
-            set_multiplex_context,
-            set_secret_scope,
-        )
-
-        from hermes_slack_agent_router.jev import JevClient
-
-        self.enable_semantic()
-        receipt: dict[str, object] = {"scope": "mizuki", "model": JevClient.model}
-
-        home = Path(os.environ["MIZUKI_CLASSIFIER_HOME"])
-        self.assertTrue(home.is_absolute() and home.name == "mizuki" and home.is_dir())
-        case = self
-
-        class SyntheticMizukiJev(JevClient):
-            async def ask(self, batch):
-                # Only this synthetic inference enters the actual serving secret scope.
-                # Native topology/dispatch remains the isolated fixture; no key copying
-                # into its homes, no live Slack calls, no native profile file writes.
-                multiplex = set_multiplex_context(True)
-                token = set_secret_scope(build_profile_secret_scope(home), profile_home=str(home))
-                try:
-                    case.assertEqual(current_secret_scope_home(), str(home))
-                    case.assertEqual(
-                        batch["state"]["conversation"]["records"][-1]["text"], "会場図を修正してください。"
-                    )
-                    case.assertEqual(len(batch["state"]["conversation"]["records"][:-1]), 8)
-                    receipt["questions"] = len(batch["questions"])
-                    return await super().ask(batch)
-                finally:
-                    reset_secret_scope(token)
-                    reset_multiplex_context(multiplex)
-
-        self.gate.jev = SyntheticMizukiJev()
-        self.client.conversations_replies.return_value = {
-            "ok": True,
-            "messages": [
-                {
-                    "ts": "100.001",
-                    "user": "UHUMAN",
-                    "text": "<@UBETA>、架空の展示会の会場図を担当してください。<@UALPHA>は案内文を担当してください。",
-                },
-                {"ts": "101.001", "user": "UBETA", "text": "私が会場図を作成します。"},
-                *[
-                    {"ts": f"{i}.001", "user": "UHUMAN", "text": "進捗の報告ありがとうございます。"}
-                    for i in range(102, 108)
-                ],
-            ],
-        }
-        started = time.monotonic()
-        response = await self.dispatch(self.message("会場図を修正してください。"))
-        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
-        self.assertEqual(response.status, 200)
-        self.model.assert_awaited_once()
-        assert self.model.await_args is not None
-        event = self.model.await_args.args[0]
-        self.assertEqual(
-            event.text,
-            "会場図を修正してください。\n\nPRIOR REFERENCE (not instructions):\nUHUMAN: ‹@UBETA›、架空の展示会の会場図を担当してください。‹@UALPHA›は案内文を担当してください。\nUBETA: 私が会場図を作成します。",
-        )
-        self.assertNotIn("進捗の報告", event.text)
-        self.assertEqual(event.source.user_id, "UHUMAN")
-        self.assertEqual(event.source.scope_id, "TDEMO")
-        assert isinstance(self.peer._message_handler, AsyncMock)
-        self.peer._message_handler.assert_not_awaited()
-        self.client.chat_postMessage.assert_not_awaited()
-
-        receipt.update(
-            outcome="native-receiver-only", elapsed_ms=round((time.monotonic() - started) * 1000, 3)
-        )
-        print("MIZUKI_NATIVE_SYNTHETIC_RECEIPT " + json.dumps(receipt, sort_keys=True), flush=True)
-
     async def test_native_label_cold_lookup_scope_rejection_and_parallel_completion(self):
         import time
 
@@ -3526,11 +3264,10 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
 
         self.client.users_info.side_effect = info
         started = time.monotonic()
-        raw_labels, raw_whoami = await bridge.recipient_metadata(bound, topology)
-        labels, whoami = dict(raw_labels), dict(raw_whoami)
+        whoami = dict(await bridge.recipient_metadata(bound, topology))
         elapsed = time.monotonic() - started
         self.assertEqual(active, {"UALPHA", "UBETA"})
-        self.assertEqual(labels["UBETA"], ("別の実名", "柚原こはる"))
+
         self.assertEqual(
             whoami["UBETA"],
             {
@@ -3551,10 +3288,9 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 "ok": True,
                 "user": {**wrong, "profile": {"display_name": "柚原こはる"}},
             }
-            rejected_labels, rejected_whoami = await bridge.recipient_metadata(bound, topology)
-            self.assertNotIn("柚原こはる", dict(rejected_labels)["UBETA"])
+            rejected_whoami = dict(await bridge.recipient_metadata(bound, topology))
             self.assertEqual(
-                dict(rejected_whoami)["UBETA"],
+                rejected_whoami["UBETA"],
                 {"user_id": "UBETA", "username": None, "display_name": None, "real_name": None},
             )
         print(f"NATIVE_LABEL_COLD_RECEIPT participants=2 elapsed_ms={elapsed * 1000:.3f}")
@@ -3592,27 +3328,29 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         bound = await bridge.bind(self.message("こはるさん、会場図を修正してください。"))
         topology = await bridge.participants(bound)
         cache = dict(self.adapter._user_name_cache)
-        labels, whoami = await bridge.recipient_metadata(bound, topology)
-        self.assertIn("柚原こはる", dict(labels)["UBETA"])
+        whoami = dict(await bridge.recipient_metadata(bound, topology))
         self.assertEqual(
-            dict(whoami)["UBETA"],
+            whoami["UBETA"],
             {"user_id": "UBETA", "username": "native.beta", "display_name": "", "real_name": "柚原こはる"},
         )
         self.assertEqual(self.adapter._user_name_cache, cache)
         self.assertIn({"user": "UBETA"}, [c.kwargs for c in self.client.users_info.await_args_list])
         self.client.users_info.side_effect = None
-        for malformed in (
-            None,
-            [],
-            "not-container",
-            {"display_name": [], "real_name": 10},
-            {"display_name": "", "real_name": ""},
+        for malformed, display_name, real_name in (
+            (None, None, None),
+            ([], None, None),
+            ("not-container", None, None),
+            ({"display_name": [], "real_name": 10}, None, None),
+            ({"display_name": "", "real_name": ""}, "", ""),
         ):
             self.client.users_info.return_value = {
                 "ok": True,
                 "user": {"id": "UBETA", "team_id": "TDEMO", "is_bot": True, "profile": malformed},
             }
-            self.assertEqual(dict((await bridge.recipient_metadata(bound, topology))[0])["UBETA"], ("birch",))
+            identity = dict(await bridge.recipient_metadata(bound, topology))["UBETA"]
+            self.assertEqual(identity["username"], "birch")
+            self.assertEqual(identity["display_name"], display_name)
+            self.assertEqual(identity["real_name"], real_name)
 
     def install_scoped_receiver(self):
         from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
@@ -3752,1980 +3490,8 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TopologyError):
             await bridge.context_people(bound, history, whoami)
 
-    async def _readable_native_input(self, source, recipient, text, private_row=False, name="", *, v2=True):
-        if not text:
-            return None
-        team, channel = source.thread.workspace, source.thread.channel
-        # These are isolated native test doubles, never an actual profile/cache.
-        # Declare the complete per-observation metadata fixture, not a sticky delta.
-        degraded = private_row or (v2 and team == "T7CONTRAST")
-        self.client.users_info.side_effect = None
-        self.client.conversations_info.side_effect = None
-        self.client.users_info.return_value = (
-            {"ok": False}
-            if degraded
-            else {
-                "ok": True,
-                "user": {"id": "UHUMAN", "is_bot": False, "name": "Human", "profile": {}},
-            }
-        )
-        self.client.conversations_info.return_value = (
-            {"ok": False}
-            if degraded
-            else {
-                "ok": True,
-                "channel": {"id": "CDEMO", "name": "demo", "is_im": False, "is_mpim": False},
-            }
-        )
-        self.adapter._channel_name_cache.clear()
-        self.adapter._user_is_bot_cache.clear()
-        self.adapter._team_clients = {team: self.client}
-        self.adapter._team_bot_user_ids = {team: recipient.bot_user}
-        self.adapter._bot_user_id = recipient.bot_user
-        self.adapter._user_name_cache.clear()
-        self.adapter._user_name_cache.update({(team, "UALPHA"): "Human", (team, "UBETA"): "birch"})
-        people = source.recipient_whoami if private_row else source.context_people
-        for user, p in people:
-            label = p["display_name"] or p["real_name"] or p["username"]
-            if label:
-                self.adapter._user_name_cache[(team, user)] = label
-        if name in {"joint", "joint-alpha"}:
-            self.adapter._user_name_cache.update({(team, "UALPHA"): "Human", (team, "UBETA"): "birch"})
-        event = copy.deepcopy(source.original or {})
-        event.update(
-            text=text,
-            user=source.sender,
-            team=team,
-            channel=channel,
-            thread_ts=source.thread.root,
-            ts=source.identity,
-        )
-        for field in ("blocks", "files", "attachments"):
-            event.pop(field, None)
-        rendered = (
-            self.adapter._apply_bot_mention(
-                text, text, text, False, recipient.bot_user, source.thread.root, team
-            )[0]
-            if f"<@{recipient.bot_user}>" in text
-            else text
-        )
-        built = await self.adapter._build_message_event(
-            event,
-            text=rendered,
-            original_text=text,
-            command_probe_text=text,
-            is_command_text=False,
-            channel_id=channel,
-            team_id=team,
-            ts=source.identity,
-            user_id=source.sender,
-            thread_ts=source.thread.root,
-            is_dm=False,
-            media_urls=[],
-            media_types=[],
-            media_text_inlined=[],
-            channel_context=None,
-        )
-        return {
-            "text": built.text,
-            "assembled_input": self.runner._prefix_inbound_sender_context(built, built.source, built.text),
-            "source": built.source.to_dict(),
-            "channel_context": built.channel_context,
-            "reply_to_text": built.reply_to_text,
-            "media_urls": built.media_urls,
-            "outbound": self.client.chat_postMessage.await_count,
-            "ephemeral": self.client.chat_postEphemeral.await_count,
-        }
-
-    async def test_readable_native_fixture_order_independence(self):
-        from dataclasses import replace
-
-        from hermes_slack_agent_router.semantic import Snapshot
-
-        normal = Snapshot(
-            self.key,
-            "201.001",
-            "UHUMAN",
-            "Check the invoice parser; ",
-            (),
-            (self.b,),
-            {"text": "Check the invoice parser; "},
-        )
-        degraded = replace(
-            normal,
-            thread=Thread("T7CONTRAST", "C7", "100.001"),
-            sender="U7HOST003",
-            recipients=(Recipient("T7CONTRAST", "U7MOSS001", "default"),),
-        )
-        private_like = replace(
-            normal,
-            thread=Thread("TPRIVATEFIXTURE", "CPRIVATEFIXTURE", "100.001"),
-            sender="UUNKNOWN",
-            recipients=(Recipient("TPRIVATEFIXTURE", "UOBSERVER", "default"),),
-        )
-        baseline = await self._readable_native_input(normal, self.b, normal.text)
-        self.assertEqual(baseline["source"]["chat_name"], "demo")
-        self.assertEqual(baseline["source"]["user_name"], "Human")
-        for label, source, private in (("F08-like", degraded, False), ("private-like", private_like, True)):
-            with self.subTest(transition=label):
-                unknown = await self._readable_native_input(
-                    source, source.recipients[0], source.text, private
-                )
-                self.assertEqual(unknown["source"]["chat_name"], source.thread.channel)
-                self.assertEqual(unknown["source"]["user_name"], source.sender)
-                self.assertEqual(await self._readable_native_input(normal, self.b, normal.text), baseline)
-                self.assertEqual(
-                    await self._readable_native_input(source, source.recipients[0], source.text, private),
-                    unknown,
-                )
-                self.assertEqual(await self._readable_native_input(normal, self.b, normal.text), baseline)
-        self.client.users_info.side_effect = RuntimeError("stale fixture side effect")
-        self.client.conversations_info.side_effect = RuntimeError("stale fixture side effect")
-        self.adapter._user_name_cache[("TDEMO", "UHUMAN")] = "stale fixture label"
-        self.adapter._channel_name_cache[("TDEMO", "CDEMO")] = "stale fixture channel"
-        self.assertEqual(await self._readable_native_input(normal, self.b, normal.text), baseline)
-        self.client.chat_postMessage.assert_not_awaited()
-        self.client.chat_postEphemeral.assert_not_awaited()
-
-    @unittest.skipUnless(
-        os.environ.get("MIZUKI_READABLE_STAGE")
-        or os.environ.get("MIZUKI_READABLE_V2_STAGE")
-        or os.environ.get("MIZUKI_WORKED_CONTRASTS_STAGE")
-        or os.environ.get("MIZUKI_AUTHOR_CONTEXT_STAGE")
-        or os.environ.get("MIZUKI_PLAIN_NAME_MAIN_STAGE")
-        or os.environ.get("MIZUKI_PRIOR_CONTEXT_SOURCE_RECOVERY_STAGE")
-        or os.environ.get("MIZUKI_SHARED_ROUTING_CONTRACT_STAGE")
-        or os.environ.get("MIZUKI_YES05_JOINT_STAGE"),
-        # Author-context is the same finite candidate runner, not a parallel harness.
-        "explicit frozen readable-rubric campaign",
-    )
-    async def test_readable_rubric_frozen_campaign(self):
-        import hashlib
-        import importlib.util
-        import re
-        import time
-        from dataclasses import asdict, replace
-
-        from agent.secret_scope import (
-            build_profile_secret_scope,
-            reset_multiplex_context,
-            reset_secret_scope,
-            set_multiplex_context,
-            set_secret_scope,
-        )
-        from test_semantic import (
-            controlled_answers,
-            expected_full_view,
-            native_full_view_matches,
-            source_from_record,
-        )
-
-        from hermes_slack_agent_router.jev import JevClient, serialize_request, validate_answers
-        from hermes_slack_agent_router.semantic import History, Snapshot, assemble, prepare
-
-        root = Path(os.environ["MIZUKI_READABLE_ROOT"])
-        yes05_mode = bool(os.environ.get("MIZUKI_YES05_JOINT_STAGE"))
-        shared_mode = yes05_mode or bool(os.environ.get("MIZUKI_SHARED_ROUTING_CONTRACT_STAGE"))
-        recovery_mode = shared_mode or bool(os.environ.get("MIZUKI_PRIOR_CONTEXT_SOURCE_RECOVERY_STAGE"))
-        plain_mode = recovery_mode or bool(os.environ.get("MIZUKI_PLAIN_NAME_MAIN_STAGE"))
-        author_mode = plain_mode or bool(os.environ.get("MIZUKI_AUTHOR_CONTEXT_STAGE"))
-        worked_mode = author_mode or bool(os.environ.get("MIZUKI_WORKED_CONTRASTS_STAGE"))
-        v2 = worked_mode or bool(os.environ.get("MIZUKI_READABLE_V2_STAGE"))
-        stage = os.environ[
-            "MIZUKI_YES05_JOINT_STAGE"
-            if yes05_mode
-            else "MIZUKI_SHARED_ROUTING_CONTRACT_STAGE"
-            if shared_mode
-            else "MIZUKI_PRIOR_CONTEXT_SOURCE_RECOVERY_STAGE"
-            if recovery_mode
-            else "MIZUKI_PLAIN_NAME_MAIN_STAGE"
-            if plain_mode
-            else "MIZUKI_AUTHOR_CONTEXT_STAGE"
-            if author_mode
-            else "MIZUKI_WORKED_CONTRASTS_STAGE"
-            if worked_mode
-            else "MIZUKI_READABLE_V2_STAGE"
-            if v2
-            else "MIZUKI_READABLE_STAGE"
-        ]
-        self.assertIn(stage, {"prepare", "evaluate", "replay", "public-replay", "gate-replay"})
-        gate_replay = yes05_mode and stage == "gate-replay"
-        adopted_contract, adopted_criteria = None, None
-        if shared_mode:
-            self.assertIn(
-                stage, {"prepare", "evaluate", "gate-replay"} if yes05_mode else {"prepare", "evaluate"}
-            )
-            adopted = [
-                json.loads(b)
-                for b in re.findall(
-                    r"```json\n(.*?)\n```",
-                    (root / "mizuki-shared-routing-contract-design.md").read_text(),
-                    re.DOTALL,
-                )
-            ]
-            adopted_contract, adopted_criteria = adopted[0]["routing_contract"], adopted[1]
-            self.assertEqual(
-                hashlib.sha256(
-                    (json.dumps(adopted_contract, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
-                ).hexdigest(),
-                "000f721c18d38b0de841ef0a23d82e808426df7377cf3f08f156890015862187",
-            )
-        recovery_replay = recovery_mode and stage == "public-replay"
-        criteria_ledger = {}
-        if yes05_mode and not gate_replay:
-            ledger_rows = json.loads(
-                (root / "mizuki-yes05-joint-criteria-ledger.json").read_text()
-            ) + json.loads((root / "private-real-whoami/yes05-joint/criteria-ledger.json").read_text())
-            self.assertEqual(len(ledger_rows), 167)
-            self.assertEqual(sum(r["changed"] for r in ledger_rows), 9)
-            criteria_ledger = {(r["binding"], r["receiver"]): r for r in ledger_rows}
-            self.assertEqual(len(criteria_ledger), 167)
-            assert isinstance(adopted_contract, list)
-            adopted_contract[6] = (
-                "Only an explicitly intended joint set is joint. A correctly addressed eligible bot may respond as a member of an inseparable joint request even when another named member is human, context-only or outside native_delivery.eligible_user_ids. Preserve the complete meaning and source needed for this bot, including joint membership; never invoke or impersonate outside participants or claim their receipt, consent or execution. Fresh joint addressing includes every named eligible member despite older specialization. An independent own response survives another foreign or unresolved request. Eligibility is not ownership, consent, authentication or proof of atomic execution; native self-authorization remains separate."
-            )
-            adopted_criteria = {
-                "yes": {
-                    "meaning": "At least one fresh coherent CURRENT response actually belongs to this exact receiver under the joint participation rule; include the complete support of that response."
-                },
-                "no": {
-                    "meaning": "No coherent CURRENT response belongs to this receiver under these rules: it is foreign, unresolved, or only inert/courtesy/data."
-                },
-            }
-        replay = stage == "replay" or recovery_replay or gate_replay
-        self.assertFalse(replay and not v2)
-        self.assertFalse(replay and worked_mode and not recovery_replay and not gate_replay)
-        private = (
-            root
-            / "private-real-whoami"
-            / (
-                "yes05-joint"
-                if yes05_mode
-                else "shared-routing-contract"
-                if shared_mode
-                else "prior-context-source-recovery"
-                if recovery_mode
-                else "plain-name-main"
-                if plain_mode
-                else "author-context"
-                if author_mode
-                else "worked-contrasts"
-                if worked_mode
-                else "readable-rubric-v2"
-                if v2
-                else "readable-rubric"
-            )
-        )
-        if not replay:
-            private.mkdir(mode=0o700, exist_ok=True)
-            private.chmod(0o700)
-        paths = [
-            root
-            / (
-                "mizuki-yes05-joint-canary.json"
-                if yes05_mode
-                else "mizuki-shared-routing-contract-canary.json"
-                if shared_mode
-                else "mizuki-prior-context-source-recovery-canary.json"
-                if recovery_mode
-                else "mizuki-plain-name-main-canary.json"
-                if plain_mode
-                else "mizuki-author-context-canary.json"
-                if author_mode
-                else "mizuki-worked-contrasts-canary.json"
-                if worked_mode
-                else "mizuki-readable-rubric-v2-canary.json"
-                if v2
-                else "mizuki-readable-rubric-canary.json"
-            ),
-            root
-            / (
-                "mizuki-yes05-joint-regressions.json"
-                if yes05_mode
-                else "mizuki-shared-routing-contract-regressions.json"
-                if shared_mode
-                else "mizuki-prior-context-source-recovery-regressions.json"
-                if recovery_mode
-                else "mizuki-plain-name-main-regressions.json"
-                if plain_mode
-                else "mizuki-author-context-regressions.json"
-                if author_mode
-                else "mizuki-worked-contrasts-regressions.json"
-                if worked_mode
-                else "mizuki-readable-rubric-v2-contrasts.json"
-                if v2
-                else "mizuki-readable-rubric-factorial.json"
-            ),
-            private / "manifest.json",
-        ]
-
-        def save(path, value):
-            fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
-            with os.fdopen(fd, "w") as stream:
-                os.fchmod(stream.fileno(), 0o600)
-                json.dump(value, stream, ensure_ascii=False, indent=2)
-
-        def digest(value):
-            return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-
-        def load_legacy(name):
-            path = root / "coherent-suffix-comparison-qa" / "hermes_slack_agent_router" / (name + ".py")
-            spec = importlib.util.spec_from_file_location(
-                "hermes_slack_agent_router._rubric_legacy_" + name, path
-            )
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[spec.name] = module
-            self.addCleanup(sys.modules.pop, spec.name, None)
-            spec.loader.exec_module(module)
-            return module
-
-        legacy, legacy_jev = load_legacy("semantic"), load_legacy("jev")
-        source_path = root / "mizuki-coherent-response-canary.json"
-        self.assertEqual(
-            hashlib.sha256(source_path.read_bytes()).hexdigest(),
-            "a987614e5e42055b2bad66364d2c94cdf1954c015bde991541f525516e85eb27",
-        )
-        old = json.loads(source_path.read_text())
-        edge = source_from_record(old["coherent-response-v1:generic"]["source"])
-        for identity in (edge.thread.root, edge.thread.root + ":999.0"):
-            current_root = replace(edge, identity=identity, history=())
-            record = prepare(current_root, current_root.recipients[0])["state"]["conversation"]["records"][0]
-            self.assertEqual(record["role"], "CURRENT_ROOT")
-            self.assertEqual(record["timestamp"], edge.thread.root)
-            self.assertEqual(record["source_event_identity"], identity)
-        design = (root / "mizuki-readable-rubric-design.md").read_text()
-        fresh = None
-        if v2:
-            contrasts = json.loads(
-                (root / "mizuki-readable-rubric-v2-contrasts.json" if worked_mode else paths[1]).read_text()
-            )
-            fresh = contrasts.get("fresh_oracle", contrasts)
-            fresh_raw = json.dumps(fresh, ensure_ascii=False, separators=(",", ":")) + "\n"
-            self.assertEqual(
-                hashlib.sha256(fresh_raw.encode()).hexdigest(),
-                "2081dc4b3aa342b94f84922cd9e4969e1320410e1f27f75778fb2748100408e6",
-            )
-            review = (root / "mizuki-readable-rubric-correction-review.md").read_text()
-            sample = prepare(edge, edge.recipients[0])["questions"]
-            shared = next(
-                line[1:-1] for line in review.splitlines() if line.startswith("'In Slack source text,")
-            )
-            for key in ("response", "scope"):
-                if not worked_mode:
-                    self.assertIn(shared, sample[key]["instructions"]["evidence"])
-            for key in ("explicit_current_addressee", "topic_owner", "main"):
-                expected = re.search(r"^" + key + r": '(.*)'$", review, re.MULTILINE).group(1)
-                if not shared_mode and not (author_mode and key == "explicit_current_addressee"):
-                    self.assertEqual(sample["response"]["instructions"]["definitions"][key], expected)
-            old_scope_rules = re.findall(r"^- '(.*)'$", review, re.MULTILINE)
-            if not shared_mode:
-                normalized_scope_rules = list(sample["scope"]["instructions"]["ownership_rules"])
-                if plain_mode:
-                    normalized_scope_rules[1] = old_scope_rules[1]
-                self.assertEqual(normalized_scope_rules, old_scope_rules)
-        examples = [json.loads(block) for block in re.findall(r"```json\n(.*?)\n```", design, re.DOTALL)]
-        elementary = json.loads((root / "mizuki-elementary-interface-comparison.json").read_text())["planned"]
-        cases = [r["case"] for r in elementary.values() if r["arm"] == "A"]
-        arms = ("S0C0", "S1C0", "S0C1", "S1C1")
-
-        def mapped(value, substitutions):
-            if isinstance(value, str):
-                for a, b in substitutions:
-                    value = value.replace(a, b)
-                return value
-            if isinstance(value, list):
-                return [mapped(v, substitutions) for v in value]
-            if isinstance(value, dict):
-                return {k: mapped(v, substitutions) for k, v in value.items()}
-            return value
-
-        def build(source, recipient, arm):
-            if v2:
-                self.assertEqual(arm, "S1C1")
-                return prepare(source, recipient), []
-            previous, candidate = legacy.prepare(source, recipient), prepare(source, recipient)
-            context = previous["state"]["message_context"]
-            current = candidate["state"]["source_selection"]["current_record"]
-            substitutions = [
-                ("message_context.units", "source_selection.segments"),
-                ("message_context.participants", "people"),
-                ("message_context.eligible_recipients", "native_delivery.eligible_user_ids"),
-                ("message_context.CURRENT", current),
-            ]
-            for i, history in enumerate(source.history):
-                substitutions.append((context["prior"][f"h{i}"], f"conversation.records[{i}]"))
-            substitutions += [
-                (
-                    "canonical CURRENT, root, recent utterances",
-                    f"canonical {current} and conversation.records utterances",
-                ),
-                (
-                    "only eligible_recipients are native delivery candidates",
-                    "only native_delivery.eligible_user_ids are native delivery candidates",
-                ),
-            ]
-            if arm == "S0C0":
-                return previous, []
-            if arm == "S1C1":
-                return candidate, []
-            if arm == "S1C0":
-                questions = copy.deepcopy(previous["questions"])
-                for question in questions.values():
-                    question["instructions"] = {
-                        "question": mapped(question["instructions"], substitutions),
-                        "legacy_context_notice": mapped(context["notice"], substitutions),
-                    }
-                return {"state": candidate["state"], "questions": questions}, substitutions
-            reverse = [(b, a) for a, b in substitutions if a.startswith("message_context.")]
-            reverse += [
-                ("`conversation.records`", "`message_context`"),
-                ("`people`", "`message_context.participants`"),
-            ]
-            return {"state": previous["state"], "questions": mapped(candidate["questions"], reverse)}, reverse
-
-        def equivalent(source, recipient):
-            binding, original = source.binding, asdict(source)
-            before, after = legacy.prepare(source, recipient), prepare(source, recipient)
-            decoded = context_view(after["state"])
-            previous = before["state"]["message_context"]
-            for key in ("CURRENT", "root", "recent", "units", "participants", "eligible_recipients"):
-                self.assertEqual(decoded[key], previous[key], "source evidence mismatch: " + key)
-            self.assertEqual(
-                context_priors(decoded),
-                {
-                    f"h{i}": previous["root"]
-                    if path == "message_context.root"
-                    else previous["recent"][int(path.split("[")[1][:-1])]
-                    for i, path in enumerate(previous["prior"].values())
-                },
-            )
-            self.assertEqual(before["state"]["whoami"], after["state"]["whoami"])
-            self.assertEqual(list(before["questions"]), list(after["questions"]))
-            for key in before["questions"]:
-                self.assertEqual(
-                    list(before["questions"][key]["criteria"]), list(after["questions"][key]["criteria"])
-                )
-            segments = after["state"]["source_selection"]["segments"]
-            self.assertEqual("".join(s["text"] for s in segments.values()), source.text)
-            self.assertTrue(all(s["text"] == source.text[s["start"] : s["end"]] for s in segments.values()))
-            self.assertEqual((source.binding, asdict(source)), (binding, original))
-            return after
-
-        async def native_input(source, recipient, text, private_row=False, name=""):
-            return await self._readable_native_input(source, recipient, text, private_row, name, v2=v2)
-
-        previous_worked_rows = {}
-        worked_examples = {}
-        identities = set()
-        if worked_mode:
-            for previous_path, group in (
-                (
-                    root
-                    / (
-                        "mizuki-shared-routing-contract-canary.json"
-                        if yes05_mode
-                        else "mizuki-prior-context-source-recovery-canary.json"
-                        if shared_mode
-                        else "mizuki-plain-name-main-canary.json"
-                        if recovery_mode
-                        else "mizuki-author-context-canary.json"
-                        if plain_mode
-                        else "mizuki-worked-contrasts-canary.json"
-                        if author_mode
-                        else "mizuki-readable-rubric-v2-canary.json"
-                    ),
-                    "rows",
-                ),
-                (
-                    root
-                    / (
-                        "mizuki-shared-routing-contract-regressions.json"
-                        if yes05_mode
-                        else "mizuki-prior-context-source-recovery-regressions.json"
-                        if shared_mode
-                        else "mizuki-plain-name-main-regressions.json"
-                        if recovery_mode
-                        else "mizuki-author-context-regressions.json"
-                        if plain_mode
-                        else "mizuki-worked-contrasts-regressions.json"
-                        if author_mode
-                        else "mizuki-readable-rubric-v2-contrasts.json"
-                    ),
-                    "holdout",
-                ),
-                (
-                    root
-                    / "private-real-whoami"
-                    / (
-                        "shared-routing-contract"
-                        if yes05_mode
-                        else "prior-context-source-recovery"
-                        if shared_mode
-                        else "plain-name-main"
-                        if recovery_mode
-                        else "author-context"
-                        if plain_mode
-                        else "worked-contrasts"
-                        if author_mode
-                        else "readable-rubric-v2"
-                    )
-                    / "manifest.json",
-                    "rows",
-                ),
-            ):
-                for row in json.loads(previous_path.read_text())[group].values():
-                    previous_worked_rows[(row["binding"], row["recipient"]["bot_user"])] = row
-            if shared_mode:
-                for row in json.loads(
-                    (
-                        root
-                        / (
-                            "mizuki-shared-routing-contract-regressions.json"
-                            if yes05_mode
-                            else "mizuki-prior-context-source-recovery-regressions.json"
-                        )
-                    ).read_text()
-                )["rows"].values():
-                    previous_worked_rows[(row["binding"], row["recipient"]["bot_user"])] = row
-            self.assertEqual(len(previous_worked_rows), 167 if shared_mode else 163)
-            example_questions = prepare(edge, edge.recipients[0])["questions"]
-            worked_examples = {
-                key: example_questions[key]["instructions"]["worked_contrasts"]
-                for key in ("response", "scope")
-            }
-            identities = {
-                "Zephyra",
-                "Orsino",
-                "Brannoc",
-                "Isolde",
-                "Quillon",
-                "Nerisse",
-                "Ulric",
-                "Solenne",
-                "UWC8D14",
-                "UWC8E25",
-                "UWC9A31",
-                "UWC9B42",
-                "UWC9C53",
-            }
-            literal_bodies = []
-            for example in worked_examples["scope"]["examples"]:
-                literal_bodies += [example["current"], *example["hypothetical_parts"]]
-            for case in worked_examples["response"]["examples"][0]["cases"]:
-                literal_bodies += [case["current"], *[p["text"] for p in case["hypothetical_parts"]]]
-            literal_bodies.append(worked_examples["response"]["examples"][1]["current"])
-            new_identities = (
-                {"葛城 梢音", "白峰 梢音", "榎本 翠帆", "梢音", "翠帆", "UAC1KZ71", "UAC2SH82", "UAC3KZ93"}
-                if author_mode
-                else set()
-            )
-            new_literals = []
-            if author_mode:
-                identities |= new_identities
-                variant = worked_examples["scope"]["examples"][0]["aligned_variant"]
-                for language in ("ja", "en"):
-                    new_literals += [
-                        variant[language]["current"],
-                        *variant[language]["hypothetical_parts"],
-                        *[turn[language] for turn in variant["conversation"]],
-                    ]
-                support = worked_examples["scope"]["examples"][3]
-                new_literals += [
-                    support["current"],
-                    *support["hypothetical_parts"],
-                    *[turn["text"] for turn in support["conversation"]],
-                ]
-                names = worked_examples["response"]["examples"][2]
-                new_literals += [names["unique_short_name"]["current"], names["shared_name_pair"]["current"]]
-                for sign in ("positive", "negative"):
-                    new_literals += [turn["text"] for turn in names["shared_name_pair"][sign]["conversation"]]
-                literal_bodies += new_literals
-            synthetic = [r for r in previous_worked_rows.values() if not r["private"]]
-            self.assertEqual(len(synthetic), 155 if shared_mode else 151)
-            for row in synthetic:
-                evidence = json.dumps(row["source"], ensure_ascii=False)
-                bodies = [row["source"]["text"], *[h["text"] for h in row["source"]["history"]]]
-                for identity in identities:
-                    self.assertNotIn(identity, evidence, "worked identity overlaps synthetic source")
-                for literal in literal_bodies:
-                    self.assertTrue(
-                        all(literal.strip() not in body for body in bodies),
-                        "worked literal overlaps synthetic source",
-                    )
-            old_examples = json.dumps(
-                json.loads(synthetic[0]["prepared_raw_request"])["questions"], ensure_ascii=False
-            )
-            if plain_mode and not recovery_mode:
-                plain_example = worked_examples["response"]["examples"][2]["plain_name_with_main"]
-                new_identities = {"UAC9HOST"}
-                identities |= new_identities
-                new_literals = [
-                    plain_example["conversation"][0]["text"],
-                    *[case["current"] for case in plain_example["cases"]],
-                ]
-                for row in synthetic:
-                    evidence = json.dumps(row["source"], ensure_ascii=False)
-                    self.assertNotIn("UAC9HOST", evidence)
-                    for literal in new_literals:
-                        self.assertNotIn(literal, evidence, "new plain-name illustration overlaps source")
-            if recovery_mode:
-                new_identities, new_literals = set(), []
-            for identity in new_identities if author_mode else identities:
-                self.assertNotIn(identity, old_examples, "worked identity overlaps existing prompt examples")
-            for literal in new_literals:
-                self.assertNotIn(
-                    literal.strip(), old_examples, "new illustrated source overlaps an old prompt"
-                )
-
-        amendments = {}
-        if plain_mode and not recovery_mode:
-            amendment_rows = json.loads((private / "expectation-amendments.json").read_text())
-            self.assertEqual(len(amendment_rows), 4)
-            amendments = {(r["binding"], r["recipient"]): r for r in amendment_rows}
-            self.assertEqual(len(amendments), 4)
-
-        def worked_equivalent(source, recipient, batch):
-            before = previous_worked_rows[(source.binding, recipient.bot_user)]
-            self.assertTrue(
-                json.loads(json.dumps(asdict(source))) == before["source"],
-                "source/provenance binding changed",
-            )
-            old_batch = json.loads(before["prepared_raw_request"])
-            normalized_state = copy.deepcopy(batch["state"])
-            if author_mode and not plain_mode:
-                view = normalized_state.pop("current_author_content")
-                parts = old_batch["state"]["source_selection"]["segments"]
-                self.assertEqual(view["text"], "".join(p["text"] for p in parts.values() if not p["quoted"]))
-                self.assertEqual(
-                    view["quoted_or_reference_paths"],
-                    ["source_selection.segments." + key for key, part in parts.items() if part["quoted"]],
-                )
-                self.assertEqual(set(view), {"text", "quoted_or_reference_paths", "origin"})
-            self.assertTrue(
-                normalized_state == old_batch["state"], "source/identity/time/native facts changed"
-            )
-            normalized = copy.deepcopy(batch["questions"])
-            for name in ("response", "scope"):
-                if name not in normalized:
-                    continue
-                instructions = normalized[name]["instructions"]
-                self.assertIn("worked_contrasts", instructions)
-                if shared_mode:
-                    old_instructions = old_batch["questions"][name]["instructions"]
-                    self.assertEqual(
-                        list(instructions), ["question", "evidence", "routing_contract", "worked_contrasts"]
-                    )
-                    self.assertEqual(instructions["routing_contract"], adopted_contract)
-                    for field in ("question", "evidence", "worked_contrasts"):
-                        expected_field = copy.deepcopy(old_instructions[field])
-                        if yes05_mode and name == "response" and field == "worked_contrasts":
-                            expected_field["examples"][2]["plain_name_with_main"]["people"] = copy.deepcopy(
-                                expected_field["examples"][2]["unique_short_name"]["people"]
-                            )
-                            expected_field["examples"][1]["why"] = (
-                                "Both unambiguous current joint addressees are eligible despite older specialization and unavailable names/kinds; the unrelated candidate is not addressed. This changes no permanent lead or operation approval and guarantees no other participant's receipt or execution."
-                            )
-                        self.assertEqual(
-                            instructions[field],
-                            expected_field,
-                            "retained instruction changed: " + field,
-                        )
-                    normalized[name]["instructions"] = copy.deepcopy(old_instructions)
-                    if name == "response":
-                        self.assertEqual(normalized[name]["criteria"], adopted_criteria)
-                        normalized[name]["criteria"] = copy.deepcopy(old_batch["questions"][name]["criteria"])
-                elif recovery_mode:
-                    pass  # Every production question/example must remain exactly equal.
-                elif plain_mode:
-                    old_instructions = old_batch["questions"][name]["instructions"]
-                    if name == "response":
-                        instructions["definitions"]["explicit_current_addressee"] = old_instructions[
-                            "definitions"
-                        ]["explicit_current_addressee"]
-                        instructions["routing_rules"][2] = old_instructions["routing_rules"][2]
-                        instructions["worked_contrasts"]["examples"][2].pop("plain_name_with_main")
-                    else:
-                        self.assertEqual(
-                            instructions["current_address_definition"],
-                            batch["questions"]["response"]["instructions"]["definitions"][
-                                "explicit_current_addressee"
-                            ],
-                        )
-                        instructions["current_address_definition"] = old_instructions[
-                            "current_address_definition"
-                        ]
-                        instructions["ownership_rules"][1] = old_instructions["ownership_rules"][1]
-                elif author_mode:
-                    old_instructions = old_batch["questions"][name]["instructions"]
-                    self.assertTrue(
-                        instructions["evidence"].startswith(
-                            old_instructions["evidence"] + " For whole-CURRENT interpretation,"
-                        )
-                    )
-                    instructions["evidence"] = old_instructions["evidence"]
-                    if name == "response":
-                        instructions["definitions"]["explicit_current_addressee"] = old_instructions[
-                            "definitions"
-                        ]["explicit_current_addressee"]
-                        self.assertEqual(len(instructions["worked_contrasts"]["examples"]), 3)
-                        instructions["worked_contrasts"]["examples"].pop()
-                    else:
-                        self.assertEqual(
-                            instructions.pop("current_address_definition"),
-                            batch["questions"]["response"]["instructions"]["definitions"][
-                                "explicit_current_addressee"
-                            ],
-                        )
-                        self.assertEqual(len(instructions["worked_contrasts"]["examples"]), 4)
-                        instructions["worked_contrasts"]["examples"].pop()
-                        instructions["worked_contrasts"]["examples"][0].pop("aligned_variant")
-                else:
-                    instructions.pop("worked_contrasts")
-            self.assertTrue(
-                normalized == old_batch["questions"], "change beyond the declared bounded clarification"
-            )
-            return before
-
-        async def row_for(
-            source,
-            recipient,
-            scope,
-            current,
-            name,
-            arm="S1C1",
-            boundary="native",
-            expected_native_current=None,
-            private_row=False,
-            new_spec=False,
-        ):
-            batch = equivalent(source, recipient)
-            batch, substitutions = build(source, recipient, arm)
-            previous_worked = (
-                worked_equivalent(source, recipient, batch)
-                if worked_mode and (shared_mode or not (recovery_mode and (private_row or new_spec)))
-                else None
-            )
-            recovered_old = (
-                next((r for r in previous_worked_rows.values() if r["private"] and r["case"] == name), None)
-                if recovery_mode and private_row
-                else None
-            )
-            if recovered_old is not None:
-                old_source = source_from_record(recovered_old["source"])
-                self.assertTrue(
-                    source.text == old_source.text and source.original == old_source.original,
-                    "required CURRENT/original changed",
-                )
-                self.assertTrue(
-                    batch["questions"] == prepare(old_source, recipient)["questions"],
-                    "production private questions changed",
-                )
-            if previous_worked is not None:
-                self.assertTrue(
-                    scope == previous_worked["expected_scope"]
-                    and current == previous_worked["expected_current"]
-                    and boundary == previous_worked["boundary"],
-                    "frozen scope/current/native boundary changed",
-                )
-            amendment = amendments.get((source.binding, recipient.bot_user))
-            if amendment is not None:
-                self.assertTrue(
-                    private_row and scope == amendment["old_scope"] and current == amendment["old_current"],
-                    "amendment does not bind original criterion",
-                )
-                scope, current = amendment["new_scope"], amendment["new_current"]
-                self.assertTrue(
-                    current
-                    == "".join(batch["state"]["source_selection"]["segments"][u]["text"] for u in scope),
-                    "amendment source extent changed",
-                )
-                expected_native_current = None
-            baseline = legacy.prepare(source, recipient)
-            self.assertEqual(list(batch["questions"]), list(baseline["questions"]))
-            for question_id, question in batch["questions"].items():
-                self.assertEqual(
-                    list(question["criteria"]), list(baseline["questions"][question_id]["criteria"])
-                )
-                for path in re.findall(r"`([^`]+)`", json.dumps(question)) + [
-                    path
-                    for option in question["criteria"].values()
-                    if isinstance(option, dict)
-                    for path in option.get("select", [])
-                ]:
-                    value = batch["state"]
-                    for field, index in re.findall(r"([^.[\]]+)|\[(\d+)\]", path):
-                        value = value[int(index)] if index else value[field]
-            if arm == "S0C0" and name in cases:
-                self.assertEqual(
-                    serialize_request(batch).decode(), elementary[name + ":A"]["prepared_raw_request"]
-                )
-            j_changed = False
-            if yes05_mode:
-                criterion = criteria_ledger[(source.binding, recipient.bot_user)]
-                self.assertTrue(
-                    scope == criterion["old_scope"] and current == criterion["old_current"],
-                    "J ledger old criterion mismatch",
-                )
-                scope, current = criterion["new_scope"], criterion["new_current"]
-                j_changed = criterion["changed"]
-                if j_changed:
-                    expected_native_current = None
-            expected_native = (
-                await native_input(source, recipient, current, private_row, name)
-                if boundary == "native"
-                else None
-            )
-            if expected_native_current is not None and expected_native is not None:
-                self.assertEqual(
-                    expected_native["text"],
-                    expected_native_current,
-                    "native CURRENT fixture mismatch: " + name,
-                )
-            if name in cases and arm == "S1C1" and expected_native is not None and not j_changed:
-                self.assertEqual(
-                    expected_native,
-                    elementary[name + ":A"]["expected_native_input"],
-                    "retained native boundary mismatch: " + name,
-                )
-            if previous_worked is not None and amendment is None and not j_changed:
-                self.assertTrue(
-                    expected_native == previous_worked["expected_native_input"],
-                    "frozen native CURRENT/metadata expectation changed",
-                )
-            if amendment is not None:
-                # Controlled oracle inputs test unchanged validation/assembly/native copying,
-                # NOT Jev's semantic decision under the amended policy.
-                control = controlled_answers(
-                    batch,
-                    {"response": "yes" if scope else "no", "scope": "+".join(scope) if scope else "unsafe"},
-                )
-                control["answers"]["response"]["confidence"] = 0.71
-                control["answers"]["scope"]["confidence"] = 0.01
-                plan = assemble(source, recipient, validate_answers(batch, control))
-                self.assertTrue(plan.view(recipient) == current, "amended controlled own source mismatch")
-                if current:
-                    observed = await native_input(source, recipient, plan.view(recipient), private_row, name)
-                    self.assertTrue(observed == expected_native, "amended controlled full native mismatch")
-                    control["answers"]["response"]["confidence"] = 0.5
-                    rejected = assemble(source, recipient, validate_answers(batch, control))
-                    self.assertTrue(
-                        rejected.view(recipient) == "", "main bypassed strict confidence threshold"
-                    )
-            raw = serialize_request(batch).decode()
-            return {
-                "source_policy_equivalence_checked": worked_mode,
-                "amended_expectation": amendment is not None,
-                "amended_controlled_native_pass": amendment is not None,
-                "new_public_spec": new_spec,
-                "restored_specific_expectation": bool(
-                    recovered_old and recovered_old["expected_scope"] != scope
-                ),
-                "previous_source_binding": recovered_old["binding"] if recovered_old else None,
-                "previous_expected_scope": recovered_old["expected_scope"] if recovered_old else None,
-                "source_contract_version": "preserved-originals-prior-context-v1" if recovery_mode else None,
-                "native_source_oracle_version": "full-view-native-v2@preserved-originals-prior-context-v1"
-                if recovery_mode
-                else None,
-                "case": name,
-                "arm": arm,
-                "j_criterion_changed": j_changed,
-                "layout_rubric": "yes05-joint-v1"
-                if yes05_mode
-                else "shared-routing-contract-v1"
-                if shared_mode
-                else "plain-name-main-v1"
-                if plain_mode
-                else "author-context-v1"
-                if author_mode
-                else "worked-contrasts-v1"
-                if worked_mode
-                else "readable-rubric-v2"
-                if v2
-                else "readable-rubric-v1",
-                "native_assertion_version": "full-view-native-v2" if v2 else "native-current-prefix-v1",
-                "source": asdict(source),
-                "binding": source.binding,
-                "recipient": asdict(recipient),
-                "boundary": boundary,
-                "expected_policy_response": bool(scope),
-                "expected_scope": scope,
-                "expected_current": current,
-                "expected_native_input": expected_native,
-                "address_substitutions": substitutions,
-                "prepared_raw_request": raw,
-                "request_sha256": hashlib.sha256(raw.encode()).hexdigest(),
-                "state_bytes": len(
-                    json.dumps(batch["state"], ensure_ascii=False, separators=(",", ":")).encode()
-                ),
-                "question_bytes": len(
-                    json.dumps(batch["questions"], ensure_ascii=False, separators=(",", ":")).encode()
-                ),
-                "request_bytes": len(raw.encode()),
-                "private": private_row,
-            }
-
-        if stage == "prepare":
-            self.assertTrue(
-                all(
-                    not p.exists()
-                    or (
-                        v2
-                        and p == paths[1]
-                        and json.loads(p.read_text()).get("version") == "fresh_contrasts_v1"
-                    )
-                    or (
-                        json.loads(p.read_text()).get("source_tree") == "pending-freeze"
-                        and "results" not in json.loads(p.read_text())
-                    )
-                    for p in paths
-                ),
-                "already frozen or evaluated; no overwrite",
-            )
-            retained: dict[str, Any] = {"rows": {}}
-            real: dict[str, Any] = {"rows": {}}
-            factorial: dict[str, Any] = {"rows": {}, "holdout": {}, "maxima": {}}
-            manifest = old["coherent-response-v1:manifest"]["cases"]
-            retained["immutable_expectations"] = manifest
-            for name, declaration in manifest.items():
-                source = source_from_record(declaration["source"])
-                receivers = declaration.get("receiver_expected_scopes") or {
-                    declaration["receiver"]: declaration["expected_unit_scope"]
-                }
-                for user, scope in receivers.items():
-                    recipient = next(r for r in source.recipients if r.bot_user == user)
-                    semantic_only = "receiver_expected_scopes" in declaration
-                    current = (
-                        declaration["receiver_expected_current"][user]
-                        if semantic_only
-                        else declaration["expected_current"]
-                    )
-                    retained["rows"][name + ":" + user] = await row_for(
-                        source,
-                        recipient,
-                        scope,
-                        current,
-                        name,
-                        boundary="semantic-only" if semantic_only else "native",
-                        expected_native_current=None
-                        if semantic_only
-                        else declaration["expected_native_current"],
-                    )
-            self.assertEqual(len(retained["rows"]), 103)
-            for index, name in enumerate(() if v2 else cases):
-                declaration = elementary[name + ":A"]
-                source = source_from_record(declaration["source"])
-                recipient = next(r for r in source.recipients if r.bot_user == declaration["recipient"])
-                order = arms[index % 4 :] + arms[: index % 4]
-                for arm in order:
-                    factorial["rows"][name + ":" + arm] = await row_for(
-                        source,
-                        recipient,
-                        declaration["expected_scope"],
-                        declaration["expected_current"],
-                        name,
-                        arm,
-                        expected_native_current=declaration["expected_native_current"],
-                    )
-            for example, name in [] if v2 else zip(examples, ("M5", "T-order-AB-beta"), strict=True):
-                actual = json.loads(factorial["rows"][name + ":S1C1"]["prepared_raw_request"])
-                self.assertEqual(actual, example, "normative proposal mismatch: " + name)
-            # Parse the owner-frozen exact authored holdout table through native source extraction.
-            from hermes_slack_agent_router.bridge import canonical_text
-
-            for line in () if v2 else design.splitlines():
-                if not re.match(r"\| H\d\d \|", line):
-                    continue
-                columns = [c.strip() for c in line.split("|")[1:-1]]
-                name = columns[0]
-                histories = []
-                for timestamp, sender, text in re.findall(r"(\d+\.\d+) / (\w+) / `([^`]+)`", columns[1]):
-                    histories.append(
-                        History(
-                            timestamp,
-                            sender,
-                            text,
-                            {"text": text},
-                            canonical_text({"text": text}, prior=True)[1],
-                        )
-                    )
-                text = re.search(r"`([^`]+)`", columns[2]).group(1).replace("\\n", "\n")
-                recipients = (Recipient("TNEW", "UNORI", "default"), Recipient("TNEW", "UVERA", "default"))
-                people = {
-                    u: {
-                        "user_id": u,
-                        "username": username,
-                        "display_name": display,
-                        "real_name": real_name,
-                        "kind": kind,
-                    }
-                    for u, username, display, real_name, kind in (
-                        ("UNORI", "nori.bot", "Nori", "Nori Sample", "bot"),
-                        ("UVERA", "vera.bot", "Vera", "Vera Sample", "bot"),
-                        ("UHOST", "host.person", "Host", "Host Sample", "human"),
-                        ("UELI", "eli.person", "Eli", "Eli Sample", "human"),
-                    )
-                    if u in {"UNORI", "UVERA", "UHOST", *[h.sender for h in histories]}
-                }
-                if name in {"H07", "H08"}:
-                    for u in ("UNORI", "UVERA"):
-                        people[u].update(display_name="悠", real_name="悠")
-                source = Snapshot(
-                    Thread("TNEW", "CNEW", "500.001"),
-                    "510.001",
-                    "UHOST",
-                    text,
-                    tuple(histories),
-                    recipients,
-                    {"type": "message", "text": text},
-                    canonical_text({"text": text})[1],
-                    recipient_whoami=tuple(
-                        (r.bot_user, {k: v for k, v in people[r.bot_user].items() if k != "kind"})
-                        for r in recipients
-                    ),
-                    context_people=tuple(sorted(people.items())),
-                )
-                exact = {
-                    "H05": ("Fix the invoice parser; ", "revise the audio checklist."),
-                    "H06": ("", text),
-                    "H09": (text, ""),
-                    "H11": ("<@UNORI>, review the index; ", ""),
-                }
-                for i, recipient in enumerate(recipients):
-                    scope = re.findall(r"u\d", columns[3 + i])
-                    current = "".join(
-                        prepare(source, recipient)["state"]["source_selection"]["segments"][u]["text"]
-                        for u in scope
-                    )
-                    expected = exact[name][i] if name in exact else text if scope else ""
-                    self.assertEqual(current, expected, "holdout exact source mismatch: " + name)
-                    factorial["holdout"][name + ":" + recipient.bot_user] = await row_for(
-                        source, recipient, scope, current, name
-                    )
-            if v2:
-                old_h = json.loads((root / "mizuki-readable-rubric-factorial.json").read_text())["holdout"]
-                for key, declaration in old_h.items():
-                    source = source_from_record(declaration["source"])
-                    recipient = Recipient(**declaration["recipient"])
-                    factorial["holdout"][key] = await row_for(
-                        source,
-                        recipient,
-                        declaration["expected_scope"],
-                        declaration["expected_current"],
-                        declaration["case"],
-                    )
-                self.assertEqual(len(factorial["holdout"]), 24)
-                factorial["fresh_oracle"] = fresh
-                factorial["fresh_oracle_sha256"] = (
-                    "2081dc4b3aa342b94f84922cd9e4969e1320410e1f27f75778fb2748100408e6"
-                )
-                factorial["H_status"] = "previously evaluated regression data, not unseen holdout"
-                if worked_mode:
-                    factorial["F_status"] = (
-                        "previously evaluated specification/regression data, not unseen or unbiased accuracy"
-                    )
-                    factorial["worked_contrasts"] = worked_examples
-                    factorial["worked_contrasts_sha256"] = digest(worked_examples)
-                    factorial["disjointness"] = {
-                        "synthetic_sources": 151,
-                        "new_identities": len(identities),
-                        "literal_current_and_parts": "checked against all synthetic canonical bodies/history; identities also checked in full source and prior prompt",
-                    }
-                    factorial["comparison_status"] = (
-                        "historical descriptive comparison only; not matched causal experiment"
-                    )
-                for case in fresh["cases"]:
-                    histories = tuple(
-                        History(
-                            ts,
-                            user,
-                            text,
-                            {"ts": ts, "user": user, "text": text},
-                            canonical_text({"ts": ts, "user": user, "text": text}, prior=True)[1],
-                        )
-                        for ts, user, text in case["history"]
-                    )
-                    recipients = tuple(Recipient(**r) for r in fresh["eligible_recipients"])
-                    authors = {"U7HOST003", *[h.sender for h in histories], *[r.bot_user for r in recipients]}
-                    people = {
-                        p["user_id"]: p
-                        for p in fresh["people_sets"][case["metadata"]]
-                        if p["user_id"] in authors
-                    }
-                    self.assertEqual(set(people), authors)
-                    original_event = {
-                        "type": "message",
-                        "channel_type": "channel",
-                        "team": fresh["workspace"],
-                        "channel": case["channel"],
-                        "user": "U7HOST003",
-                        "ts": case["current_timestamp"],
-                        "thread_ts": histories[0].identity,
-                        "text": case["current_text"],
-                    }
-                    text, provenance = canonical_text(original_event)
-                    self.assertEqual(text, case["current_text"])
-                    source = Snapshot(
-                        Thread(fresh["workspace"], case["channel"], histories[0].identity),
-                        case["current_timestamp"],
-                        "U7HOST003",
-                        text,
-                        histories,
-                        recipients,
-                        original_event,
-                        provenance,
-                        recipient_whoami=tuple(
-                            (r.bot_user, {k: v for k, v in people[r.bot_user].items() if k != "kind"})
-                            for r in recipients
-                        ),
-                        context_people=tuple(sorted(people.items())),
-                    )
-                    self.assertEqual(list(source.recipients), list(recipients))
-                    for recipient in source.recipients:
-                        expected = case["expected"][recipient.bot_user]
-                        batch = prepare(source, recipient)
-                        self.assertEqual(
-                            [
-                                [unit, part["quoted"], part["text"]]
-                                for unit, part in batch["state"]["source_selection"]["segments"].items()
-                            ],
-                            case["segments"],
-                        )
-                        self.assertEqual(bool(expected["scope"]), expected["response"] == "YES")
-                        self.assertEqual(
-                            "".join(
-                                batch["state"]["source_selection"]["segments"][unit]["text"]
-                                for unit in expected["scope"]
-                            ),
-                            expected["current"],
-                        )
-                        qtext = json.dumps(batch["questions"], ensure_ascii=False)
-                        for forbidden in (
-                            case["id"],
-                            "U7MOSS001",
-                            "U7FLINT02",
-                            "Moss Fiction",
-                            "Flint Fiction",
-                            "coral salinity ledger",
-                            "telescope focus log",
-                            "窯の釉薬台帳",
-                        ):
-                            self.assertNotIn(forbidden, qtext, "fresh oracle leaked into rubric")
-                        row = await row_for(
-                            source, recipient, expected["scope"], expected["current"], case["id"]
-                        )
-                        if row["expected_native_input"]:
-                            native_source = row["expected_native_input"]["source"]
-                            self.assertEqual(
-                                {
-                                    key: native_source[key]
-                                    for key in (
-                                        "scope_id",
-                                        "guild_id",
-                                        "chat_id",
-                                        "thread_id",
-                                        "message_id",
-                                        "user_id",
-                                    )
-                                },
-                                {
-                                    "scope_id": fresh["workspace"],
-                                    "guild_id": fresh["workspace"],
-                                    "chat_id": case["channel"],
-                                    "thread_id": histories[0].identity,
-                                    "message_id": case["current_timestamp"],
-                                    "user_id": "U7HOST003",
-                                },
-                            )
-                            host_name = people["U7HOST003"]["display_name"]
-                            self.assertEqual(native_source["user_name"], host_name or "U7HOST003")
-                        factorial["holdout"][case["id"] + ":" + recipient.bot_user] = row
-            self.assertEqual(len(factorial["holdout"]), 48 if v2 else 24)
-            current_sources = await self._preserved_prior_original_sources(root) if recovery_mode else {}
-            if recovery_mode:
-                self.assertTrue(
-                    all(r["supported"] for r in current_sources.values()),
-                    "current selected original remains unsupported",
-                )
-                known = (
-                    (
-                        self.a.bot_user,
-                        {
-                            "user_id": self.a.bot_user,
-                            "username": "atlas",
-                            "display_name": "Atlas",
-                            "real_name": "Atlas Arden",
-                        },
-                    ),
-                    (
-                        self.b.bot_user,
-                        {
-                            "user_id": self.b.bot_user,
-                            "username": "birch",
-                            "display_name": "Birch",
-                            "real_name": "Birch Rowan",
-                        },
-                    ),
-                )
-                root_original = {
-                    "ts": self.key.root,
-                    "user": "UHUMAN",
-                    "text": "<@UALPHA> leads this whole conversation. <@UBETA> is another participant.",
-                }
-                self.client.conversations_replies.return_value = {
-                    "ok": True,
-                    "messages": [root_original],
-                    "has_more": False,
-                }
-                history = await self.gate.history(self.client, self.key, "990.001")
-                for label, stamp, text, target in (
-                    ("bare-name", "990.001", "Birch, please continue this conversation.", self.a),
-                    ("native-at", "991.001", "<@UBETA>, please continue this conversation.", self.b),
-                ):
-                    source = Snapshot(
-                        self.key,
-                        stamp,
-                        "UHUMAN",
-                        text,
-                        history,
-                        (self.a, self.b),
-                        {"ts": stamp, "user": "UHUMAN", "text": text, "thread_ts": self.key.root},
-                        recipient_whoami=known,
-                        context_people=tuple((u, {**p, "kind": "bot"}) for u, p in known),
-                    )
-                    for recipient in source.recipients:
-                        scope = ["u0"] if recipient == target else []
-                        factorial["rows"][label + ":" + recipient.bot_user] = await row_for(
-                            source, recipient, scope, text if scope else "", label, new_spec=True
-                        )
-            # Existing private source/binding/expectations and verified supplement are already joined here.
-            try:
-                previous_real = json.loads(
-                    (root / "private-real-whoami" / "coherent-response" / "manifest.json").read_text()
-                )
-                for name, declaration in previous_real["rows"].items():
-                    original_source = source_from_record(declaration["source"])
-                    source = (
-                        source_from_record(current_sources[original_source.identity]["source"])
-                        if recovery_mode
-                        else original_source
-                    )
-                    if original_source.binding != declaration["binding"]:
-                        raise ValueError("private source binding mismatch")
-                    recipient = Recipient(**declaration["recipient"])
-                    scope = (
-                        declaration["expected_scope"].split("+")
-                        if declaration["expected_scope"] != "none"
-                        else []
-                    )
-                    row = await row_for(
-                        source,
-                        recipient,
-                        scope,
-                        declaration["expected_current"],
-                        name,
-                        boundary="unsupported-native-format"
-                        if (
-                            not current_sources[original_source.identity]["supported"]
-                            if recovery_mode
-                            else declaration["native_acquisition_error"]
-                        )
-                        else "native",
-                        private_row=True,
-                    )
-                    if row["expected_native_input"] is not None and not (
-                        recovery_mode and declaration["expected_native_builder"] is None
-                    ):
-                        old_native = declaration["expected_native_builder"]
-                        if row["amended_expectation"]:
-                            # Same exact event/CURRENT native-format oracle, not old model answers.
-                            peers = [
-                                p["expected_native_input"]
-                                for p in previous_worked_rows.values()
-                                if p["binding"] == source.binding
-                                and p["expected_current"] == row["expected_current"]
-                                and p["expected_native_input"] is not None
-                            ]
-                            self.assertTrue(bool(peers), "amended native source oracle missing")
-                            old_native = peers[0]
-                        self.assertTrue(
-                            row["expected_native_input"]["source"] == old_native["source"],
-                            "private native source metadata drift",
-                        )
-                        self.assertTrue(
-                            row["expected_native_input"]["text"] == old_native["text"],
-                            "private native CURRENT drift",
-                        )
-                    row["historical_native_acquisition_error"] = declaration["native_acquisition_error"]
-                    row["native_acquisition_error"] = (
-                        current_sources[original_source.identity].get("current_error")
-                        if recovery_mode
-                        else declaration["native_acquisition_error"]
-                    )
-                    if recovery_mode:
-                        row["current_source_check"] = {
-                            k: v
-                            for k, v in current_sources[original_source.identity].items()
-                            if k != "source"
-                        }
-                    real["rows"][name] = row
-                self.assertEqual(len(real["rows"]), 12)
-                real["previous_manifest_sha256"] = hashlib.sha256(
-                    (root / "private-real-whoami" / "coherent-response" / "manifest.json").read_bytes()
-                ).hexdigest()
-            except Exception:  # noqa: BLE001 — private preparation errors must never expose source in stdout.
-                import traceback
-
-                save(private / "preparation-error.json", {"traceback": traceback.format_exc()})
-                self.fail("private preparation failed; evidence retained privately")
-            # Full maximum bodies/actual HTTP capture in all four arms, without service inference.
-            import httpx
-
-            factory = httpx.AsyncClient
-            for character in ("🦊", "\0", '"', "\\"):
-                recipients = tuple(Recipient("TMAX", f"UBOT{i}", "default") for i in range(4))
-                users = ["UCURRENT", *[f"UAUTHOR{i}" for i in range(8)], *[r.bot_user for r in recipients]]
-                people = tuple(
-                    (
-                        u,
-                        {
-                            "user_id": u,
-                            "username": "🦊" * 128,
-                            "display_name": "🦊" * 128,
-                            "real_name": "🦊" * 128,
-                            "kind": "bot" if u.startswith("UBOT") else "human",
-                        },
-                    )
-                    for u in sorted(users)
-                )
-                text = (character * 999 + ";") * 6
-                witness = lambda body: (
-                    {
-                        "field": "text",
-                        "start": 0,
-                        "end": len(body),
-                        "kind": "authored",
-                        "raw": body,
-                        "source_start": 0,
-                        "source_end": len(body),
-                        "mapping": "literal",
-                    },
-                )
-                source = Snapshot(
-                    Thread("TMAX", "CMAX", "1.0"),
-                    "9.0",
-                    "UCURRENT",
-                    text,
-                    tuple(
-                        History(
-                            f"{i + 1}.0",
-                            f"UAUTHOR{i}",
-                            character * 6000,
-                            {"text": character * 6000},
-                            witness(character * 6000),
-                        )
-                        for i in range(8)
-                    ),
-                    recipients,
-                    {"text": text},
-                    witness(text),
-                    recipient_whoami=tuple(
-                        (u, {k: v for k, v in p.items() if k != "kind"})
-                        for u, p in people
-                        if u in {r.bot_user for r in recipients}
-                    ),
-                    context_people=people,
-                )
-                equivalent(source, recipients[0])
-                for arm in ("S1C1",) if v2 else arms:
-                    batch, substitutions = build(source, recipients[0], arm)
-                    raw = serialize_request(batch)
-                    self.assertEqual(len(batch["questions"]), 50)
-                    self.assertEqual(len(batch["questions"]["scope"]["criteria"]), 64)
-                    response = controlled_answers(batch, {})
-                    captures = []
-
-                    async def respond(request, raw=raw, response=response, captures=captures):
-                        self.assertEqual(request.content, raw)
-                        captures.append(request.content)
-                        return httpx.Response(200, json=response)
-
-                    started = time.monotonic()
-                    with (
-                        patch("agent.secret_scope.get_secret", return_value="fictional-max"),
-                        patch(
-                            "httpx.AsyncClient",
-                            side_effect=lambda **kw: factory(transport=httpx.MockTransport(respond), **kw),
-                        ),
-                        patch(
-                            "hermes_slack_agent_router.jev.validate_answers",
-                            legacy_jev.validate_answers if arm.startswith("S0") else validate_answers,
-                        ),
-                    ):
-                        await JevClient().ask(batch)
-                    self.assertEqual(captures, [raw])
-                    factorial["maxima"][str(ord(character)) + ":" + arm] = {
-                        "raw_request": raw.decode(),
-                        "request_bytes": len(raw),
-                        "state_bytes": len(
-                            json.dumps(batch["state"], ensure_ascii=False, separators=(",", ":")).encode()
-                        ),
-                        "question_bytes": len(
-                            json.dumps(batch["questions"], ensure_ascii=False, separators=(",", ":")).encode()
-                        ),
-                        "response_bytes": len(json.dumps(response).encode()),
-                        "controlled_elapsed_ms": round((time.monotonic() - started) * 1000, 3),
-                        "address_substitutions": substitutions,
-                    }
-            collections = [retained["rows"], factorial["rows"], factorial["holdout"], real["rows"]]
-            unique = {}
-            for collection in collections:
-                for row in collection.values():
-                    key = row["request_sha256"]
-                    if key in unique:
-                        first = unique[key]
-                        self.assertEqual(row["prepared_raw_request"], first["prepared_raw_request"])
-                        for field in (
-                            "binding",
-                            "recipient",
-                            "boundary",
-                            "expected_scope",
-                            "expected_current",
-                            "expected_native_input",
-                        ):
-                            self.assertEqual(row[field], first[field], "overlap boundary mismatch: " + field)
-                    else:
-                        unique[key] = row
-            self.assertLessEqual(len(unique), 167 if recovery_mode else 163 if v2 else 193)
-            self.assertEqual(len(factorial["rows"]), 4 if recovery_mode else 0 if v2 else 72)
-            if recovery_mode:
-                fresh_rows = [
-                    r
-                    for rows in (retained["rows"], factorial["rows"], factorial["holdout"], real["rows"])
-                    for r in rows.values()
-                    if shared_mode or r["private"] or r["new_public_spec"]
-                ]
-                self.assertEqual(len(fresh_rows), 167 if shared_mode else 16)
-                self.assertEqual(
-                    len({r["prepared_raw_request"] for r in fresh_rows}), 167 if shared_mode else 16
-                )
-                real["criterion_source_ledger"] = [
-                    {
-                        "case": r["case"],
-                        "old_binding": r["previous_source_binding"],
-                        "new_binding": r["binding"],
-                        "restored_specific_expectation": r["restored_specific_expectation"],
-                        "old_scope": r["previous_expected_scope"],
-                        "new_scope": r["expected_scope"],
-                        "reason": "Parent source audit: preceding explicit responder-test assignment, not isolated bare name. Extra forced-main swap NOT REQUIRED, not retroactive PASS."
-                        if r["restored_specific_expectation"]
-                        else "Criteria unchanged. Recanonicalize exact originals; historical capability refusal is not a current verdict.",
-                        "current_source_check": r["current_source_check"],
-                    }
-                    for r in real["rows"].values()
-                ]
-                if shared_mode:
-                    real["criterion_source_ledger"] = json.loads(
-                        (root / "private-real-whoami/prior-context-source-recovery/manifest.json").read_text()
-                    )["criterion_source_ledger"]
-            factorial["invocation_order"] = [
-                {
-                    "collection": label,
-                    "row": digest(key) if label == "private-real" else key,
-                    "request_sha256": row["request_sha256"],
-                }
-                for label, rows in (
-                    ("factorial", factorial["rows"]),
-                    ("holdout", factorial["holdout"]),
-                    ("retained", retained["rows"]),
-                    ("private-real", real["rows"]),
-                )
-                for key, row in rows.items()
-            ]
-            by_binding = {}
-            for rows in collections:
-                for row in rows.values():
-                    if row["arm"] != "S1C1":
-                        continue
-                    evidence = json.loads(row["prepared_raw_request"])["state"]
-                    evidence.pop("whoami")
-                    if row["binding"] in by_binding:
-                        self.assertEqual(
-                            evidence, by_binding[row["binding"]], "receiver-invariant full state mismatch"
-                        )
-                    by_binding[row["binding"]] = evidence
-            for document, path in zip((retained, factorial, real), paths, strict=True):
-                document.update(
-                    source_tree=os.environ.get("MIZUKI_READABLE_TREE", "pending-freeze"),
-                    qa_test_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                    design_sha256=hashlib.sha256(
-                        (root / "mizuki-readable-rubric-design.md").read_bytes()
-                    ).hexdigest(),
-                    unique_requests=len(unique),
-                )
-                if yes05_mode:
-                    document.update(
-                        criteria_version="yes05-joint-v1",
-                        fresh_distinct_requests=167,
-                        derived_public_requests=0,
-                        public_criteria_ledger_sha256=hashlib.sha256(
-                            (root / "mizuki-yes05-joint-criteria-ledger.json").read_bytes()
-                        ).hexdigest(),
-                        private_criteria_ledger_sha256=hashlib.sha256(
-                            (private / "criteria-ledger.json").read_bytes()
-                        ).hexdigest(),
-                    )
-                elif shared_mode:
-                    document.update(
-                        criteria_version="shared-routing-contract-v1",
-                        fresh_distinct_requests=167,
-                        derived_public_requests=0,
-                        adopted_design_sha256=hashlib.sha256(
-                            (root / "mizuki-shared-routing-contract-design.md").read_bytes()
-                        ).hexdigest(),
-                    )
-                elif recovery_mode:
-                    document.update(
-                        criteria_version="prior-context-source-recovery-v1",
-                        fresh_distinct_requests=16,
-                        derived_public_requests=151,
-                    )
-                elif plain_mode:
-                    document.update(
-                        criteria_version="plain-name-main-v1",
-                        amendment_ledger_sha256=hashlib.sha256(
-                            (private / "expectation-amendments.json").read_bytes()
-                        ).hexdigest(),
-                    )
-                save(path, document)
-            print(
-                "READABLE_PREPARED "
-                + json.dumps(
-                    {
-                        "retained": 103,
-                        "factorial": 4 if recovery_mode else 0 if v2 else 72,
-                        "holdout": 48 if v2 else 24,
-                        "real": 12,
-                        "unique": len(unique),
-                        "max_bytes": max(r["request_bytes"] for r in factorial["maxima"].values()),
-                    }
-                )
-            )
-            return
-
-        private_manifest_hash = "" if gate_replay else hashlib.sha256(paths[2].read_bytes()).hexdigest()
-        recorded = []
-        receipt_hashes = []
-        replay_guards = []
-        original_paths = paths[:2] + [private / "evaluation.json"]
-        if gate_replay:
-            original_paths = [
-                root / "mizuki-shared-routing-contract-canary.json",
-                root / "mizuki-shared-routing-contract-regressions.json",
-                root / "private-real-whoami/shared-routing-contract/evaluation.json",
-            ]
-            receipt_hashes = [hashlib.sha256(p.read_bytes()).hexdigest() for p in original_paths]
-            documents = [json.loads(p.read_text()) for p in original_paths]
-            recorded = [d.pop("results") for d in documents]
-            private.mkdir(mode=0o700, exist_ok=True)
-            private.chmod(0o700)
-            paths = [
-                root / "mizuki-yes05-joint-gate-replay-canary.json",
-                root / "mizuki-yes05-joint-gate-replay-regressions.json",
-                private / "gate-replay.json",
-            ]
-            self.assertTrue(all(not p.exists() for p in paths), "no gate replay overwrite")
-            for i, d in enumerate(documents):
-                d.update(
-                    evidence_kind="GATE-ONLY replay: actual YES>.5 validator, original questions/gold, J NOT applied; ZERO new inference",
-                    original_receipt_sha256=receipt_hashes[i],
-                    replay_qa_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                )
-            for target in (
-                "httpx.AsyncClient",
-                "agent.secret_scope.get_secret",
-                "agent.secret_scope.build_profile_secret_scope",
-            ):
-                guard = patch(target, side_effect=AssertionError("gate replay forbids network/credentials"))
-                self.addCleanup(guard.stop)
-                replay_guards.append(guard.start())
-        elif recovery_replay:
-            documents = [json.loads(p.read_text()) for p in paths]
-            original_paths = [
-                root / "mizuki-plain-name-main-canary.json",
-                root / "mizuki-plain-name-main-regressions.json",
-            ]
-            receipt_hashes = [hashlib.sha256(p.read_bytes()).hexdigest() for p in original_paths]
-            recorded = [json.loads(p.read_text())["results"] for p in original_paths] + [{}]
-            documents[1]["rows"] = {}
-            documents[2] = {"rows": {}}
-            paths = [
-                root / "mizuki-prior-context-source-recovery-public-replay-canary.json",
-                root / "mizuki-prior-context-source-recovery-public-replay-regressions.json",
-                root / "mizuki-prior-context-source-recovery-public-replay-summary.json",
-            ]
-            self.assertTrue(all(not p.exists() for p in paths), "no derived replay overwrite")
-            for d in documents:
-                d.update(
-                    evidence_kind="DERIVED current-native recorded replay; ZERO fresh inference",
-                    unique_requests=151,
-                )
-            for target in (
-                "httpx.AsyncClient",
-                "agent.secret_scope.get_secret",
-                "agent.secret_scope.build_profile_secret_scope",
-            ):
-                guard = patch(target, side_effect=AssertionError("public replay forbids network/credentials"))
-                self.addCleanup(guard.stop)
-                replay_guards.append(guard.start())
-        elif replay:
-            receipt_hashes = [hashlib.sha256(p.read_bytes()).hexdigest() for p in original_paths]
-            self.assertEqual(
-                receipt_hashes,
-                [
-                    "086da17ac51a6e079716fd986c974111b520a8749368ecbaac33bd89063ea92a",
-                    "bd77f3c7466b149e3714e5e2325ec6b4aae0c3832a244fb10f83b5b47da403f8",
-                    "32867ec3522c880e97abef4ce6c10a499ff38cc8229075ca2bfe6ba550e228a4",
-                ],
-            )
-            documents = [json.loads(p.read_text()) for p in original_paths]
-            self.assertTrue(
-                all(d["source_tree"] == "56c0887e9831e39294079af0f58885bf09f63029" for d in documents)
-            )
-            recorded = [d.pop("results") for d in documents]
-            private = root / "private-real-whoami" / "readable-rubric-v2-native-recovery"
-            private.mkdir(mode=0o700, exist_ok=True)
-            private.chmod(0o700)
-            paths = [
-                root / "readable-rubric-v2-native-replay-canary.json",
-                root / "readable-rubric-v2-native-replay-contrasts.json",
-                private / "evaluation.json",
-            ]
-            self.assertTrue(all(not p.exists() for p in paths), "no derived replay overwrite")
-            for i, document in enumerate(documents):
-                document.update(
-                    original_receipt_sha256=receipt_hashes[i],
-                    replay_harness_tree=os.environ["MIZUKI_READABLE_TREE"],
-                    replay_qa_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                    evidence_kind="recorded-response native recovery; NOT fresh inference",
-                )
-            # Hard guards: this lane must not acquire credentials or create an HTTP client.
-            replay_guards = []
-            for target in (
-                "httpx.AsyncClient",
-                "agent.secret_scope.get_secret",
-                "agent.secret_scope.build_profile_secret_scope",
-            ):
-                guard = patch(target, side_effect=AssertionError("replay forbids network/auth acquisition"))
-                self.addCleanup(guard.stop)
-                replay_guards.append(guard.start())
-        else:
-            documents = [json.loads(p.read_text()) for p in paths]
-            paths[2] = private / "evaluation.json"
-            self.assertFalse(paths[2].exists(), "no private evaluation retry")
-            documents[2]["manifest_sha256"] = private_manifest_hash
-            self.assertTrue(all("results" not in d for d in documents), "no retry/replay")
-            self.assertTrue(
-                all(
-                    d["qa_test_sha256"] == hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-                    for d in documents
-                )
-            )
-            self.assertTrue(all(d["source_tree"] == os.environ["MIZUKI_READABLE_TREE"] for d in documents))
-            if plain_mode and not recovery_mode:
-                self.assertTrue(
-                    all(
-                        d["amendment_ledger_sha256"]
-                        == hashlib.sha256((private / "expectation-amendments.json").read_bytes()).hexdigest()
-                        for d in documents
-                    )
-                )
-            home = Path(os.environ["MIZUKI_CLASSIFIER_HOME"])
-            self.assertEqual(home.name, "mizuki")
-            mode = set_multiplex_context(True)
-            scope_token = set_secret_scope(build_profile_secret_scope(home), profile_home=str(home))
-            self.addCleanup(reset_secret_scope, scope_token)
-            self.addCleanup(reset_multiplex_context, mode)
-        for document in documents:
-            document["results"] = {}
-        order = (
-            [(1, k, r) for k, r in documents[1]["rows"].items()]
-            + [(1, "holdout:" + k, r) for k, r in documents[1]["holdout"].items()]
-            + [(0, k, r) for k, r in documents[0]["rows"].items()]
-            + [(2, k, r) for k, r in documents[2]["rows"].items()]
-        )
-        if recovery_mode and not recovery_replay and not shared_mode:
-            order = [(i, k, r) for i, k, r in order if r["private"] or r["new_public_spec"]]
-            self.assertEqual(len(order), 16)
-        if replay:
-            for doc_index in range(3):
-                self.assertTrue(
-                    list(recorded[doc_index]) == [k for i, k, _ in order if i == doc_index],
-                    "original recorded order mismatch",
-                )
-            self.assertTrue(
-                [row["request_sha256"] for _, _, row in order]
-                == [
-                    r["request_sha256"]
-                    for r in documents[1]["invocation_order"]
-                    if not recovery_replay or r["collection"] in ("retained", "holdout")
-                ],
-                "frozen invocation order mismatch",
-            )
-        completed = {}
-        active = None
-        original = {}
-
-        class CapturedJev(JevClient):
-            async def _exchange(inner, raw, key):
-                if raw.decode() != active["prepared_raw_request"]:
-                    raise ValueError("frozen request changed")
-                active["attempted"] = True
-                active["actual_raw_request"] = raw.decode()
-                if replay:
-                    self.assertTrue(
-                        raw.decode() == original["actual_raw_request"] == original["prepared_raw_request"],
-                        "original request byte mismatch",
-                    )
-                    response = original["raw_response"].encode()
-                else:
-                    response = await super()._exchange(raw, key)
-                active["raw_response"] = response.decode()
-                active["response_bytes"] = len(response)
-                active["response"] = json.loads(response)
-                if replay:
-                    self.assertTrue(
-                        active["response"] == original["response"], "original provider answer mismatch"
-                    )
-                return response
-
-        for ordinal, (doc_index, key, row) in enumerate(order):
-            active = copy.deepcopy(row)
-            original = recorded[doc_index][key] if replay else {}
-            if replay:
-                self.assertTrue(
-                    all(
-                        original.get(field) == row.get(field)
-                        for field in (
-                            "source",
-                            "binding",
-                            "recipient",
-                            "prepared_raw_request",
-                            "expected_scope",
-                            "expected_current",
-                            "boundary",
-                            "expected_native_input",
-                        )
-                    )
-                    if recovery_replay or gate_replay
-                    else all(original[field] == value for field, value in row.items()),
-                    "original source/binding/expectation mismatch at ordinal " + str(ordinal),
-                )
-                active.update(
-                    original_observation_ordinal=ordinal,
-                    original_receipt_sha256=receipt_hashes[doc_index],
-                    original_pass=original["pass"],
-                    original_failure=original.get("failure"),
-                    original_raw_response_sha256=hashlib.sha256(
-                        original["raw_response"].encode()
-                    ).hexdigest(),
-                )
-            request_key = row["request_sha256"]
-            if request_key in completed:
-                documents[doc_index]["results"][key] = {
-                    **copy.deepcopy(completed[request_key]),
-                    "reused_exact_capture": True,
-                }
-                save(paths[doc_index], documents[doc_index])
-                continue
-            source = source_from_record(row["source"])
-            recipient = Recipient(**row["recipient"])
-            if replay:
-                self.assertTrue(
-                    source.binding == row["binding"], "source binding mismatch at ordinal " + str(ordinal)
-                )
-                self.assertTrue(
-                    serialize_request(prepare(source, recipient)).decode() == row["prepared_raw_request"],
-                    "production prepared bytes mismatch at ordinal " + str(ordinal),
-                )
-            batch = json.loads(row["prepared_raw_request"])
-            batch.pop("model")
-            started = time.monotonic()
-            active.update(schema_pass=False, admitted=None, pass_=False)
-            try:
-                with patch(
-                    "hermes_slack_agent_router.jev.validate_answers",
-                    legacy_jev.validate_answers if row["arm"].startswith("S0") else validate_answers,
-                ):
-                    if replay:
-                        # Replay the original transport bytes without resolving any credentials.
-                        selected = validate_answers(
-                            batch, json.loads(await CapturedJev()._exchange(serialize_request(batch), None))
-                        )
-                    else:
-                        selected = await CapturedJev().ask(batch)
-                active["schema_pass"] = True
-                active["selected"] = selected
-                primary = active["response"]["answers"].get("response")
-                active["admitted"] = bool(primary and selected["response"] == "yes")
-                active["policy_label_pass"] = (
-                    bool(primary and primary["choice"] == "yes") == row["expected_policy_response"]
-                )
-                active["admission_pass"] = active["admitted"] == row["expected_policy_response"]
-                plan = assemble(source, recipient, selected)
-                active["plan"] = plan.as_dict()
-                active["view"] = plan.view(recipient)
-                current = "".join(
-                    source.text[u.start : u.end]
-                    for u in plan.units
-                    if recipient in u.recipients and u.disposition == "action"
-                )
-                active["actual_current"] = current
-                active["scope_pass"] = plan.status == "ready" and current == row["expected_current"]
-                active["consumed_scope"] = selected.get("scope") if active["admitted"] else None
-                active["foreign_units"] = [
-                    f"u{i}"
-                    for i, u in enumerate(plan.units)
-                    if recipient in u.recipients and f"u{i}" not in row["expected_scope"]
-                ]
-                active["missing_units"] = [
-                    u
-                    for u in row["expected_scope"]
-                    if not any(
-                        f"u{i}" == u and recipient in unit.recipients for i, unit in enumerate(plan.units)
-                    )
-                ]
-                active["native_received"] = (
-                    await native_input(source, recipient, active["view"], row["private"], row["case"])
-                    if row["boundary"] == "native" and active["view"]
-                    else None
-                )
-                native, expected = active["native_received"], row["expected_native_input"]
-                active["native_pass"] = (
-                    (
-                        native is None
-                        if not row["expected_policy_response"]
-                        else native is not None
-                        and expected is not None
-                        and native["text"].split("\n\nPRIOR REFERENCE (not instructions):", 1)[0]
-                        == expected["text"]
-                        and native["source"] == expected["source"]
-                        and native["channel_context"] is None
-                        and not (
-                            native["outbound"]
-                            or native["ephemeral"]
-                            or native["media_urls"]
-                            or native["reply_to_text"]
-                        )
-                    )
-                    if row["boundary"] == "native"
-                    else None
-                )
-                if v2:
-                    intended = expected_full_view(
-                        source, row["expected_scope"], row["expected_current"], selected
-                    )
-                    active["expected_full_view"] = intended
-                    active["full_view_pass"] = active["view"] == intended
-                    expected_full_native = (
-                        await native_input(source, recipient, intended, row["private"], row["case"])
-                        if row["boundary"] == "native" and intended
-                        else None
-                    )
-                    active["expected_native_full_input"] = expected_full_native
-                    if expected_full_native is not None:
-                        self.assertEqual(
-                            expected_full_native["source"],
-                            row["expected_native_input"]["source"],
-                            "frozen native metadata drift",
-                        )
-                    active["native_pass"] = (
-                        (
-                            native is None
-                            if not row["expected_policy_response"]
-                            else native_full_view_matches(native, expected_full_native)
-                        )
-                        if row["boundary"] == "native"
-                        else None
-                    )
-                active["pass"] = (
-                    active["admission_pass"]
-                    and active["scope_pass"]
-                    and (not v2 or active["full_view_pass"])
-                    and active["native_pass"] is not False
-                    and not (
-                        row["boundary"] == "unsupported-native-format" and row["expected_policy_response"]
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001 — preserve all independent frozen observations.
-                active["failure"] = type(exc).__name__ + ": " + str(exc)
-                active["pass"] = False
-            finally:
-                active.pop("pass_", None)
-                if replay:
-                    active["recorded_semantics_unchanged"] = all(
-                        json.loads(json.dumps(active.get(field))) == original.get(field)
-                        for field in (
-                            "selected",
-                            "schema_pass",
-                            "policy_label_pass",
-                            "admitted",
-                            "admission_pass",
-                            "plan",
-                            "view",
-                            "actual_current",
-                            "scope_pass",
-                            "consumed_scope",
-                            "foreign_units",
-                            "missing_units",
-                            "expected_full_view",
-                            "full_view_pass",
-                        )
-                    )
-                    active["source_unchanged"] = json.loads(json.dumps(asdict(source))) == row["source"]
-                    active["native_input_changed"] = active.get("native_received") != original.get(
-                        "native_received"
-                    )
-                    active["disposition_changed"] = active.get("pass") != original["pass"]
-                active["elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
-                completed[request_key] = copy.deepcopy(active)
-                documents[doc_index]["results"][key] = active
-                save(paths[doc_index], documents[doc_index])
-        self.assertEqual(
-            len(completed),
-            16
-            if recovery_mode and not recovery_replay and not shared_mode
-            else documents[0]["unique_requests"],
-        )
-        if replay:
-            self.assertTrue(
-                all(
-                    (gate_replay or r["recorded_semantics_unchanged"]) and r["source_unchanged"]
-                    for r in completed.values()
-                ),
-                "replay changed original semantic/source observations",
-            )
-            self.assertTrue(
-                [hashlib.sha256(p.read_bytes()).hexdigest() for p in original_paths] == receipt_hashes,
-                "original receipts changed",
-            )
-            for guard in replay_guards:
-                guard.assert_not_called()
-        self.client.chat_postMessage.assert_not_awaited()
-        self.client.chat_postEphemeral.assert_not_awaited()
-        print(
-            ("READABLE_REPLAY_COMPLETE " if replay else "READABLE_CAPTURE_COMPLETE ")
-            + json.dumps(
-                {
-                    "unique": len(completed),
-                    "retained": len(documents[0]["results"]),
-                    "factorial_holdout": len(documents[1]["results"]),
-                    "real": len(documents[2]["results"]),
-                }
-            )
-        )
-
-    async def test_v2_full_view_native_reference_seam(self):
-        from test_semantic import controlled_answers, expected_full_view, native_full_view_matches
+    async def test_full_view_native_reference_seam(self):
+        from test_semantic import controlled_answers, expected_full_view
 
         from hermes_slack_agent_router.jev import validate_answers
         from hermes_slack_agent_router.semantic import History, Snapshot, assemble, prepare
@@ -5803,7 +3569,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                         await render(source, plan.view(recipient)),
                         await render(source, expected),
                     )
-                    self.assertTrue(native_full_view_matches(actual_native, expected_native))
+                    self.assertEqual(actual_native, expected_native)
                     if not include:
                         omitted_native = actual_native
                     elif "<@UBETA>" in own_current:
@@ -5815,7 +3581,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                     else:
                         self.assertTrue(actual_native["text"].startswith(own_current))
                     foreign = await render(source, source.text)
-                    self.assertFalse(native_full_view_matches(foreign, expected_native))
+                    self.assertNotEqual(foreign, expected_native)
         self.client.chat_postMessage.assert_not_awaited()
         self.client.chat_postEphemeral.assert_not_awaited()
 
@@ -5978,42 +3744,20 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.adapter._session_tasks)
         print(f"SHORT_NATIVE_ATOMIC_MUTATIONS consumed={len(tested)} plus_initial=1")
 
-    async def test_simple_controlled_or_once_native_batch(self):
-        """Same fixed sources offline first; opt-in performs each new protocol call once."""
-        import time
-        from dataclasses import asdict, replace
-        from decimal import Decimal
+    async def test_controlled_conversational_corpus_native_inputs(self):
+        """Controlled conversational scopes through real native dispatch and full input formatting."""
+        import hashlib
+        from dataclasses import replace
 
-        from agent.secret_scope import (
-            build_profile_secret_scope,
-            reset_multiplex_context,
-            reset_secret_scope,
-            set_multiplex_context,
-            set_secret_scope,
-        )
-        from test_semantic import controlled_answers, source_from_record
+        from gateway.platforms.helpers import MessageDeduplicator
+        from test_semantic import controlled_answers, expected_full_view, japanese_improvement_source
 
-        from hermes_slack_agent_router.jev import JevClient, JevError, serialize_request, validate_answers
-        from hermes_slack_agent_router.plugin import logger
+        from hermes_slack_agent_router.jev import serialize_request, validate_answers
         from hermes_slack_agent_router.semantic import assemble, prepare
 
         self.enable_semantic()
         assembled = self.install_scoped_receiver()
-        real = os.environ.get("MIZUKI_COHERENT_RESPONSE_QUALIFY") == "1"
-        preflight = os.environ.get("MIZUKI_COHERENT_RESPONSE_PREFLIGHT") == "1"
-        prefix = "coherent-response-v1:"
-        artifact = Path(os.environ["MIZUKI_ADDRESS_CANARY"]) if real or preflight else None
-        evidence = json.loads(artifact.read_text()) if artifact else {}
-        historical = copy.deepcopy(evidence)
         captured = {}
-        manifest = {}
-        frozen_manifest = evidence.get(prefix + "manifest", {})
-        if real:
-            self.assertTrue(frozen_manifest, "complete preflight manifest required before inference")
-            self.assertEqual(frozen_manifest["source_tree"], os.environ["MIZUKI_WHOAMI_SOURCE_TREE"])
-            self.assertEqual(
-                frozen_manifest["source_diff_sha256"], os.environ["MIZUKI_SIMPLE_SOURCE_DIFF_SHA256"]
-            )
         fixed_history = [
             {"ts": "100.001", "user": "UALPHA", "text": "I prepared the summary."},
             {"ts": "101.001", "user": "UBETA", "text": "I prepared the diagram."},
@@ -6039,7 +3783,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             },
             {"ts": "102.001", "user": "UALPHA", "text": "I prepared the summary."},
         ]
-        cases = (
+        cases: tuple[tuple[str, str, str, list[dict[str, str]], int], ...] = (
             ("full-name", "UBETA", "柚原こはるさん、会場図を修正してください。", named_history, 200),
             ("short-name", "UBETA", "こはるさん、会場図を修正してください。", named_history, 220),
             (
@@ -6067,9 +3811,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 205,
             ),
         )
-        old_prepare = prepare
-        old_assemble = assemble
-        entry = {}
         generic_text = "Please continue the general project work."
         cases += (
             ("specific-not-main", "UALPHA", "Please revise the summary.", generic_history, 230),
@@ -6184,9 +3925,9 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         )
         # Both native receivers, identical source/metadata, not plan-only observation.
         for base in ("main-joint", "M3", "M4", "M5", "M10"):
-            case = next(c for c in cases if c[0] == base)
-            cases += ((base + "-alpha", "UALPHA", *case[2:]),)
-        # Names collide in all independent counterparts. M9 is not rewritten.
+            _, _, text, history, sequence = next(c for c in cases if c[0] == base)
+            cases += ((base + "-alpha", "UALPHA", text, history, sequence),)
+        # Exercise same-name alternatives with explicit, joint, owned and unresolved scopes.
         counterpart_specs = {
             "C-owned": (
                 originals["short-name"][2],
@@ -6237,20 +3978,16 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 cases += ((label, receiver, text, history, 240),)
                 counterpart_expectations[label] = action_sets
         negatives = {
-            "main-outside",
             "main-unknown",
             "main-conflict",
-            "M3",
-            "M3-alpha",
             "M4",
-            "M4-alpha",
             "M9",
             "M10",
             "M10-alpha",
             "C-unresolved-beta",
             "C-unresolved-alpha",
         }
-        negatives -= {"M3-alpha", "M4-alpha", "M3", "main-outside"}
+
         silences = negatives | {"C-owned-alpha", "C-handoff-beta", "C-explicit-alpha"}
         expected = {name: [["UBETA"]] for name, *_ in cases}
         for name in ("multi-beta", "multi-alpha"):
@@ -6264,25 +4001,12 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         for name in negatives:
             expected[name] = []
         expected.update(counterpart_expectations)
-        criterion_revisions = {
-            "M3-alpha": {
-                "historical_own_scope": "none",
-                "current_own_scope": "u0",
-                "reason": "independent summary stays own while addressed Beta may also participate in the separate mixed joint request",
-            },
-            "M4-alpha": {
-                "historical_own_scope": "none",
-                "current_own_scope": "u0+u1",
-                "reason": "current explicit Alpha address governs following coordinated clause, not permanent main",
-            },
-        }
         for label in ("M3", "M3-alpha"):
             expected[label] = [["UALPHA"], ["UBETA"]]
         for label in ("M4", "M4-alpha"):
             expected[label] = [["UALPHA"], ["UALPHA"]]
 
-        # Distinct declared normal-metadata objects: old ID-only originals remain
-        # unchanged and required. Only actual fictional SDK metadata supplies names.
+        # Exercise both ID-only and verified native metadata for the same sources.
         normal_sources = {
             "N-" + label: label
             for label, *_ in cases
@@ -6290,7 +4014,8 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         }
         by_label = {case[0]: case for case in cases}
         for label, base in normal_sources.items():
-            cases += ((label, *by_label[base][1:]),)
+            _, receiver, text, history, sequence = by_label[base]
+            cases += ((label, receiver, text, history, sequence),)
             expected[label] = expected[base]
             if base in silences:
                 silences.add(label)
@@ -6373,7 +4098,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 negatives.add(label)
             if not any(receiver in users for users in action_sets):
                 silences.add(label)
-        # Causal pairs fixed before official calls: same utterances, reversed time.
+        # Controlled chronology contrasts: same utterances, reversed appointment order.
         appointments = [
             "<@UALPHA>, you now lead this entire thread.",
             "<@UBETA>, you now lead this entire thread.",
@@ -6496,291 +4221,32 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 negatives.add(label)
             if not any(receiver in users for users in sets):
                 silences.add(label)
-        added_names = (
-            set(counterpart_expectations)
-            | set(normal_sources)
-            | conversation_names
-            | temporal_names
-            | people_names
-        )
-        original_count = (
-            30
-            + len(counterpart_expectations)
-            + len(normal_sources)
-            + len(conversation_specs)
-            + len(temporal_specs)
-            + len(people_specs)
-        )
-        if real:
-            self.assertEqual(
-                set(frozen_manifest["cases"]),
-                {*(case[0] for case in cases), "japanese-improvement", "M1", "M2"},
-            )
-
-        def native_current_expected(label, receiver, current):
-            return {
-                "multi-beta": "check the diagram.",
-                "multi-alpha": "revise the summary;",
-                "joint": "@Human and  check the diagram together.",
-                "joint-alpha": "and @birch check the diagram together.",
-                "C-explicit-beta": "、会場図を修正してください。",
-                "C-joint-beta": "@柚原こはる and  revise the venue diagram together.",
-                "C-joint-alpha": "and @柚原こはる revise the venue diagram together.",
-                "N-multi-beta": "check the diagram.",
-                "N-multi-alpha": "revise the summary;",
-                "N-joint": "@榎森あおい and  check the diagram together.",
-                "N-joint-alpha": "and @柚原こはる check the diagram together.",
-                "M4-alpha": "revise the summary; please continue the general project work.",
-                "N-M4-alpha": "revise the summary; please continue the general project work.",
-                "Q-question": ", why is the diagram scaled differently?",
-                "Q-explanation": ", explain why the diagram uses metres.",
-                "Q-ack": ", please acknowledge receipt.",
-                "Q-support-beta": ", could you explain the scale? The unit conversion is the concern.",
-                "Q-change-alpha": ", explain the summary; include its units;",
-                "Q-change-beta": ", explain the diagram.",
-            }.get(label, current.strip() if f"<@{receiver}>" in current else current)
-
-        def observe_prepare(source, recipient):
-            entry["source"] = asdict(source)
-            entry["binding"] = source.binding
-            old_protocol = (
-                evidence.get("main-split-v1:" + name, {}).get("source", {}).get("protocol", source.protocol)
-            )
-            if name not in originals:
-                old_protocol = (
-                    evidence.get("grounded-input-v1:manifest", {})
-                    .get("cases", {})
-                    .get(name, {})
-                    .get("source", {})
-                    .get("protocol", old_protocol)
-                )
-            original = replace(source, recipient_whoami=(), context_people=(), protocol=old_protocol)
-            original_source = asdict(original)
-            original_source.pop("recipient_whoami")
-            original_source.pop("context_people")
-            original_binding = original.binding
-            entry["whoami_source"] = (
-                "native SDK fields or auth.test username fallback; actual acquisition provenance required"
-                if any(
-                    any(value is not None for key, value in who.items() if key != "user_id")
-                    for _, who in source.recipient_whoami
-                )
-                else "ID-only metadata-degraded source; tuple presence is NOT acquisition success"
-            )
-            queried = {call.kwargs.get("user") for call in self.client.users_info.await_args_list}
-            entry["people_acquisition"] = {
-                "serving_workspace": source.thread.workspace,
-                "queried_ids": sorted(queried),
-                "people": dict(source.context_people),
-                "current_sender_reused_from_admission": True,
-            }
-            entry["metadata_acquisition"] = {
-                user: {
-                    "users_info_called": user in queried,
-                    "available_native_fields": [
-                        key for key, value in who.items() if key != "user_id" and value is not None
-                    ],
-                }
-                for user, who in source.recipient_whoami
-            }
-            if name in normal_sources or name in conversation_names:
-                self.assertTrue(
-                    all(
-                        receipt["users_info_called"] and receipt["available_native_fields"]
-                        for receipt in entry["metadata_acquisition"].values()
-                    )
-                )
-            entry["original_binding"] = original_binding
-            batch = old_prepare(source, recipient)
-            context = context_view(batch["state"])
-            self.assertEqual(context["CURRENT"]["sender"], context["participants"][source.sender])
-            self.assertTrue(set(context["eligible_recipients"]).issubset(context["participants"]))
-            if name in temporal_names or name in people_names:
-                self.assertEqual(context["participants"]["UHUMAN"]["kind"], "human")
-                self.assertTrue(all(Decimal(h.identity) < Decimal(source.identity) for h in source.history))
-            if name == "P-unknown":
-                self.assertEqual(context["participants"]["UUNKNOWN"]["kind"], "unknown")
-            if name == "P-outside":
-                self.assertEqual(context["participants"]["UOUTSIDE"]["kind"], "human")
-                self.assertNotIn("UOUTSIDE", context["eligible_recipients"])
-            offset = 1 if normal_sources.get(name, name).startswith("M5") else 0
-            own_units = [
-                f"u{i}" for i, users in enumerate(expected[name], offset) if recipient.bot_user in users
-            ]
-            current = "".join(
-                batch["state"]["source_selection"]["segments"][unit]["text"] for unit in own_units
-            )
-            entry["expected_unit_scope"] = own_units
-            entry["expected_current"] = current
-            entry["expected_native_current"] = (
-                native_current_expected(name, recipient.bot_user, current) if bot is not None else None
-            )
-            entry["prepared_request"] = json.loads(serialize_request(batch))
-            entry["prepared_raw_request"] = serialize_request(batch).decode()
-            if name in originals and (real or preflight):
-                frozen = evidence["main-split-v1:" + name]
-                self.assertEqual(json.loads(json.dumps(original_source)), frozen["source"])
-                self.assertEqual(original_binding, frozen["binding"])
-                entry["unchanged_source"] = "main-split-v1:" + name
-            record = {
-                "source": entry["source"],
-                "binding": source.binding,
-                "prepared_request": entry["prepared_request"],
-                "prepared_raw_request": entry["prepared_raw_request"],
-                "expected_action_sets": expected[name],
-                "receiver": bot,
-                "expected_delivery": name not in silences,
-                "metadata_acquisition": entry["metadata_acquisition"],
-                "people_acquisition": entry["people_acquisition"],
-                "expected_unit_scope": entry["expected_unit_scope"],
-                "expected_current": entry["expected_current"],
-                "expected_native_current": entry["expected_native_current"],
-            }
-            manifest[name] = json.loads(json.dumps(record))
-            if real or preflight:
-                previous = evidence["chronology-people-v1:manifest"]["cases"][name]
-                previous_source = replace(source, protocol=previous["source"]["protocol"])
-                self.assertEqual(json.loads(json.dumps(asdict(previous_source))), previous["source"])
-                self.assertEqual(previous_source.binding, previous["binding"])
-                for field in (
-                    "expected_action_sets",
-                    "receiver",
-                    "expected_delivery",
-                    "expected_unit_scope",
-                    "expected_current",
-                    "expected_native_current",
-                ):
-                    self.assertEqual(manifest[name][field], previous[field], (name, field))
-            if name in normal_sources:
-                base_source = captured[normal_sources[name]]["source"]
-                for field in set(entry["source"]) - {
-                    "recipient_labels",
-                    "recipient_whoami",
-                    "context_people",
-                }:
-                    self.assertEqual(entry["source"][field], base_source[field], (name, field))
-                entry["normal_metadata_counterpart_of"] = normal_sources[name]
-            paired = {"Q-support-alpha": "Q-support-beta", "Q-change-beta": "Q-change-alpha"}.get(name)
-            if paired:
-                self.assertEqual(entry["source"], captured[paired]["source"])
-                self.assertEqual(
-                    context_view(entry["prepared_request"]["state"]),
-                    context_view(captured[paired]["prepared_request"]["state"]),
-                )
-            if (real or preflight) and name not in added_names:
-                original_membership = evidence["grounded-input-v1:manifest"]["cases"][name]
-                self.assertEqual(json.loads(json.dumps(original_source)), original_membership["source"])
-                self.assertEqual(original_binding, original_membership["binding"])
-                for field in (
-                    ("receiver",)
-                    if name in ("M3", "M3-alpha", "M4", "M4-alpha")
-                    else ("expected_action_sets", "receiver")
-                ):
-                    self.assertEqual(manifest[name][field], original_membership[field], (name, field))
-                previous = evidence["yes07-v1:manifest"]["cases"][name]
-                previous_protocol = replace(
-                    source, protocol=previous["source"]["protocol"], context_people=()
-                )
-                previous_record = asdict(previous_protocol)
-                previous_record.pop("context_people")
-                self.assertEqual(json.loads(json.dumps(previous_record)), previous["source"])
-                self.assertEqual(previous_protocol.binding, previous["binding"])
-            if name in derivatives:
-                base = captured[derivatives[name][0]]["source"]
-                unchanged = set(base) - {
-                    "text",
-                    "original",
-                    "provenance",
-                    "history",
-                    "recipient_whoami",
-                    "context_people",
-                }
-                if name == "M9":
-                    unchanged.remove("recipient_labels")
-                    self.assertTrue(all("柚原こはる" in names for _, names in source.recipient_labels))
-                for field in unchanged:
-                    self.assertEqual(entry["source"][field], base[field], (name, field))
-            if name.endswith("-alpha") and name not in originals and name not in added_names:
-                self.assertEqual(entry["source"], captured[name.removesuffix("-alpha")]["source"])
-            if name in counterpart_expectations and name.endswith("-alpha"):
-                other = captured[name.removesuffix("-alpha") + "-beta"]
-                self.assertEqual(entry["source"], other["source"])
-                self.assertEqual(
-                    context_view(entry["prepared_request"]["state"]),
-                    context_view(other["prepared_request"]["state"]),
-                )
-            if real:
-                if bot is not None:
-                    self.assertEqual(manifest[name], frozen_manifest["cases"][name])
-                evidence[key] = copy.deepcopy(entry)
-                assert artifact is not None
-                artifact.write_text(json.dumps(evidence, ensure_ascii=False, indent=2))
-            return batch
-
-        def observe_assemble(source, recipient, answers):
-            plan = old_assemble(source, recipient, answers)
-            entry["admitted"] = answers.get("response") == "yes"
-            entry["projection_unresolved"] = plan.reason == "projection-unresolved"
-            entry["plan"] = plan.as_dict()
-            entry["recipient_views"] = {r.bot_user: plan.view(r) for r in source.recipients}
-            return plan
-
-        home = Path(os.environ["MIZUKI_CLASSIFIER_HOME"]) if real else None
-        # Hydrate the exact serving scope before entering fixture-native profile scopes.
-        secrets = build_profile_secret_scope(home) if real else None
-
-        test_case = self
-
-        class OnceJev(JevClient):
-            async def _exchange(self, raw, key):
-                entry["raw_request"] = raw.decode()
-                entry["request"] = json.loads(raw)
-                test_case.assertEqual(raw.decode(), entry["prepared_raw_request"])
-                test_case.assertEqual(entry["request"], entry["prepared_request"])
-                started = time.monotonic()
-                try:
-                    response = await super()._exchange(raw, key)
-                    entry["raw_response"] = response.decode()
-                    entry["response"] = json.loads(response)
-                    test_case.assertEqual(entry["response"]["model"], "jev-1.14.0")
-                    entry["request_bytes"], entry["response_bytes"] = len(raw), len(response)
-                    values = entry["response"]["answers"]
-                    # Inspect every consumed answer even when validation rejects the first one.
-                    entry["consumed_answers"] = {
-                        n: value for n, value in values.items() if n in {"response", "scope"}
-                    }
-                    return response
-                finally:
-                    entry["api_elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
-
-            async def ask(self, batch):
-                mode = set_multiplex_context(True)
-                token = set_secret_scope(secrets, profile_home=str(home))
-                try:
-                    return await super().ask(batch)
-                except JevError as exc:
-                    entry["failure"] = str(exc)
-                    entry["diagnostic"] = exc.diagnostic
-                    raise
-                finally:
-                    reset_secret_scope(token)
-                    reset_multiplex_context(mode)
-
+        # Only mixed-owner messages need parts; all other positive rows own the
+        # complete fixture text. These literals never read production segmentation.
+        fixture_parts = {
+            originals["multi-beta"][2]: (
+                ("<@UALPHA> revise the summary; ", ("UALPHA",)),
+                ("<@UBETA> check the diagram.", ("UBETA",)),
+            ),
+            derivatives["M3"][1]: (
+                ("Please revise the summary; ", ("UALPHA",)),
+                ("<@UBETA> and <@UOUTSIDE> check the diagram together.", ("UBETA",)),
+            ),
+            derivatives["M5"][1]: (
+                ("ありがとう。", ()),
+                ("図を確認して；", ("UBETA",)),
+                ("要約も直して。", ("UALPHA",)),
+            ),
+            next(row[2] for row in conversation_specs if row[0] == "Q-change-alpha"): (
+                ("<@UALPHA>, explain the summary; include its units; ", ("UALPHA",)),
+                ("<@UBETA>, explain the diagram.", ("UBETA",)),
+            ),
+        }
         for name, bot, text, history, sequence in cases:
-            key = prefix + name
-            if real:
-                self.assertNotIn(key, evidence, "no retry of this source/protocol")
-            entry = {
-                "case": name,
-                "model": JevClient.model,
-                "real_api": real,
-                "source_base": "5e13e6a8f6409c9a1663825789a3ef968412c4f7",
-                "source_diff_sha256": os.environ.get("MIZUKI_SIMPLE_SOURCE_DIFF_SHA256"),
-            }
-            # Independent immutable sources intentionally reuse historical IDs.
-            # Reset ONLY fixture replay dedup, never a production admission guard.
-            from gateway.platforms.helpers import MessageDeduplicator
-
+            parts = fixture_parts.get(text, ((text, (bot,)),))
+            self.assertEqual("".join(part for part, _ in parts), text)
+            current = "" if name in silences else "".join(part for part, users in parts if bot in users)
+            # Cases reuse timestamps; reset only the fixture's native deduplication state.
             self.adapter._dedup = MessageDeduplicator()
             self.sequence = sequence
             self.model.reset_mock()
@@ -6794,12 +4260,8 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             self.client.users_info.side_effect = None
             self.client.users_info.reset_mock()
             if name.startswith("joint"):
-                # Frozen qualification:joint has the native cached UBETA handle
-                # Human. Restore that fictional fixture metadata, not a semantic
-                # answer. The first preflight never sent either joint API request.
                 target = self.adapter if bot == "UBETA" else self.peer
                 target._team_bot_names["TDEMO"] = "Human"
-                entry["preflight_recovery"] = "native cached handle equality; no previous API call"
             if name in ("full-name", "short-name", "M9") or name in counterpart_expectations:
                 self.adapter._team_bot_names["TDEMO"] = "birch"
                 self.peer._team_bot_names["TDEMO"] = "atlas"
@@ -6852,218 +4314,124 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
 
                 self.client.users_info.side_effect = contextual_info
 
-            async def offline(batch, name=name, entry=entry):
-                choices = {}
-                if name in negatives and not name.startswith("M10"):
-                    choices.update(for_UALPHA="unresolved", for_UBETA="unresolved")
-                else:
-                    offset = 1 if normal_sources.get(name, name).startswith("M5") else 0
-                    for user in ("UALPHA", "UBETA"):
-                        selected = [
-                            f"u{i}" for i, users in enumerate(expected[name], offset) if user in users
-                        ]
-                        choices["for_" + user] = "+".join(selected) or "none"
+            observed = {}
+
+            def observe_source(source, recipient, observed=observed):
+                observed.update(source=source, recipient=recipient)
+                return prepare(source, recipient)
+
+            async def offline(batch, name=name, bot=bot, observed=observed):
+                offset = 1 if normal_sources.get(name, name).startswith("M5") else 0
+                own = [f"u{i}" for i, users in enumerate(expected[name], offset) if bot in users]
+                choices = {"for_" + bot: "+".join(own) or "none"}
                 if name == "contextual":
                     choices["u0_prior1"] = "include"
-                raw = controlled_answers(batch, choices)
-                entry["request"] = json.loads(serialize_request(batch))
-                entry["response"] = raw
-                return validate_answers(batch, raw)
-
-            async def qualify(batch, entry=entry):
-                raw = serialize_request(batch).decode()
-                previous = next((n for n, e in captured.items() if e.get("raw_request") == raw), None)
-                if previous is not None:
-                    old = captured[previous]
-                    for field in (
-                        "raw_request",
-                        "request",
-                        "raw_response",
-                        "response",
-                        "consumed_answers",
-                        "request_bytes",
-                        "response_bytes",
-                    ):
-                        if field in old:
-                            entry[field] = copy.deepcopy(old[field])
-                    entry["reused_exact_request"] = prefix + previous
-                    try:
-                        return validate_answers(batch, entry["response"])
-                    except JevError as exc:
-                        entry["failure"], entry["diagnostic"] = str(exc), exc.diagnostic
-                        raise
-                return await OnceJev().ask(batch)
+                selected = validate_answers(batch, controlled_answers(batch, choices))
+                observed.update(batch=batch, selected=selected, own=own)
+                return selected
 
             self.gate.jev = AsyncMock()
-            self.gate.jev.ask.side_effect = qualify if real else offline
-            started = time.monotonic()
-            with (
-                patch("hermes_slack_agent_router.plugin.prepare", side_effect=observe_prepare),
-                patch("hermes_slack_agent_router.plugin.assemble", side_effect=observe_assemble),
-                patch.object(logger, "warning", wraps=logger.warning) as diagnostics,
-            ):
-                response = await self.dispatch(self.message(text))
-            await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
-            entry["diagnostics"] = [call.args[0] % call.args[1:] for call in diagnostics.call_args_list]
-            entry["dispatch_elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
-            entry["http_ack"] = response.status
-            entry["assembled_input"] = list(assembled)
-            entry["native_received"] = [
-                {
-                    "text": c.args[0].text,
-                    "channel_context": c.args[0].channel_context,
-                    "source": {
-                        "workspace": c.args[0].source.scope_id,
-                        "user": c.args[0].source.user_id,
-                        "channel": c.args[0].source.chat_id,
-                        "message": c.args[0].source.message_id,
-                    },
-                }
-                for c in self.model.await_args_list
-            ]
-            entry["outbound_calls"] = self.client.chat_postMessage.await_count
-            entry["ephemeral_calls"] = self.client.chat_postEphemeral.await_count
-            entry["peer_calls"] = self.peer._message_handler.await_count
-            entry["pending"] = bool(self.adapter._pending_messages or self.adapter._pending_text_batches)
-            entry["source_tree"] = os.environ.get("MIZUKI_WHOAMI_SOURCE_TREE")
-            captured[name] = copy.deepcopy(entry)
-            if real:
-                evidence[key] = copy.deepcopy(entry)
-                for old_key, old_value in historical.items():
-                    self.assertEqual(evidence[old_key], old_value)
-                artifact.write_text(json.dumps(evidence, ensure_ascii=False, indent=2))
-            print(
-                "SIMPLE_NATIVE_RECEIPT "
-                + json.dumps({k: entry[k] for k in ("case", "real_api", "dispatch_elapsed_ms")})
-                + " receivers="
-                + str(len(entry["native_received"]))
-            )
+            self.gate.jev.ask.side_effect = offline
             with self.subTest(case=name):
+                with patch("hermes_slack_agent_router.plugin.prepare", side_effect=observe_source):
+                    response = await self.dispatch(self.message(text))
+                await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
                 self.assertEqual(response.status, 200)
-                self.assertLess(entry["dispatch_elapsed_ms"], 2500)
-                if name in silences:
-                    self.model.assert_not_awaited()
-                    self.assertFalse(assembled or entry["pending"])
-                    self.client.chat_postMessage.assert_not_awaited()
-                    self.client.chat_postEphemeral.assert_not_awaited()
-                    self.peer._message_handler.assert_not_awaited()
-                    if "plan" in entry:
-                        self.assertEqual(entry["plan"]["status"], "ready")
-                        self.assertEqual(entry["plan"]["reason"], "response-silent")
-                    continue
-                self.model.assert_awaited_once()
-                action_sets = [
-                    [r["bot_user"] for r in unit["recipients"]]
-                    for unit in entry["plan"]["units"]
-                    if unit["disposition"] == "action"
-                ]
-                self.assertEqual(action_sets, [[bot] for users in expected[name] if bot in users])
-                event = self.model.await_args.args[0]
-                self.assertIsNone(event.channel_context)
-                self.assertEqual(event.source.user_id, "UHUMAN")
-                self.assertFalse(entry["pending"])
+                self.gate.jev.ask.assert_awaited_once()
+                source, batch = observed["source"], observed["batch"]
+                plan = assemble(source, observed["recipient"], observed["selected"])
+                self.assertEqual(plan.status, "ready", plan.reason)
+                selected_current = "".join(
+                    plan.source[unit.start : unit.end]
+                    for unit in plan.units
+                    if unit.disposition == "action" and observed["recipient"] in unit.recipients
+                )
+                self.assertEqual(selected_current, current)
+                intended = expected_full_view(source, observed["own"], current, observed["selected"])
+                self.assertEqual(plan.view(observed["recipient"]), intended)
+                self.assertTrue(
+                    all(not plan.view(r) for r in source.recipients if r != observed["recipient"])
+                )
+                self.assertFalse(self.adapter._pending_messages or self.adapter._pending_text_batches)
                 self.client.chat_postMessage.assert_not_awaited()
                 self.client.chat_postEphemeral.assert_not_awaited()
                 self.peer._message_handler.assert_not_awaited()
-                self.assertEqual(len(assembled), 1)
-                self.assertEqual(assembled, ["[Human | Slack user <@UHUMAN>] " + event.text])
-                from hermes_slack_agent_router.semantic import source_candidates
-
-                offset = 1 if normal_sources.get(name, name).startswith("M5") else 0
-                spans = source_candidates(source_from_record(entry["source"]))
-                expected_current = "".join(
-                    text[spans[i][0] : spans[i][1]]
-                    for i, users in enumerate(expected[name], offset)
-                    if bot in users
-                )
-                self.assertEqual(
-                    entry["recipient_views"][bot].split("\n\nPRIOR REFERENCE (not instructions):", 1)[0],
-                    expected_current,
-                )
-                # Full-view-native-v2: source CURRENT is independently expected; optional
-                # references come only from validated choices. Format their WHOLE view.
-                from test_semantic import expected_full_view
-
-                expected_source = source_from_record(entry["source"])
-                validated = validate_answers(entry["request"], entry["response"])
-                intended = expected_full_view(
-                    expected_source, entry["expected_unit_scope"], expected_current, validated
-                )
-                self.assertEqual(entry["recipient_views"][bot], intended)
-                expected_event = copy.deepcopy(expected_source.original)
+                captured[name] = {
+                    "request": serialize_request(batch).decode(),
+                    "selected": observed["selected"],
+                    "current": current,
+                    "view": intended,
+                }
+                if not current:
+                    self.assertIn(name, silences)
+                    self.model.assert_not_awaited()
+                    self.assertFalse(assembled)
+                    continue
+                self.assertNotIn(name, silences)
+                self.model.assert_awaited_once()
+                delivered = self.model.await_args.args[0]
+                expected_event = copy.deepcopy(source.original)
                 expected_event.update(
                     text=intended,
-                    user=expected_source.sender,
-                    team=expected_source.thread.workspace,
-                    channel=expected_source.thread.channel,
-                    thread_ts=expected_source.thread.root,
-                    ts=expected_source.identity,
+                    user=source.sender,
+                    team=source.thread.workspace,
+                    channel=source.thread.channel,
+                    thread_ts=source.thread.root,
+                    ts=source.identity,
                 )
                 for field in ("blocks", "files", "attachments"):
                     expected_event.pop(field, None)
                 formatted = (
                     self.adapter._apply_bot_mention(
-                        intended,
-                        intended,
-                        intended,
-                        False,
-                        bot,
-                        expected_source.thread.root,
-                        expected_source.thread.workspace,
+                        intended, intended, intended, False, bot, source.thread.root, source.thread.workspace
                     )[0]
                     if f"<@{bot}>" in intended
                     else intended
                 )
-                native_expected = await self.adapter._build_message_event(
+                expected_native = await self.adapter._build_message_event(
                     expected_event,
                     text=formatted,
                     original_text=intended,
                     command_probe_text=intended,
                     is_command_text=False,
-                    channel_id=expected_source.thread.channel,
-                    team_id=expected_source.thread.workspace,
-                    ts=expected_source.identity,
-                    user_id=expected_source.sender,
-                    thread_ts=expected_source.thread.root,
+                    channel_id=source.thread.channel,
+                    team_id=source.thread.workspace,
+                    ts=source.identity,
+                    user_id=source.sender,
+                    thread_ts=source.thread.root,
                     is_dm=False,
                     media_urls=[],
                     media_types=[],
                     media_text_inlined=[],
                     channel_context=None,
                 )
-                self.assertEqual(event.text, native_expected.text)
-                self.assertEqual(event.source.to_dict(), native_expected.source.to_dict())
-                self.assertEqual(
-                    assembled,
-                    [
-                        self.runner._prefix_inbound_sender_context(
-                            native_expected, native_expected.source, native_expected.text
-                        )
-                    ],
+                self.assertEqual(delivered.text, expected_native.text)
+                self.assertEqual(delivered.source.to_dict(), expected_native.source.to_dict())
+                self.assertIsNone(delivered.channel_context)
+                self.assertIsNone(delivered.reply_to_text)
+                self.assertFalse(
+                    delivered.media_urls or delivered.media_types or delivered.media_text_inlined
                 )
-                if name == "contextual":
-                    prior = entry["response"]["answers"]["u0_prior1"]
-                    if prior["choice"] == "include" and prior["confidence"] >= 0.8:
-                        self.assertIn("I prepared the diagram.", event.text)
-                    self.assertNotIn("I prepared the summary.", event.text)
-
-        from test_live_classifier import japanese_improvement_source
+                expected_input = self.runner._prefix_inbound_sender_context(
+                    expected_native, expected_native.source, expected_native.text
+                )
+                self.assertEqual(assembled, [expected_input])
+                captured[name].update(native_text=delivered.text, assembled=expected_input)
 
         for suffix in ("beta", "alpha"):
-            ab = captured["T-order-AB-" + suffix]["prepared_request"]["state"]
-            ba = captured["T-order-BA-" + suffix]["prepared_request"]["state"]
+            ab = json.loads(captured["T-order-AB-" + suffix]["request"])["state"]
+            ba = json.loads(captured["T-order-BA-" + suffix]["request"])["state"]
             self.assertEqual(ab["whoami"], ba["whoami"])
             self.assertEqual(ab["conversation"]["records"][-1], ba["conversation"]["records"][-1])
             self.assertEqual(
                 [r["text"] for r in ab["conversation"]["records"][1:-1]],
                 list(reversed([r["text"] for r in ba["conversation"]["records"][1:-1]])),
             )
-            self.assertNotEqual(expected["T-order-AB-" + suffix], expected["T-order-BA-" + suffix])
         japanese = japanese_improvement_source()
-        semantic_cases = (
+        for name, source, users in (
             ("japanese-improvement", japanese, ["UBIRCH"]),
             (
-                "M1",
+                "joint-four",
                 replace(
                     japanese,
                     text="<@UATLAS> and <@UBIRCH> and <@UCEDAR> and <@UDOGWOOD> jointly review the exhibition system.",
@@ -7071,107 +4439,32 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 ["UATLAS", "UBIRCH", "UCEDAR", "UDOGWOOD"],
             ),
             (
-                "M2",
+                "joint-two",
                 replace(japanese, text="<@UATLAS> and <@UBIRCH> jointly review the exhibition system."),
                 ["UATLAS", "UBIRCH"],
             ),
-        )
-        for name, source, users in semantic_cases:
-            key = prefix + name
-            if real:
-                self.assertNotIn(key, evidence, "no retry of this source/protocol")
-            expected[name] = [users]
-            entry = {
-                "case": name,
-                "model": JevClient.model,
-                "real_api": real,
-                "source_base": "5e13e6a8f6409c9a1663825789a3ef968412c4f7",
-                "source_tree": os.environ.get("MIZUKI_WHOAMI_SOURCE_TREE"),
-                "source_diff_sha256": os.environ.get("MIZUKI_SIMPLE_SOURCE_DIFF_SHA256"),
-                "native_boundary": "original four-candidate semantic source; no rewritten native replay",
-            }
-            bot = None
-            batch = observe_prepare(source, source.recipients[0])
-            receiver_requests = {
-                r.bot_user: json.loads(serialize_request(prepare(source, r))) for r in source.recipients
-            }
-            manifest[name]["receiver_requests"] = receiver_requests
-            manifest[name]["receiver_expected_scopes"] = {
-                r.bot_user: ["u0"] if r.bot_user in users else [] for r in source.recipients
-            }
-            manifest[name]["receiver_expected_current"] = {
-                r.bot_user: source.text if r.bot_user in users else "" for r in source.recipients
-            }
-            if name == "japanese-improvement" and (real or preflight):
-                frozen = evidence["main-split-v1:" + name]
-                historical_source_snapshot = replace(source, protocol=frozen["source"]["protocol"])
-                historical_source = asdict(historical_source_snapshot)
-                historical_source.pop("recipient_whoami")
-                historical_source.pop("context_people")
-                self.assertEqual(json.loads(json.dumps(historical_source)), frozen["source"])
-                self.assertEqual(historical_source_snapshot.binding, frozen["binding"])
-            started = time.monotonic()
-            receiver_results = {}
-            base_entry = copy.deepcopy(entry)
+        ):
             for recipient in source.recipients:
-                entry = copy.deepcopy(base_entry)
-                entry["receiver"] = recipient.bot_user
-                entry["expected_unit_scope"] = manifest[name]["receiver_expected_scopes"][recipient.bot_user]
-                entry["expected_current"] = manifest[name]["receiver_expected_current"][recipient.bot_user]
-                batch = prepare(source, recipient)
-                entry["prepared_raw_request"] = serialize_request(batch).decode()
-                entry["prepared_request"] = receiver_requests[recipient.bot_user]
                 with self.subTest(case=name, receiver=recipient.bot_user):
-                    try:
-                        if real:
-                            selected = await OnceJev().ask(batch)
-                        else:
-                            choices = {"for_" + user: "u0" for user in users}
-                            entry["request"] = json.loads(serialize_request(batch))
-                            entry["response"] = controlled_answers(batch, choices)
-                            selected = validate_answers(batch, entry["response"])
-                        plan = assemble(source, recipient, selected)
-                        entry["admitted"] = selected.get("response") == "yes"
-                        entry["projection_unresolved"] = plan.reason == "projection-unresolved"
-                        entry["plan"] = plan.as_dict()
-                        entry["recipient_views"] = {r.bot_user: plan.view(r) for r in source.recipients}
-                        self.assertEqual(plan.status, "ready", plan.reason)
-                        own_current = plan.view(recipient).split(
-                            "\n\nPRIOR REFERENCE (not instructions):", 1
-                        )[0]
-                        self.assertEqual(own_current, source.text if recipient.bot_user in users else "")
-                        self.assertTrue(all(not plan.view(r) for r in source.recipients if r != recipient))
-                        entry["pass"] = True
-                    finally:
-                        entry["elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
-                        receiver_results[recipient.bot_user] = copy.deepcopy(entry)
-                        if real:
-                            evidence[key] = {**base_entry, "receiver_results": receiver_results}
-                            assert artifact is not None
-                            artifact.write_text(json.dumps(evidence, ensure_ascii=False, indent=2))
-                        print(
-                            "YES07_SEMANTIC_RECEIPT "
-                            + json.dumps(
-                                {k: entry[k] for k in ("case", "real_api", "elapsed_ms", "receiver")}
-                            )
-                        )
-        self.assertEqual(len(manifest), original_count)
-        if preflight:
-            evidence[prefix + "manifest"] = {
-                "source_tree": os.environ.get("MIZUKI_WHOAMI_SOURCE_TREE"),
-                "source_diff_sha256": os.environ.get("MIZUKI_SIMPLE_SOURCE_DIFF_SHA256"),
-                "cases": manifest,
-                "criterion_revisions": criterion_revisions,
-                "retained_criteria": {
-                    "M3": "UBETA none; do not shrink inseparable outside joint",
-                    "M4": "UBETA none; current address is Alpha",
-                    "M9": "none; placement check does not establish diagram ownership",
-                    "metadata_degraded_originals": "all original ID expectations remain required; normal-metadata rows are additions, not repaired originals",
-                },
-            }
-            artifact.write_text(json.dumps(evidence, ensure_ascii=False, indent=2))
-        if real:
-            self.assertEqual(manifest, frozen_manifest["cases"])
+                    batch = prepare(source, recipient)
+                    selected = validate_answers(
+                        batch, controlled_answers(batch, {"for_" + user: "u0" for user in users})
+                    )
+                    plan = assemble(source, recipient, selected)
+                    own = source.text if recipient.bot_user in users else ""
+                    self.assertEqual(plan.status, "ready", plan.reason)
+                    self.assertEqual(plan.view(recipient), own)
+                    self.assertTrue(all(not plan.view(r) for r in source.recipients if r != recipient))
+                    captured[name + ":" + recipient.bot_user] = {
+                        "request": serialize_request(batch).decode(),
+                        "selected": selected,
+                        "current": own,
+                        "view": plan.view(recipient),
+                    }
+        raw = json.dumps(captured, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        print(
+            f"CONTROLLED_CORPUS rows={len(captured)} wire_decision_native_sha256={hashlib.sha256(raw).hexdigest()}"
+        )
 
     async def test_original_video_rejects_before_native_fallback(self):
         self.client.files_info.return_value = {

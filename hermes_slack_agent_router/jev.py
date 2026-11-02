@@ -35,8 +35,6 @@ class JevError(ValueError):
             "uncertain or contradictory answer": "answer-contradiction",
             "malformed native Jev answer": "answer-malformed",
         }.get(message, "unclassified")
-        if message.startswith("uncertain relevant answer: "):
-            code = "answer-confidence"
         return code, self.status if code == "http-rejected" else 0
 
 

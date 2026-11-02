@@ -1,10 +1,8 @@
-"""Source binding, wire bounds and official transport controls; fictional opt-in only."""
+"""Controlled source projection, wire bounds and official transport checks."""
 
 import asyncio
 import json
-import time
 import unittest
-from pathlib import Path
 from unittest.mock import Mock, call, patch
 
 from hermes_slack_agent_router.jev import JevClient, JevError, validate_answers
@@ -61,11 +59,6 @@ def expected_full_view(source, own_scope, own_current, selected):
     )
 
 
-def native_full_view_matches(actual, expected):
-    """Versioned native presentation assertion, separate from exact CURRENT selection."""
-    return actual is not None and expected is not None and actual == expected
-
-
 def snapshot(text="Atlas, revise the summary; Birch, check the diagram."):
     return Snapshot(
         KEY,
@@ -80,16 +73,36 @@ def snapshot(text="Atlas, revise the summary; Birch, check the diagram."):
     )
 
 
-def source_from_record(value):
-    """Read a fictional evidence source without changing its semantic contract."""
+def japanese_improvement_source():
+    """Fictional four-recipient context for controlled whole-message assembly."""
     return Snapshot(
-        **{
-            **value,
-            "thread": Thread(**value["thread"]),
-            "history": tuple(History(**h) for h in value["history"]),
-            "recipients": tuple(Recipient(**r) for r in value["recipients"]),
-            "recipient_labels": tuple((u, tuple(names)) for u, names in value["recipient_labels"]),
-        }
+        KEY,
+        "10.0",
+        "UFABLE",
+        "模型の展示システムが正常に動くようになるまで改善してください。",
+        (
+            History(
+                "1.0",
+                "UFABLE",
+                "<@UBIRCH>、架空の模型展示会のシステムを担当してください。<@UATLAS>は案内文の編集を担当します。",
+            ),
+            History(
+                "2.0",
+                "UBIRCH",
+                "展示システムの修正コードを確認しました。取得処理は独立検証済みですが、展示システムの分類段階でエラーが発生しています。修正を続けます。",
+            ),
+            History("3.0", "UFABLE", "起動し直しました。状態を確認してもらえますか？"),
+            History("4.0", "UBIRCH", "作業中です。取得処理は成功しましたが、分類の詳細原因は未確定です。"),
+            History("5.0", "UFABLE", "通知しないと反応しない設定ですか？"),
+            History(
+                "6.0",
+                "UBIRCH",
+                "通知は必須ではありません。展示システムの判断段階に問題があり、返信前に停止しています。",
+            ),
+            History("7.0", "UBIRCH", "作業中 — 調査結果を確認しています。"),
+            History("8.0", "UBIRCH", "現在の処理は修正済みですが、展示システム全体はまだ動作していません。"),
+        ),
+        (A, B, Recipient("TFICTION", "UCEDAR", "cedar"), Recipient("TFICTION", "UDOGWOOD", "dogwood")),
     )
 
 
@@ -136,36 +149,6 @@ def two_topic_answers(batch):
     )
 
 
-class RecordingJev(JevClient):
-    """Test-only raw evidence; production client never persists routing content."""
-
-    def __init__(self, directory):
-        super().__init__()
-        self.directory = Path(directory)
-        self.directory.mkdir(parents=True, exist_ok=True)
-
-    async def _exchange(self, raw, key):
-        (self.directory / "jev-request.json").write_bytes(raw)
-        started = time.monotonic()
-        outcome = "failed"
-        try:
-            stdout = await super()._exchange(raw, key)
-            (self.directory / "jev-result.json").write_bytes(stdout)
-            outcome = "HTTP-200"
-            return stdout
-        finally:
-            (self.directory / "jev-receipt.json").write_text(
-                json.dumps(
-                    {
-                        "protocol": "official HTTPS System One Choice",
-                        "outcome": outcome,
-                        "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
-                    },
-                    indent=2,
-                )
-            )
-
-
 class WireNormalization(unittest.TestCase):
     def test_native_wire_maxima_and_response_distributions(self):
         from hermes_slack_agent_router.bridge import canonical_text
@@ -206,9 +189,6 @@ class WireNormalization(unittest.TestCase):
                 recipients,
                 original,
                 provenance,
-                recipient_labels=tuple(
-                    (r.bot_user, tuple(str(i) + "界" * 127 for i in range(3))) for r in recipients
-                ),
                 recipient_whoami=tuple(
                     (
                         r.bot_user,
@@ -443,7 +423,6 @@ class APITransportTests(unittest.IsolatedAsyncioTestCase):
             ),
             recipient_whoami=tuple(identities.items()),
         )
-        binding = source.binding
         sent = []
         factory = httpx.AsyncClient
 
@@ -494,7 +473,6 @@ class APITransportTests(unittest.IsolatedAsyncioTestCase):
             for receiver in (A, B):
                 await JevClient().ask(prepare(source, receiver))
         self.assertEqual(context_view(sent[0]["state"]), context_view(sent[1]["state"]))
-        self.assertEqual(source.binding, binding)
         unknown = replace(source, sender="UHUMAN")
         self.assertEqual(
             prepare(unknown)["state"]["conversation"]["records"][-1]["sender"],
@@ -626,7 +604,6 @@ class APITransportTests(unittest.IsolatedAsyncioTestCase):
         for event, expected in events:
             text, provenance = canonical_text(event)
             source = replace(snapshot(text), original=event, provenance=provenance)
-            binding = source.binding
             original = json.loads(json.dumps(event))
 
             async def respond(request, expected=expected):
@@ -657,16 +634,12 @@ class APITransportTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(
                         all(not plan.view(peer) for peer in source.recipients if peer != receiver)
                     )
-            self.assertEqual(source.binding, binding)
             self.assertEqual(event, original)
         self.assertEqual(len(sent), 4)
 
     def test_fixed_failure_diagnostics_do_not_echo_messages(self):
         self.assertEqual(JevError("malformed native Jev answer").diagnostic, ("answer-malformed", 0))
-        self.assertEqual(
-            JevError("uncertain relevant answer: synthetic-private-content").diagnostic,
-            ("answer-confidence", 0),
-        )
+
         self.assertEqual(JevError("synthetic-private-body-key").diagnostic, ("unclassified", 0))
 
     async def test_transport_status_and_timeout_have_distinct_safe_diagnostics(self):

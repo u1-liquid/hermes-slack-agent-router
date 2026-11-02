@@ -1,9 +1,7 @@
 """Bounded conversational response scope over native identities and exact source spans."""
 
-import hashlib
-import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from decimal import Decimal
 from itertools import combinations
 
@@ -33,9 +31,7 @@ class Snapshot:
     recipients: tuple[Recipient, ...]
     original: dict | None = None
     provenance: tuple[dict, ...] = ()
-    protocol: str = "coherent-response-v1"
     # Request-local native presentation data, keyed by exact workspace bot user.
-    recipient_labels: tuple[tuple[str, tuple[str, ...]], ...] = ()
     recipient_whoami: tuple[tuple[str, dict], ...] = ()
     context_people: tuple[tuple[str, dict], ...] = ()
 
@@ -51,21 +47,6 @@ class Snapshot:
             self, "history", tuple(sorted(self.history, key=lambda h: (Decimal(h.identity), h.identity)))
         )
 
-    @property
-    def binding(self):
-        value = asdict(self)
-        if not self.context_people:
-            value.pop("context_people")
-        if not self.recipient_whoami:
-            value.pop("recipient_whoami")  # Historical source binding remains reproducible.
-        if self.original is not None:
-            value["original"] = {
-                key: self.original[key]
-                for key in ("text", "blocks", "files", "attachments", "message")
-                if key in self.original
-            }
-        return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-
 
 @dataclass(frozen=True)
 class Unit:
@@ -78,7 +59,6 @@ class Unit:
 
 @dataclass(frozen=True)
 class Plan:
-    binding: str
     status: str
     reason: str
     source: str
@@ -97,9 +77,6 @@ class Plan:
                 f"{r.sender}: {r.text.replace('<', '‹').replace('>', '›')}" for r in references.values()
             )
         return text
-
-    def as_dict(self):
-        return asdict(self)
 
 
 def candidates(text):
@@ -131,7 +108,8 @@ def candidates(text):
 
 
 def source_candidates(source):
-    for a, b, _ in candidates(source.text):
+    spans = []
+    for a, b, quoted in candidates(source.text):
         kinds = {
             p["kind"]
             for p in source.provenance
@@ -139,14 +117,8 @@ def source_candidates(source):
         }
         if "reference" in kinds and "authored" in kinds:
             raise SemanticError("inseparable authored/reference composition")
-    return tuple(
-        (
-            a,
-            b,
-            q or any(p["kind"] == "reference" and p["start"] < b and p["end"] > a for p in source.provenance),
-        )
-        for a, b, q in candidates(source.text)
-    )
+        spans.append((a, b, quoted or "reference" in kinds))
+    return tuple(spans)
 
 
 def wire_provenance(provenance):
@@ -164,10 +136,9 @@ def wire_provenance(provenance):
 def prepare(source: Snapshot, recipient: Recipient):
     if recipient not in source.recipients:
         raise SemanticError("receiver outside native source")
-    labels = dict(source.recipient_labels)
-    current_timestamp = source.identity.partition(":")[
-        0
-    ]  # Native edit event IDs retain their edit suffix in binding.
+
+    # Validate the message timestamp; retain the full native edit identity in CURRENT.
+    current_timestamp = source.identity.partition(":")[0]
     Thread(source.thread.workspace, source.thread.channel, current_timestamp)
     identities = dict(source.recipient_whoami)
     if source.recipient_whoami and (
@@ -195,16 +166,6 @@ def prepare(source: Snapshot, recipient: Recipient):
         or len({r.bot_user for r in source.recipients}) != len(source.recipients)
         or len({h.identity for h in source.history}) != len(source.history)
         or any(Decimal(h.identity) >= Decimal(current_timestamp) for h in source.history)
-        or len(labels) != len(source.recipient_labels)
-        or set(labels) - {r.bot_user for r in source.recipients}
-        or any(
-            len(names) > 3
-            or any(
-                not isinstance(n, str) or not n.strip() or len(n) > 128 or any(ord(c) < 32 for c in n)
-                for n in names
-            )
-            for names in labels.values()
-        )
     ):
         raise SemanticError("source/context/recipient bound violated")
     spans = source_candidates(source)
@@ -730,7 +691,7 @@ def assemble(source: Snapshot, recipient: Recipient, answers):
     batch = prepare(source, recipient)
 
     def unresolved(reason):
-        return Plan(source.binding, "unresolved", reason, source.text)
+        return Plan("unresolved", reason, source.text)
 
     if set(answers) != set(batch["questions"]):
         return unresolved("answer coverage-gap")
@@ -755,7 +716,6 @@ def assemble(source: Snapshot, recipient: Recipient, answers):
         units.append(Unit(start, end, "action", refs, recipients))
 
     return Plan(
-        source.binding,
         "ready",
         "semantic-resolved" if assigned else "response-silent",
         source.text,

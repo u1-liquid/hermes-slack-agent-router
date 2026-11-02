@@ -1,7 +1,7 @@
-"""Pure, immutable identities and direct-composition recipient evidence."""
+"""Immutable native source identities."""
 
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 _ID = re.compile(r"[A-Za-z0-9_-]+\Z")
 _TS = re.compile(r"[0-9]+\.[0-9]+\Z")
@@ -23,9 +23,6 @@ class Recipient:
         for value in (self.workspace, self.bot_user, self.runtime_profile):
             identifier(value)
 
-    def as_dict(self):
-        return asdict(self)
-
 
 @dataclass(frozen=True)
 class Thread:
@@ -45,8 +42,6 @@ class Event:
     thread: Thread
     identity: str
     sender: str
-    direct: tuple[str, ...] = ()
-    sender_kind: str = "human"
     provenance: str = "message"
 
     def __post_init__(self):
@@ -55,27 +50,3 @@ class Event:
             raise ValueError("invalid event identity")
         if self.provenance not in ("message", "edit", "file_shared"):
             raise ValueError("invalid provenance")
-        for value in self.direct:
-            identifier(value)
-        object.__setattr__(self, "direct", tuple(sorted(set(self.direct))))
-
-
-def addresses(text: str) -> tuple[str, ...]:
-    """Parse flat Slack composition only; rich blocks need bridge validation."""
-    visible = []
-    fenced = False
-    inline = False
-    for line in text.splitlines():
-        if line.lstrip().startswith(">>>"):
-            break
-        if line.lstrip().startswith(">"):
-            continue
-        parts = re.split(r"(```|`)", line)
-        for part in parts:
-            if part == "```":
-                fenced = not fenced
-            elif part == "`" and not fenced:
-                inline = not inline
-            elif not fenced and not inline:
-                visible.append(part)
-    return tuple(sorted(set(re.findall(r"<@([A-Z0-9]+)>", "\n".join(visible)))))

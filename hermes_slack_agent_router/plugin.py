@@ -268,8 +268,7 @@ class Gate:
                 asyncio.create_task(bridge.recipient_metadata(bound, topology)),
             ]
             try:
-                history, metadata = await asyncio.gather(*requests)
-                labels, whoami = metadata
+                history, whoami = await asyncio.gather(*requests)
             finally:
                 for request in requests:
                     request.cancel()
@@ -327,12 +326,10 @@ class Gate:
             topology[0],
             copy.deepcopy(body["event"]),
             provenance,
-            recipient_labels=labels,
             recipient_whoami=whoami,
             context_people=people,
         )
         started, stage, questions = time.monotonic(), "scope", 0
-        batch = None
         try:
             # The serving runtime may differ from the receiving adapter's profile.
             async with adapter.gateway_runner._async_profile_scope_for_source(bound.source):
@@ -351,21 +348,15 @@ class Gate:
                 if isinstance(exc, JevError)
                 else ("transport-timeout" if isinstance(exc, TimeoutError) else "semantic-invalid", 0)
             )
-            question = "none"
-            if reason == "answer-confidence" and stage == "inference" and batch is not None:
-                candidate = str(exc).removeprefix("uncertain relevant answer: ")
-                if candidate in batch["questions"]:
-                    question = candidate  # Generated local key, never an arbitrary exception suffix.
-            # Source-owned codes/keys and numeric measurements, never exception payloads.
+            # Source-owned codes and numeric measurements, never exception payloads.
             logger.warning(
                 "agent-router unresolved: classifier-failed stage=%s reason=%s status=%d "
-                "elapsed_ms=%d questions=%d question=%s bytes=%d dropped=%d",
+                "elapsed_ms=%d questions=%d bytes=%d dropped=%d",
                 stage,
                 reason,
                 status,
                 (time.monotonic() - started) * 1000,
                 questions,
-                question,
                 exc.size if isinstance(exc, JevError) else 0,
                 exc.dropped if isinstance(exc, JevError) else 0,
             )

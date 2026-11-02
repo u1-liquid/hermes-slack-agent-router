@@ -5,7 +5,7 @@ import copy
 import re
 from dataclasses import dataclass
 
-from .policy import Event, Recipient, Thread, addresses
+from .policy import Event, Recipient, Thread
 
 
 class Uncertain(ValueError):
@@ -148,29 +148,6 @@ def canonical_text(event, *, prior=False):
     return result, tuple(provenance)
 
 
-def composition(event):
-    direct = set() if event.get("blocks") else set(addresses(event.get("text", "")))
-
-    def visit(node):
-        kind = node.get("type")
-        if kind in ("rich_text_quote", "rich_text_preformatted"):
-            return
-        if kind == "user":
-            if not node.get("style", {}).get("code"):
-                direct.add(node["user_id"])
-        elif kind in ("rich_text", "rich_text_section", "rich_text_list"):
-            for child in node.get("elements", []):
-                visit(child)
-        elif kind not in ("text", "link", "emoji", "broadcast", "channel", "color", "date"):
-            raise Uncertain("unrecognized block composition")
-
-    for block in event.get("blocks", []):
-        if block.get("type") != "rich_text":
-            raise Uncertain("unsupported non-composition block")
-        visit(block)
-    return tuple(sorted(direct))
-
-
 def contextual_person(user_id, payload, team):
     """Whitelist same-workspace Slack identity fields, never an entire profile."""
     result = {
@@ -224,22 +201,12 @@ class Bridge:
         self.adapter = adapter
 
     async def recipient_metadata(self, bound, topology):
-        """Request-local native labels and separately named Slack identity fields.
+        """Request-local, separately named Slack identity fields.
 
         A display-name cache may contain real-name fallbacks, so never reinterpret
         it as display_name. auth.test's bot username is the only warm fallback.
         """
         team = bound.event.thread.workspace
-
-        def field(value):
-            return (
-                value
-                if isinstance(value, str) and len(value) <= 128 and not any(ord(c) < 32 for c in value)
-                else None
-            )
-
-        def bounded(values):
-            return tuple(sorted({v for v in values if field(v) is not None and v.strip()}))[:3]
 
         async def resolve(recipient, witness):
             runner = self.adapter.gateway_runner
@@ -251,49 +218,29 @@ class Bridge:
                 m[Platform.SLACK] for m in maps if Platform.SLACK in m and id(m[Platform.SLACK]) == witness[0]
             )
             handle = adapter._team_bot_names.get(team)
-            whoami = {
+            fallback = {
                 "user_id": recipient.bot_user,
-                "username": field(handle),
+                "username": handle
+                if isinstance(handle, str) and len(handle) <= 128 and not any(ord(c) < 32 for c in handle)
+                else None,
                 "display_name": None,
                 "real_name": None,
             }
-            labels = bounded((handle,))
+            person = fallback
             try:
                 response = await adapter._team_clients[team].users_info(user=recipient.bot_user)
-                user = response.get("user")
-                if (
-                    response.get("ok") is True
-                    and isinstance(user, dict)
-                    and user.get("id") == recipient.bot_user
-                    and user.get("team_id") == team
-                    and user.get("is_bot") is True
-                    and isinstance(user.get("profile", {}), dict)
-                ):
-                    profile = user.get("profile", {})
-                    whoami.update(
-                        username=field(user["name"]) if "name" in user else field(handle),
-                        display_name=field(profile.get("display_name")),
-                        real_name=field(
-                            profile["real_name"] if "real_name" in profile else user.get("real_name")
-                        ),
-                    )
-                    labels = bounded(
-                        (
-                            handle,
-                            profile.get("display_name"),
-                            profile.get("real_name") or user.get("real_name"),
-                        )
-                    )
+                verified = contextual_person(recipient.bot_user, response, team)
+                if verified["kind"] == "bot":
+                    person = verified
+                    if "name" not in response["user"]:
+                        person["username"] = fallback["username"]
             except (TimeoutError, SlackClientError, OSError):
                 pass
-            return recipient.bot_user, labels, whoami
+            return recipient.bot_user, {key: value for key, value in person.items() if key != "kind"}
 
         async with asyncio.TaskGroup() as group:
             lookups = [group.create_task(resolve(r, w)) for r, w in zip(*topology)]
-        rows = [task.result() for task in lookups]
-        return tuple((user, labels) for user, labels, _ in rows), tuple(
-            (user, whoami) for user, _, whoami in rows
-        )
+        return tuple(task.result() for task in lookups)
 
     async def context_people(self, bound, history, whoami):
         """Exact source-window people, via serving client only; never eligibility."""
@@ -559,14 +506,8 @@ class Bridge:
         session_key = adapter._source_session_key(source)
         recipient = Recipient(team, bot, identity.runtime_profile)
         event_id = ts + (":" + event["edited"]["ts"] if provenance == "edit" else "")
-        try:
-            direct = composition(event)
-        except Uncertain:
-            # A verified ordinary human with unknown composition is not a native control exemption.
-            # Semantic ingress validates it before any native listener, without retaining content.
-            direct = addresses(event.get("text", ""))
         return Bound(
-            Event(thread, event_id, sender, direct, provenance=provenance),
+            Event(thread, event_id, sender, provenance=provenance),
             recipient,
             source,
             identity,
