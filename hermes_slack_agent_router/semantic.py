@@ -188,7 +188,6 @@ def prepare(source: Snapshot, recipient: Recipient):
         raise SemanticError("invalid native whoami binding")
     if (
         not source.text
-        or len(source.text) > 6000
         or len(source.history) > 8
         or not 1 <= len(source.recipients) <= 4
         or len(set(source.recipients)) != len(source.recipients)
@@ -196,8 +195,6 @@ def prepare(source: Snapshot, recipient: Recipient):
         or len({r.bot_user for r in source.recipients}) != len(source.recipients)
         or len({h.identity for h in source.history}) != len(source.history)
         or any(Decimal(h.identity) >= Decimal(current_timestamp) for h in source.history)
-        or any(len(h.text) > 6000 for h in source.history)
-        or sum(len(h.text) for h in source.history) > 48000
         or len(labels) != len(source.recipient_labels)
         or set(labels) - {r.bot_user for r in source.recipients}
         or any(
@@ -286,7 +283,7 @@ def prepare(source: Snapshot, recipient: Recipient):
         },
         "conversation": {
             "reading_order": "Oldest to newest; CURRENT is the final record.",
-            "window": "Exact root plus latest seven prior records, strictly before CURRENT; middle events may be absent. No missing event is supplied or inferred.",
+            "window": "Exact root plus up to seven latest prior records, strictly before CURRENT; oldest non-root records may be omitted for the serialized request budget, and middle events may be absent. No missing event is supplied or inferred.",
             "provenance_encoding": "Each provenance entry is [start, end, kind] in Unicode codepoints of that record's exact text; end is exclusive. Authored, reference and separator retain their source meanings.",
             "records": records,
         },

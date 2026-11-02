@@ -371,7 +371,7 @@ class CoherentResponseContract(unittest.TestCase):
         self.assertEqual(len(batch["questions"]["scope"]["criteria"]), 64)
         self.assertLessEqual(len(serialize_request(batch)), JevClient.request_limit)
         self.assertLessEqual(len(json.dumps(controlled_answers(batch, {})).encode()), JevClient.limit)
-        for invalid in (replace(source, text="x" * 6001), replace(source, recipients=(A, A))):
+        for invalid in (replace(source, text=""), replace(source, recipients=(A, A))):
             with self.assertRaises(SemanticError):
                 prepare(invalid, A)
         with self.assertRaises(SemanticError):

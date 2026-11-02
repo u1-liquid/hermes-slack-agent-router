@@ -1,6 +1,7 @@
 """Read-only integration with official Hermes bf0203a794a0 private seams."""
 
 import asyncio
+import copy
 import re
 from dataclasses import dataclass
 
@@ -214,16 +215,13 @@ class Bound:
     source: object
     identity: object
     session_key: str
+    native_event: dict
     sender_metadata: dict | None = None
 
 
 class Bridge:
-    def __init__(self, adapter, *, timeout=0.75):
+    def __init__(self, adapter):
         self.adapter = adapter
-        self.timeout = timeout
-
-    async def call(self, awaitable):
-        return await asyncio.wait_for(awaitable, self.timeout)
 
     async def recipient_metadata(self, bound, topology):
         """Request-local native labels and separately named Slack identity fields.
@@ -261,7 +259,7 @@ class Bridge:
             }
             labels = bounded((handle,))
             try:
-                response = await self.call(adapter._team_clients[team].users_info(user=recipient.bot_user))
+                response = await adapter._team_clients[team].users_info(user=recipient.bot_user)
                 user = response.get("user")
                 if (
                     response.get("ok") is True
@@ -297,10 +295,8 @@ class Bridge:
             (user, whoami) for user, _, whoami in rows
         )
 
-    async def context_people(self, bound, history, whoami, *, deadline=None):
+    async def context_people(self, bound, history, whoami):
         """Exact source-window people, via serving client only; never eligibility."""
-        import time
-
         from slack_sdk.errors import SlackClientError
 
         team = bound.event.thread.workspace
@@ -316,15 +312,8 @@ class Bridge:
         authors = {bound.event.sender, *(h.sender for h in history)}
 
         async def resolve(user):
-            if deadline is not None and deadline <= time.monotonic():
-                return user, contextual_person(user, {}, team)
-            timeout = (
-                self.timeout
-                if deadline is None
-                else max(0.001, min(self.timeout, deadline - time.monotonic()))
-            )
             try:
-                payload = await asyncio.wait_for(client.users_info(user=user), timeout)
+                payload = await client.users_info(user=user)
                 return user, contextual_person(user, payload, team)
             except (TimeoutError, SlackClientError, OSError):
                 return user, contextual_person(user, {}, team)
@@ -365,7 +354,7 @@ class Bridge:
                 chat_id=thread.channel,
                 chat_type="group",
                 user_id=bound.event.sender,
-                thread_id=thread.root,
+                thread_id=adapter._session_thread_ts(bound.native_event, bound.source.message_id, False, {}),
                 scope_id=team,
                 message_id=bound.source.message_id,
             )
@@ -390,7 +379,7 @@ class Bridge:
             if not adapter.is_connected or task is None or task.done() or adapter._message_handler is None:
                 continue
             app, handler = adapter._app, adapter._handler
-            connected = await self.call(adapter._socket_transport_connected())
+            connected = await adapter._socket_transport_connected()
             if connected is None:
                 raise TopologyError("unknown native socket state")
             if not connected or adapter._socket_ping_pong_stale():
@@ -489,17 +478,23 @@ class Bridge:
         event = dict(event)
         provenance = "message"
         if event.get("subtype") == "message_changed":
-            event = {**event, **(event.get("message") or {})}
-            event.pop("message", None)
-            if not event.get("edited", {}).get("ts"):
+            event = adapter._normalize_changed_message(event)
+            if event is None:
+                raise Uncertain("native edit not admitted")
+            if not isinstance(event.get("edited"), dict) or not event["edited"].get("ts"):
                 raise Uncertain("edit identity missing")
+        if event.get("edited"):
+            edit = event["edited"]
+            if not isinstance(edit, dict) or not isinstance(edit.get("ts"), str):
+                raise Uncertain("edit identity missing")
+            Thread(team, event.get("channel") or event.get("channel_id") or "", edit["ts"])
             provenance = "edit"
         channel = event.get("channel") or event.get("channel_id")
         if not channel:
             raise Uncertain("missing channel")
         channel_type = event.get("channel_type")
         if channel_type is None:
-            info = await self.call(client.conversations_info(channel=channel))
+            info = await client.conversations_info(channel=channel)
             obj = info.get("channel") or {}
             if info.get("ok") is not True or obj.get("id") != channel:
                 raise Uncertain("unverified conversation")
@@ -510,7 +505,7 @@ class Bridge:
             file_id = event.get("file_id")
             if not file_id:
                 raise Uncertain("missing file id")
-            result = await self.call(client.files_info(file=file_id))
+            result = await client.files_info(file=file_id)
             file = result.get("file") or {}
             if result.get("ok") is not True or not file.get("mimetype", "").startswith("video/"):
                 raise Uncertain("outside verified video fallback")
@@ -530,7 +525,7 @@ class Bridge:
         sender = event.get("user")
         if not sender or sender == bot or adapter._event_declares_bot_sender(event):
             raise Uncertain("native bot/self/unknown sender")
-        payload = await self.call(client.users_info(user=sender))
+        payload = await client.users_info(user=sender)
         user = payload.get("user") or {}
         if payload.get("ok") is not True or user.get("id") != sender or user.get("is_bot") is not False:
             raise Uncertain("no positive human evidence")
@@ -551,7 +546,12 @@ class Bridge:
         root = event.get("thread_ts") or ts
         thread = Thread(team, channel, root)
         source = adapter.build_source(
-            chat_id=channel, chat_type="group", user_id=sender, thread_id=root, scope_id=team, message_id=ts
+            chat_id=channel,
+            chat_type="group",
+            user_id=sender,
+            thread_id=adapter._session_thread_ts(event, ts, False, {}),
+            scope_id=team,
+            message_id=ts,
         )
         identity = adapter._canonicalize(source)
         if identity is None or identity.adapter() is not adapter or identity.transport_inferred:
@@ -571,5 +571,6 @@ class Bridge:
             source,
             identity,
             session_key,
+            copy.deepcopy(event),
             contextual_person(sender, payload, team),
         )

@@ -361,7 +361,7 @@ class RealWhoamiContrast(unittest.IsolatedAsyncioTestCase):
                         history_start = len(calls)
                         native_acquisition_error = None
                         try:
-                            history = await Gate.history(client, thread, ts, started + 2.5)
+                            history = await Gate.history(client, thread, ts)
                         except SemanticError as exc:
                             if str(exc) != "unsupported prior block":
                                 raise

@@ -242,11 +242,23 @@ pre_gateway_dispatch hook rechecks source, sender, receiver/runtime/runner, drop
 newly hydrated context/backfill/media while retaining only selected inert prior.
 It does not erase existing native session memory or action authorization.
 
-Accepted42fd417 acquisition remains unchanged: exact-root/latest-seven, normal
-one-call fetch, missing-only cursor fill, exact-root lookup, four-call/one-second
-bounds, strict order/cutoff/dedup/foreign/future/conflict checks, and cancellation/
-causal deadlines. Whole ingress2.5s and official inference1.2s remain. Timing tests
-are engineering checks, not live acknowledgement or genuine human reply evidence.
+Accepted42fd417 selection remains unchanged: exact-root/latest-seven, normal
+one-call fetch, missing-only cursor fill, exact-root lookup, four-call/count-byte
+bounds and strict order/cutoff/dedup/foreign/future/conflict checks. The former
+one-second acquisition, .75-second lookup, 2.5-second ingress and 1.2-second Jev
+abort policies are superseded: the router now imposes no elapsed cutoff, and
+httpx uses explicit `timeout=None`. Controlled virtual scheduler advancement
+past all former cutoffs must still deliver exact own-source/metadata. Actual
+caller cancellation and external failures must drain acquisitions and close HTTP
+resources. These checks are not live acknowledgement or genuine reply evidence. Additional
+controlled integration covers definitive native authorization and channel/wake
+predicates, per-peer source threads, exact524288/+1-byte fitting and protected
+CURRENT/ROOT, regenerated indices/directory, single HTTP, active explicit edits
+at bind/history/metadata/HTTP, rapid/late-result races, equal duplicates/distinct
+messages, pending-versus-cancel, native shutdown drain/HTTP closure and unload sealing.
+No post-handoff retraction, non-cooperative successful join or hot-unload/hydration
+guarantee is claimed. Historical character/raw-original caps are superseded by
+actual serialized oldest-nonroot fitting; acquisition page/count and response caps remain.
 
 ## One fixed official qualification batch
 
@@ -276,7 +288,8 @@ Controlled checks prove source-derived chronological order and directory joins;
 official pair outcomes and full all-case qualification are distinct results.
 Actual maximum serialization includes all13 people (9 unique authors plus4 native
 candidates), maximum separate native fields inline and in the directory, with
-unchanged eligible4/history7/byte/deadline limits.
+unchanged eligible4/history7/byte limits; historical deadline-policy receipts
+remain historical, not current timeout-removal qualification.
 All30 original fictional records/39 receiver observations remain required, including
 metadata-degraded ID-only rows. Japanese/M1/M2 stay their exact original four-candidate
 semantic sources, not invented native equivalents. Existing10 duplicate-name

@@ -1,14 +1,15 @@
 """Official TypeSafe System One Choice protocol; Hermes-scoped credentials."""
 
-import asyncio
 import json
 import math
 
 
 class JevError(ValueError):
-    def __init__(self, message, *, status=0):
+    def __init__(self, message, *, status=0, size=0, dropped=0):
         super().__init__(message)
         self.status = status if type(status) is int and 100 <= status <= 599 else 0
+        self.size = size if type(size) is int and size >= 0 else 0
+        self.dropped = dropped if type(dropped) is int and dropped >= 0 else 0
 
     @property
     def diagnostic(self):
@@ -17,11 +18,12 @@ class JevError(ValueError):
         code = {
             "invalid serialized request": "request-invalid",
             "oversized serialized request": "request-oversized",
+            "unsupported request size": "unsupported-request-size",
             "Hermes Jev credential scope unavailable": "scope-unavailable",
             "Hermes Jev credential unavailable": "credential-unavailable",
             "Jev HTTP request failed": "http-rejected",
             "Jev HTTPS transport failed": "transport-failed",
-            "Jev HTTPS deadline exceeded": "transport-deadline",
+            "Jev HTTPS transport timed out": "transport-timeout",
             "unsupported Jev response encoding": "response-encoding",
             "oversized or invalid Jev response length": "response-length",
             "oversized Jev response": "response-oversized",
@@ -99,7 +101,7 @@ def serialize_request(batch):
     except (ValueError, TypeError, UnicodeError):
         raise JevError("invalid serialized request") from None
     if len(raw) > JevClient.request_limit:
-        raise JevError("oversized serialized request")
+        raise JevError("oversized serialized request", size=len(raw))
     return raw
 
 
@@ -111,17 +113,12 @@ class JevClient:
     limit = 262144
     request_limit = 524288
 
-    def __init__(self, timeout=1.2):
-        if not math.isfinite(timeout) or not 0 < timeout <= 1.2:
-            raise ValueError("Jev sub-budget must be in (0, 1.2] seconds")
-        self.timeout = timeout
-
     async def _exchange(self, raw, key):
         import httpx
 
         async with (
             httpx.AsyncClient(
-                timeout=self.timeout,
+                timeout=None,
                 follow_redirects=False,
                 trust_env=False,
             ) as client,
@@ -168,17 +165,14 @@ class JevClient:
         import httpx
 
         try:
-            # The total sub-budget includes connect/send/stream and resource cleanup;
-            # the caller's whole-ingress deadline may cancel it earlier.
-            async with asyncio.timeout(self.timeout):
-                stdout = await self._exchange(raw, key)
+            stdout = await self._exchange(raw, key)
             try:
                 result = json.loads(stdout)
             except (ValueError, UnicodeError):
                 raise JevError("invalid Jev JSON") from None
             return validate_answers(batch, result)
         except (TimeoutError, httpx.TimeoutException):
-            raise JevError("Jev HTTPS deadline exceeded") from None
+            raise JevError("Jev HTTPS transport timed out") from None
         except (httpx.HTTPError, OSError, ValueError) as exc:
             if isinstance(exc, JevError):
                 raise

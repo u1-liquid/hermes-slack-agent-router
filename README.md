@@ -100,7 +100,7 @@ Slack adapters. Each candidate needs authenticated identity in the same Slack
 workspace, a live native socket and a served runtime. Native source routing is
 resolved separately for each transport and this sender/channel/thread; configured
 profiles, display names, history authors and human allowlists do not establish native delivery eligibility.
-The request-local people directory separately includes CURRENT/root/latest-seven human and bot authors plus verified native candidates (at most13 people, still only four eligible recipients). It carries exact IDs, separate username/display_name/real_name and validated human/bot/unknown kind; missing metadata stays explicit. Serving-client users.info reads only missing source-window author IDs, deduped within the existing acquisition deadline. No workspace enumeration or persistent people registry runs. Inline sender metadata uses the same directory fields.
+The request-local people directory separately includes CURRENT/root/latest-seven human and bot authors plus verified native candidates (at most13 people, still only four eligible recipients). It carries exact IDs, separate username/display_name/real_name and validated human/bot/unknown kind; missing metadata stays explicit. Serving-client users.info reads only missing source-window author IDs, deduped within the request, without a plugin-owned elapsed-time cutoff. No workspace enumeration or persistent people registry runs. Inline sender metadata uses the same directory fields.
 
 Every utterance carries its actual timestamp and source-derived order; CURRENT is newer than all included priors. Native edit event IDs stay separately bound. Root is an old anchor, and the root+seven window may omit middle messages. Newer clear human same-topic handoffs supersede older assignments only for that scope; historical proposals/assignments remain evidence, not executable approvals. A correction can address a preceding proposal's author without addressing somebody named as its repair object. Chronology and people data add no role/approval/confidence gate.
 
@@ -167,27 +167,44 @@ log keys, transcripts or service error bodies, or store routing decisions.
   is absent, one exact `conversations.history(oldest=root, inclusive=true, limit=1)`
   lookup share a maximum of four SDK calls. Root identity and every supplied
   thread/workspace/channel field must match; no arbitrary result substitutes for it.
-  All calls share one second, ending before the ingress deadline minus 1.3 seconds.
+  The plugin imposes no elapsed-time cutoff on these calls.
   Live root `reply_count`/`latest_reply` are not cutoff snapshots.
   Missing/unverifiable roots, cursor loops, exhausted bounds without a complete
   tail, and malformed, foreign/future/conflicting records yield no work. Each decoded
   response is capped at 1 MiB (at most 4 MiB across four calls), not a pre-download
   memory cap. Native SDK retries may add wire attempts. Slack has no atomic history
   snapshot; unseen concurrent edits/deletions can race.
-- Current input is limited to 6,000 characters, six units, four recipients and
-  at most50 questions (one response, one conditional scope and48 optional priors; scope has up to63 nonempty source groups plus unsafe). Up to eight distinct prior records have 6,000 characters each
-  (48,000 aggregate), with a 64 KiB retained original-record limit. The Jev request
-  limit is 524,288 bytes; its response limit is 262,144 bytes. Nothing is silently
-  truncated. Selected media and inseparable authored/reference composition are unsupported.
+- Current input retains its full text, with at most six units, four recipients and
+  at most50 questions (one response, one conditional scope and48 optional priors; scope has up to63 nonempty source groups plus unsafe). Up to eight distinct prior records are acquired
+  before request fitting. The former per-record/aggregate text and raw-original
+  size blockers are removed. The Jev request
+  limit is 524,288 UTF-8 bytes, measured using actual prepare/serialize output with
+  all question/escaping overhead. Remove whole oldest non-root priors until it fits;
+  regenerate indices/questions/people and use that same fitted source for the
+  single inference and assembly. Full CURRENT and exact ROOT are protected, never
+  shortened. Protected-only excess ends locally as `unsupported-request-size`,
+  with no HTTP, semantic NO, retry or new Slack notification. Invalid serialization
+  does not shed records. Its response limit remains 262,144 bytes, independently;
+  response failure never causes fitting/retry. Selected media and inseparable
+  authored/reference composition are unsupported.
   Prior bot responses support native `markdown` and text-only `section` blocks,
   retaining their visible text and exact leaf provenance rather than replacing them
   with notification fallback text. Unknown blocks, section fields/accessories and
   missing user identities still reject the view. Human CURRENT block support is
   unchanged (`rich_text` only); prior block support grants no current admission.
-- The ingress budget is 2.5 seconds, including context and the at-most-1.2-second
-  Jev request. These are engineering deadlines, not hard real-time guarantees.
+- The router imposes no elapsed-time cutoff on ingress, native lookups, history or
+  Jev inference. Its HTTP client explicitly uses `timeout=None`, including connect,
+  read, write and pool waits. Native connector/framework transport behavior is
+  unchanged; actual external errors still fail safely. Caller cancellation
+  propagates and drains owned acquisitions/closes HTTP resources. This does not
+  add ordinary-later-message cancellation. Active evaluations are enrolled in the
+  native adapter task set so cooperative shutdown drains their I/O and HTTP resources.
   Jev TLS is verified; redirects, environment proxies and automatic Jev retries are disabled.
-- Original and projected native sender/channel/mention/wake policy must permit the
+- Definitive runner authorization under the transport home must permit private
+  inference. Original and own-CURRENT admission delegate to the actual native
+  channel/mention/wake predicates; no cloned allowlist or global @ bypass runs.
+  Native session thread coordinates, not the history root, govern profile routing.
+  Final topology validation follows the awaited own-CURRENT gate. These permit the
   request. Commands, DMs/MPIMs, bots/self and native pending approval, clarification,
   confirmation and update controls retain native handling. Inferred recipients do
   not grant authority. Monitoring bots follow native bot policy.
@@ -198,6 +215,14 @@ log keys, transcripts or service error bodies, or store routing decisions.
 - The plugin keeps only request-local state. Hermes owns history, sessions, queues
   and deduplication. Separate ingress events can classify again and stochastic
   decisions can differ; there is no cross-process consensus or exactly-once promise.
+  A minimal active-evaluation map owns only source ID/sender/root/true edited.ts
+  revision and live tasks. A newer explicit edit invalidates, cancels and awaits
+  obsolete pre-handoff work; equal envelope duplicates and distinct later messages
+  do not cancel. Late cancelled results cannot hand off or resurrect the original
+  body via pending state. Outer delivery event_ts is not an edit signal.
+  This does not retract a queued/running native turn, clear processed-message
+  claims or undo actions. Quiescent unload seals new plugin work; it is not an
+  intentional cancellation trigger or a safe hot-unload/hydration guarantee.
 
 ## Troubleshooting and disabling
 
@@ -207,7 +232,7 @@ served profile, serving-profile key and bounded newest-page root/recent view. Lo
 `incomplete-context`, `native-topology-unresolved`, `native-topology-changed`, `classifier-failed` and
 `coverage-or-grounding-unresolved` distinguish bounded failures. Fetch diagnostics
 separate `context-fetch-not-permitted` (including unavailable channel access),
-`context-fetch-rate-limited`, `context-fetch-timeout`, `context-fetch-api-failed`
+`context-fetch-rate-limited`, `context-fetch-transport-timeout`, `context-fetch-api-failed`
 and `context-fetch-failed` (SDK/transport). They never print raw API error bodies.
 The pinned adapter uses its authenticated workspace client for history; there is no
 separate native user/history client. Resolve access failures through the existing

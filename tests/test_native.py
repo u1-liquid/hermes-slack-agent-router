@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from test_semantic import context_priors, context_view
 
@@ -99,7 +99,9 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.b = Recipient("TDEMO", "UBETA", "default")
         self.key = Thread("TDEMO", "CDEMO", "100.001")
 
-        self.adapter = SlackAdapter(PlatformConfig(extra={"reply_in_thread": True}))
+        self.adapter = SlackAdapter(
+            PlatformConfig(extra={"reply_in_thread": True, "allowed_users": ["UHUMAN"]})
+        )
         # Avoid constructor startup, disk stores, process-global registration and workers.
         # These are native runner state fields, not replacement routing functions.
         self.runner = GatewayRunner.__new__(GatewayRunner)
@@ -145,7 +147,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.adapter._running = True
         self.adapter._socket_mode_task = asyncio.Future()
         self.adapter._handler = SimpleNamespace(client=SimpleNamespace(is_connected=lambda: True))
-        self.peer = SlackAdapter(PlatformConfig(extra={"reply_in_thread": True}))
+        self.peer = SlackAdapter(PlatformConfig(extra={"reply_in_thread": True, "allowed_users": ["UHUMAN"]}))
         self.peer.gateway_runner = self.runner
         self.peer._team_bot_user_ids = {"TDEMO": "UALPHA"}
         self.peer._team_clients = {"TDEMO": self.client}
@@ -186,6 +188,14 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             return await next()
 
         self.app.use(observe)
+        # Native status publication is asynchronous; drain its actual writer before
+        # restoring the scoped home or deleting the fixture, not via a timing wait.
+        from gateway.status import flush_runtime_status_async
+
+        async def finish_status_writes():
+            self.assertTrue(await flush_runtime_status_async())
+
+        self.addAsyncCleanup(finish_status_writes)
         self.addAsyncCleanup(self.adapter.cancel_background_tasks)
         self.addCleanup(self.gate.dispose)
         self.sequence = 200
@@ -296,9 +306,746 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("SUMMARY_ONLY", self.model.await_args.args[0].text)
 
-    async def test_newest_page_with_network_latency_delivers_exact_scoped_input(self):
-        import time
+    async def test_native_definitive_authorization_precedes_classifier_egress(self):
+        self.enable_semantic()
+        self.adapter.set_authorization_check(lambda *args, **kwargs: None)
+        # Native extra allowlist, not a replacement authorization predicate.
+        self.adapter.config.extra["allowed_users"] = ["UOTHER"]
+        self.peer.config.extra["allowed_users"] = ["UOTHER"]
+        body = self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY.")
+        from hermes_slack_agent_router.bridge import Bridge
 
+        bound = await Bridge(self.adapter).bind(body)
+        self.assertFalse(self.runner._is_user_authorized_for_source(bound.source))
+        await self.assert_rejected(body)
+        self.client.conversations_replies.assert_not_awaited()
+        self.gate.jev.ask.assert_not_awaited()
+
+    async def test_native_authorization_uses_transport_home_not_thread_routed_runtime(self):
+        from gateway.profile_routing import ProfileRoute
+
+        from hermes_slack_agent_router.bridge import Bridge
+
+        self.enable_semantic()
+        self.runner.config.profile_routes.insert(
+            0, ProfileRoute("thread-runtime", "slack", "peer", chat_id="CDEMO", thread_id="100.001")
+        )
+        self.adapter.set_authorization_check(lambda *args, **kwargs: None)
+        body = self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY.")
+        bound = await Bridge(self.adapter).bind(body)
+        self.assertEqual(bound.identity.authorization_home, self.home)
+        self.assertEqual(bound.identity.runtime_home, self.peer_home)
+        self.adapter.config.extra["allowed_users"] = ["UOTHER"]
+        self.peer.config.extra["allowed_users"] = ["UHUMAN"]
+        self.assertFalse(self.runner._is_user_authorized_for_source(bound.source))
+        await self.assert_rejected(body)
+        self.gate.jev.ask.assert_not_awaited()
+        self.client.conversations_replies.assert_not_awaited()
+        self.adapter.config.extra["allowed_users"] = ["UHUMAN"]
+        self.peer.config.extra["allowed_users"] = ["UOTHER"]
+        self.assertTrue(self.runner._is_user_authorized_for_source(bound.source))
+        await self.dispatch(body)
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.model.assert_awaited_once()
+        self.assertEqual(self.model.await_args.args[0].source.profile, "peer")
+        self.assertEqual(self.model.await_args.args[0].text, "DIAGRAM_ONLY.")
+
+    async def test_native_fitting_preserves_root_current_and_sheds_oldest_whole_prior(self):
+        import httpx
+        from test_semantic import controlled_answers
+
+        from hermes_slack_agent_router import plugin
+        from hermes_slack_agent_router.jev import JevClient, serialize_request
+        from hermes_slack_agent_router.semantic import assemble, prepare
+
+        self.supply_native_names()
+        records = [
+            {"ts": "100.001", "user": "UROOT", "text": "R" * 160000},
+            {"ts": "101.001", "user": "UDROPPED", "text": '界"\\\t' * 40000, "metadata": "m" * 70000},
+            {"ts": "102.001", "user": "URETAINED", "text": "exact recent context"},
+        ]
+        self.client.conversations_replies.return_value = {"ok": True, "messages": records}
+        text = "<@UBETA> DIAGRAM_ONLY" + "c" * 7000
+        body = self.message(text)
+        original = copy.deepcopy(body)
+        self.gate.jev = JevClient()
+        (self.home / ".env").write_text("TYPESAFE_API_KEY=fictional-budget-fixture\n")
+        sent, clients = [], []
+        native = httpx.AsyncClient
+
+        async def respond(request):
+            sent.append(request)
+            batch = json.loads(request.content)
+            return httpx.Response(200, json=controlled_answers(batch, {"for_UBETA": "u0"}))
+
+        def client(**kwargs):
+            value = native(transport=httpx.MockTransport(respond), **kwargs)
+            clients.append(value)
+            return value
+
+        with (
+            patch("httpx.AsyncClient", side_effect=client),
+            patch.object(plugin, "assemble", wraps=assemble) as used,
+        ):
+            await self.dispatch(body)
+            await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        self.assertEqual(len(sent), 1)
+        used.assert_called_once()
+        fitted = used.call_args.args[0]
+        self.assertEqual([h.identity for h in fitted.history], ["100.001", "102.001"])
+        self.assertEqual([h.original for h in fitted.history], [records[0], records[2]])
+        self.assertEqual(fitted.text, text)
+        self.assertEqual(sent[0].content, serialize_request(prepare(fitted, used.call_args.args[1])))
+        state = json.loads(sent[0].content)["state"]
+        self.assertNotIn("UDROPPED", [p["user_id"] for p in state["people"]])
+        self.assertEqual(state["source_selection"]["current_record"], "conversation.records[2]")
+        self.assertEqual([r["order"] for r in state["conversation"]["records"]], [0, 1, 2])
+        self.assertEqual(body, original)
+        self.model.assert_awaited_once()
+        self.assertEqual(self.model.await_args.args[0].text, text.removeprefix("<@UBETA> "))
+        self.assertTrue(all(c.is_closed for c in clients))
+
+    async def test_native_edit_cancels_active_work_before_handoff_at_each_io_boundary(self):
+        import httpx
+        from test_semantic import controlled_answers
+
+        from hermes_slack_agent_router.jev import JevClient
+
+        self.supply_native_names()
+        info = self.client.users_info.side_effect
+        (self.home / ".env").write_text("TYPESAFE_API_KEY=fictional-edit-fixture\n")
+        native = httpx.AsyncClient
+
+        class AnswerStream(httpx.AsyncByteStream):
+            def __init__(self, batch, wait):
+                self.batch, self.wait, self.closed = batch, wait, False
+
+            async def __aiter__(self):
+                await self.wait()
+                yield json.dumps(controlled_answers(self.batch, {"for_UBETA": "u0"})).encode()
+
+            async def aclose(self):
+                self.closed = True
+
+        for ordinal, phase in enumerate(("bind", "history", "metadata", "http")):
+            with self.subTest(phase=phase):
+                started, cancelled, closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                held = [False]
+                clients, streams = [], []
+
+                async def block(started=started, cancelled=cancelled, closed=closed):
+                    started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        cancelled.set()
+                        raise
+                    finally:
+                        closed.set()
+
+                async def directory(*, user, phase=phase, block=block, held=held):
+                    target = "UHUMAN" if phase == "bind" else "UBETA"
+                    if phase in ("bind", "metadata") and user == target and not held[0]:
+                        held[0] = True
+                        await block()
+                    return await info(user=user)
+
+                async def page(phase=phase, block=block, held=held, **kwargs):
+                    if phase == "history" and "latest" in kwargs and not held[0]:
+                        held[0] = True
+                        await block()
+                    return {"ok": True, "messages": [{"ts": "100.001", "user": "UHUMAN", "text": "anchor"}]}
+
+                async def respond(request, phase=phase, block=block, streams=streams):
+                    batch = json.loads(request.content)
+                    if phase == "http" and "OLD_MARKER" in context_view(batch["state"])["CURRENT"]["text"]:
+                        stream = AnswerStream(batch, block)
+                        streams.append(stream)
+                        return httpx.Response(200, stream=stream)
+                    return httpx.Response(200, json=controlled_answers(batch, {"for_UBETA": "u0"}))
+
+                def client(clients=clients, respond=respond, native=native, **kwargs):
+                    value = native(transport=httpx.MockTransport(respond), **kwargs)
+                    clients.append(value)
+                    return value
+
+                self.model.reset_mock()
+                self.gate.jev = JevClient()
+                self.client.users_info.side_effect = directory
+                self.client.conversations_replies.side_effect = page
+                body = self.message("<@UBETA> OLD_MARKER", ts=f"{400 + ordinal}.001")
+                edited = copy.deepcopy(body)
+                edited["event"] = {
+                    "type": "message",
+                    "subtype": "message_changed",
+                    "channel": "CDEMO",
+                    "channel_type": "channel",
+                    "team": "TDEMO",
+                    "ts": f"{500 + ordinal}.001",
+                    "message": {
+                        **body["event"],
+                        "text": "<@UBETA> NEW_MARKER",
+                        "edited": {"ts": f"{500 + ordinal}.001"},
+                    },
+                }
+                with patch("httpx.AsyncClient", side_effect=client):
+                    task = asyncio.create_task(self.dispatch(body))
+                    try:
+                        await started.wait()
+                        await self.dispatch(edited)
+                        self.assertTrue(cancelled.is_set() and closed.is_set())
+                        await task
+                        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+                    finally:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                self.model.assert_awaited_once()
+                self.assertEqual(self.model.await_args.args[0].text, "NEW_MARKER")
+                self.assertTrue(all(c.is_closed for c in clients))
+                self.assertTrue(all(s.closed for s in streams))
+
+    async def test_native_channel_gate_denials_free_channel_and_actual_wake(self):
+        self.enable_semantic()
+
+        async def infer(batch):
+            answer = native_answers(batch)
+            answer.update(for_UBETA="u0")
+            return answer
+
+        self.gate.jev.ask.side_effect = infer
+        baseline = dict(self.adapter.config.extra)
+        cases = (
+            ({"allowed_channels": ["COTHER"]}, "<@UBETA> continue", False),
+            ({"ignore_other_user_mentions": True}, "<@UALPHA> continue", False),
+            ({"strict_mention": True, "require_mention": True}, "continue", False),
+            ({"thread_require_mention": True, "require_mention": False}, "continue", False),
+            ({"require_mention": False}, "continue", True),
+            ({"require_mention": True}, "continue", True),
+        )
+        for options, text, allowed in cases:
+            with self.subTest(options=options):
+                self.adapter.config.extra = {**baseline, **options}
+                self.model.reset_mock()
+                self.gate.jev.ask.reset_mock()
+                with patch.object(
+                    self.adapter,
+                    "_should_wake_on_unmentioned_message",
+                    wraps=self.adapter._should_wake_on_unmentioned_message,
+                ) as wake:
+                    await self.dispatch(self.message(text))
+                    await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+                self.assertEqual(self.gate.jev.ask.await_count, int(allowed))
+                self.assertEqual(self.model.await_count, int(allowed))
+                if options == {"require_mention": True}:
+                    self.assertGreaterEqual(wake.await_count, 1)
+        self.adapter.config.extra = baseline
+
+    async def test_native_top_level_source_and_each_peer_thread_coordinates(self):
+        from hermes_slack_agent_router.bridge import Bridge
+
+        self.enable_semantic()
+        self.adapter.config.extra.update(
+            reply_in_thread=False, thread_require_mention=True, require_mention=False
+        )
+        self.peer.config.extra["reply_in_thread"] = True
+
+        async def infer(batch):
+            answer = native_answers(batch)
+            answer.update(for_UBETA="u0")
+            return answer
+
+        self.gate.jev.ask.side_effect = infer
+        for explicit_root in (False, True):
+            with self.subTest(explicit_root=explicit_root):
+                body = self.message("continue")
+                body["event"]["thread_ts"] = body["event"]["ts"] if explicit_root else None
+                bound = await Bridge(self.adapter).bind(body)
+                self.assertIsNone(bound.source.thread_id)
+                self.assertEqual(bound.event.thread.root, body["event"]["ts"])
+                with patch.object(self.peer, "build_source", wraps=self.peer.build_source) as peer_source:
+                    await Bridge(self.adapter).participants(bound)
+                    self.assertEqual(peer_source.call_args.kwargs["thread_id"], body["event"]["ts"])
+                self.model.reset_mock()
+                await self.dispatch(body)
+                await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+                self.model.assert_awaited_once()
+                self.assertIsNone(self.model.await_args.args[0].source.thread_id)
+                self.client.conversations_replies.assert_not_awaited()
+
+    async def test_native_final_own_current_gate_mutation_is_revalidated(self):
+        self.enable_semantic()
+        original = self.adapter._channel_gate_allows
+        calls = [0]
+
+        async def gate(**kwargs):
+            result = await original(**kwargs)
+            calls[0] += 1
+            if calls[0] == 2:
+                self.peer._team_bot_user_ids["TDEMO"] = "UCHANGED"
+            return result
+
+        with patch.object(self.adapter, "_channel_gate_allows", side_effect=gate):
+            await self.assert_rejected(self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY."))
+        self.assertEqual(calls[0], 2)
+        self.gate.jev.ask.assert_awaited_once()
+
+    async def test_native_revision_race_blocks_late_result_and_rapid_edits(self):
+        self.enable_semantic()
+        started, cancelling, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def infer(batch):
+            text = context_view(batch["state"])["CURRENT"]["text"]
+            answer = native_answers(batch)
+            answer.update(for_UBETA="u0")
+            if "OLD_MARKER" in text:
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelling.set()
+                    await release.wait()
+                    return answer  # Deliberately adversarial transport returning after cancellation.
+            return answer
+
+        self.gate.jev.ask.side_effect = infer
+        body = self.message("<@UBETA> OLD_MARKER")
+
+        def edit(revision, text):
+            value = copy.deepcopy(body)
+            value["event"] = {
+                "type": "message",
+                "subtype": "message_changed",
+                "channel": "CDEMO",
+                "team": "TDEMO",
+                "channel_type": "channel",
+                "message": {**body["event"], "text": text, "edited": {"ts": revision}},
+            }
+            return value
+
+        old = asyncio.create_task(self.dispatch(body))
+        middle = latest = None
+        try:
+            await started.wait()
+            middle = asyncio.create_task(self.dispatch(edit("500.001", "<@UBETA> MIDDLE_MARKER")))
+            await cancelling.wait()
+            # Deliver the latest edit while the original HTTP-equivalent cleanup is held.
+            latest_seen = asyncio.Event()
+            coordinates = self.gate.coordinates
+
+            def observe_revision(body):
+                result = coordinates(body)
+                if result is not None and str(result[3]) == "501.001":
+                    latest_seen.set()
+                return result
+
+            with patch.object(self.gate, "coordinates", side_effect=observe_revision):
+                latest = asyncio.create_task(self.dispatch(edit("501.001", "<@UBETA> LATEST_MARKER")))
+                await latest_seen.wait()  # Actual latest-revision intake, not a timer/poll.
+                release.set()
+                await asyncio.gather(old, middle, latest)
+            await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        finally:
+            release.set()
+            for task in (old, middle, latest):
+                if task is not None:
+                    task.cancel()
+            await asyncio.gather(*(t for t in (old, middle, latest) if t is not None), return_exceptions=True)
+        self.model.assert_awaited_once()
+        self.assertEqual(self.model.await_args.args[0].text, "LATEST_MARKER")
+        self.assertFalse(self.gate.active)
+        self.assertFalse(self.adapter._background_tasks)
+
+    async def test_native_equal_duplicate_and_new_message_do_not_cancel_active_revision(self):
+        self.enable_semantic()
+        started, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        seen = [0]
+
+        async def infer(batch):
+            seen[0] += 1
+            answer = native_answers(batch)
+            answer.update(for_UBETA="u0")
+            if seen[0] == 1:
+                started.set()
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+            return answer
+
+        self.gate.jev.ask.side_effect = infer
+        body = self.message("<@UBETA> ORIGINAL_MARKER", edited={"ts": "300.001"})
+        old = asyncio.create_task(self.dispatch(body))
+        try:
+            await started.wait()
+            duplicate = copy.deepcopy(body)
+            duplicate["event"]["type"] = "app_mention"
+            duplicate["event_id"] = "EvDuplicateIndependentEnvelope"
+            await self.dispatch(duplicate)
+            await self.dispatch(self.message("<@UBETA> OTHER_MESSAGE"))
+            self.assertFalse(cancelled.is_set())
+            release.set()
+            await old
+            await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        finally:
+            release.set()
+            old.cancel()
+            await asyncio.gather(old, return_exceptions=True)
+        self.assertEqual(seen[0], 3)
+        self.assertEqual(self.model.await_count, 2)  # Native dedup, not exactly-once inference.
+        self.assertFalse(self.gate.active)
+
+    async def test_native_revision_validation_and_unfurl_event_ts_do_not_cancel(self):
+        self.enable_semantic()
+        started, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def infer(batch):
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            answer = native_answers(batch)
+            answer.update(for_UBETA="u0")
+            return answer
+
+        self.gate.jev.ask.side_effect = infer
+        body = self.message("<@UBETA> ORIGINAL_MARKER", edited={"ts": "300.001"})
+        old = asyncio.create_task(self.dispatch(body))
+        try:
+            await started.wait()
+            for mutation in ("sender", "root", "older", "malformed"):
+                newer = copy.deepcopy(body)
+                nested = {**body["event"], "edited": {"ts": "500.001"}}
+                if mutation == "sender":
+                    nested["user"] = "UOTHER"
+                elif mutation == "root":
+                    nested["thread_ts"] = "99.001"
+                elif mutation == "older":
+                    nested["edited"] = {"ts": "250.001"}
+                else:
+                    nested["edited"] = {"ts": "not-a-native-timestamp"}
+                newer["event"] = {
+                    "type": "message",
+                    "subtype": "message_changed",
+                    "channel": "CDEMO",
+                    "team": "TDEMO",
+                    "message": nested,
+                }
+                await self.dispatch(newer)
+                self.assertFalse(cancelled.is_set())
+                self.gate.jev.ask.assert_awaited_once()
+            unfurl = copy.deepcopy(body)
+            nested = dict(body["event"])
+            nested.pop("edited")
+            unfurl["event"] = {
+                "type": "message",
+                "subtype": "message_changed",
+                "channel": "CDEMO",
+                "team": "TDEMO",
+                "event_ts": "999.001",
+                "message": nested,
+            }
+            await self.dispatch(unfurl)
+            self.assertFalse(cancelled.is_set())
+            self.gate.jev.ask.assert_awaited_once()
+            release.set()
+            await old
+            await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+        finally:
+            release.set()
+            old.cancel()
+            await asyncio.gather(old, return_exceptions=True)
+        self.assertFalse(self.gate.active)
+
+    async def test_native_protected_oversize_is_local_no_credential_no_http(self):
+        from agent import secret_scope
+
+        from hermes_slack_agent_router.jev import JevClient
+
+        for mode in ("current", "root"):
+            with self.subTest(mode=mode):
+                self.gate.jev = JevClient()
+                self.client.conversations_replies.return_value = {
+                    "ok": True,
+                    "messages": [
+                        {"ts": "100.001", "user": "UHUMAN", "text": "r" * (600000 if mode == "root" else 1)}
+                    ],
+                }
+                text = "<@UBETA> " + ("x" * 200000 if mode == "current" else "continue")
+                with (
+                    patch.object(secret_scope, "get_secret", wraps=secret_scope.get_secret) as secrets,
+                    patch("httpx.AsyncClient") as client,
+                ):
+                    with self.assertLogs("hermes_slack_agent_router.plugin", level="WARNING") as logs:
+                        await self.assert_rejected(self.message(text))
+                    self.assertTrue(
+                        any("stage=fit reason=unsupported-request-size" in line for line in logs.output)
+                    )
+                    self.assertNotIn(call("TYPESAFE_API_KEY"), secrets.call_args_list)
+                    client.assert_not_called()
+
+    async def test_native_edit_pending_or_command_never_resurrects_old_body(self):
+        _, key = self.source_and_key()
+        for mode in ("pending", "command"):
+            with self.subTest(mode=mode):
+                self.enable_semantic()
+                started, cancelled = asyncio.Event(), asyncio.Event()
+
+                async def infer(batch, mode=mode, started=started, cancelled=cancelled):
+                    started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        cancelled.set()
+                        if mode == "pending":
+                            state = self.SessionState()
+                            state.persistent.update_prompt_pending = True
+                            self.runner._sessions[key] = state
+                        raise
+
+                self.gate.jev.ask.side_effect = infer
+                body = self.message("<@UBETA> OLD_MUST_NOT_RETURN")
+                newer = copy.deepcopy(body)
+                newer["event"] = {
+                    "type": "message",
+                    "subtype": "message_changed",
+                    "channel": "CDEMO",
+                    "channel_type": "channel",
+                    "team": "TDEMO",
+                    "message": {
+                        **body["event"],
+                        "text": "<@UBETA> /help" if mode == "command" else "LATEST_CONTROL_REPLY",
+                        "edited": {"ts": "500.001"},
+                    },
+                }
+                before = len(self.downstream)
+                task = asyncio.create_task(self.dispatch(body))
+                try:
+                    await started.wait()
+                    await self.dispatch(newer)
+                    await task
+                    await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    self.runner._sessions.pop(key, None)
+                self.assertTrue(cancelled.is_set())
+                self.gate.jev.ask.assert_awaited_once()
+                self.assertNotIn("OLD_MUST_NOT_RETURN", json.dumps(self.downstream[before:]))
+                self.assertFalse(self.gate.active)
+
+    async def test_native_shutdown_and_unload_own_only_active_evaluations(self):
+        import httpx
+        from test_semantic import controlled_answers
+
+        from hermes_slack_agent_router.jev import JevClient
+
+        class AnswerStream(httpx.AsyncByteStream):
+            def __init__(self, batch, wait):
+                self.batch, self.wait, self.closed = batch, wait, False
+
+            async def __aiter__(self):
+                await self.wait()
+                yield json.dumps(controlled_answers(self.batch, {"for_UBETA": "u0"})).encode()
+
+            async def aclose(self):
+                self.closed = True
+
+        for mode in ("history-shutdown", "http-shutdown", "history-unload"):
+            with self.subTest(mode=mode):
+                started, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                clients, streams = [], []
+                self.enable_semantic()
+                native = httpx.AsyncClient
+
+                async def block(started=started, release=release, finished=finished):
+                    started.set()
+                    try:
+                        await release.wait()
+                    finally:
+                        finished.set()
+
+                async def page(mode=mode, block=block, **kwargs):
+                    if mode != "http-shutdown" and "latest" in kwargs:
+                        await block()
+                    return {"ok": True, "messages": [{"ts": "100.001", "user": "UHUMAN", "text": "anchor"}]}
+
+                async def respond(request, block=block, streams=streams):
+                    batch = json.loads(request.content)
+                    stream = AnswerStream(batch, block)
+                    streams.append(stream)
+                    return httpx.Response(200, stream=stream)
+
+                def client(clients=clients, respond=respond, native=native, **kwargs):
+                    value = native(transport=httpx.MockTransport(respond), **kwargs)
+                    clients.append(value)
+                    return value
+
+                self.client.conversations_replies.side_effect = page
+                if mode == "http-shutdown":
+                    self.gate.jev = JevClient()
+                    (self.home / ".env").write_text("TYPESAFE_API_KEY=fictional-shutdown-fixture\n")
+                self.model.reset_mock()
+                with patch("httpx.AsyncClient", side_effect=client):
+                    task = asyncio.create_task(self.dispatch(self.message("<@UBETA> DIAGRAM_ONLY.")))
+                    try:
+                        await started.wait()
+                        self.assertTrue(self.adapter._background_tasks)
+                        self.assertFalse(self.adapter._session_tasks)
+                        if mode == "history-unload":
+                            self.gate.dispose()  # Actual synchronous registered unload action; no cancellation.
+                            self.assertFalse(finished.is_set())
+                            release.set()
+                            await task
+                            self.gate.jev.ask.assert_not_awaited()
+                        else:
+                            self.runner._draining = True
+                            await self.adapter.cancel_background_tasks()
+                            with self.assertRaises(asyncio.CancelledError):
+                                await task
+                        self.assertTrue(finished.is_set())
+                    finally:
+                        release.set()
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                        self.runner._draining = False
+                self.assertTrue(all(c.is_closed for c in clients))
+                self.assertFalse(self.gate.active)
+                self.assertTrue(all(s.closed for s in streams))
+                self.assertFalse(self.adapter._background_tasks)
+                self.model.assert_not_awaited()
+
+    async def test_delayed_native_routing_completes_without_plugin_time_cutoffs(self):
+        self.enable_semantic()
+        self.supply_native_names()
+        info = self.client.users_info.side_effect
+        classify = self.gate.jev.ask.side_effect
+        records = [
+            {"ts": "100.001", "user": "UHUMAN", "text": "Fictional root"},
+            {"ts": "101.001", "user": "UOUTSIDE", "text": "Fictional context"},
+        ]
+        loop = asyncio.get_running_loop()
+        for ordinal, phase in enumerate(("bind", "history", "recipient", "people", "classifier")):
+            with self.subTest(phase=phase):
+                started, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+                async def delayed(started=started, release=release, finished=finished):
+                    started.set()
+                    await release.wait()
+                    finished.set()
+
+                async def page(phase=phase, delayed=delayed, **kwargs):
+                    if "latest" not in kwargs:
+                        return {"ok": True, "messages": []}
+                    if phase == "history":
+                        await delayed()
+                    return {"ok": True, "messages": records}
+
+                async def directory(*, user, phase=phase, delayed=delayed):
+                    if (phase, user) in (("bind", "UHUMAN"), ("recipient", "UBETA"), ("people", "UOUTSIDE")):
+                        await delayed()
+                    return await info(user=user)
+
+                async def infer(batch, phase=phase, delayed=delayed):
+                    if phase == "classifier":
+                        await delayed()
+                    return await classify(batch)
+
+                self.client.conversations_replies.side_effect = page
+                self.client.users_info.side_effect = directory
+                self.gate.jev.ask.side_effect = infer
+                self.model.reset_mock()
+                now = [loop.time()]
+                with patch.object(loop, "time", side_effect=lambda now=now: now[0]):
+                    task = asyncio.create_task(
+                        self.dispatch(
+                            self.message(
+                                "<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY.", ts=f"{300 + ordinal}.001"
+                            )
+                        )
+                    )
+                    timer = None
+                    try:
+                        await started.wait()
+                        # Advance the scheduler past ALL former .75/1/1.2/2.5s
+                        # cutoffs, then release this actual I/O producer; no sleep.
+                        timer = loop.call_at(now[0] + 9, release.set)
+                        now[0] += 10
+                        await task
+                        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+                    finally:
+                        if timer:
+                            timer.cancel()
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                self.assertTrue(finished.is_set(), "required delayed producer was abandoned")
+                self.model.assert_awaited_once()
+                self.assertEqual(self.model.await_args.args[0].text, "DIAGRAM_ONLY.")
+                state = context_view(self.gate.jev.ask.await_args.args[0]["state"])
+                self.assertEqual(state["participants"]["UBETA"]["real_name"], "柚原こはる")
+                self.assertEqual(state["participants"]["UOUTSIDE"]["kind"], "bot")
+                self.assertFalse(self.adapter._pending_messages)
+                self.client.chat_postMessage.assert_not_awaited()
+
+    async def test_acquisition_error_and_caller_cancellation_drain_all_owned_reads(self):
+        self.enable_semantic()
+        assert isinstance(self.gate.jev, AsyncMock)
+        self.supply_native_names()
+        info = self.client.users_info.side_effect
+        _, key = self.source_and_key()
+        for mode in ("error", "cancel", "cancel-pending"):
+            with self.subTest(mode=mode):
+                history_started, metadata_started = asyncio.Event(), asyncio.Event()
+                history_done, metadata_done, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+                async def page(started=history_started, release=release, done=history_done, **kwargs):
+                    started.set()
+                    try:
+                        await release.wait()
+                        raise OSError("fictional native transport failure")
+                    finally:
+                        done.set()
+
+                async def directory(*, user, started=metadata_started, done=metadata_done):
+                    if user != "UBETA":
+                        return await info(user=user)
+                    started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        done.set()
+
+                self.client.conversations_replies.side_effect = page
+                self.client.users_info.side_effect = directory
+                task = asyncio.create_task(self.dispatch(self.message("<@UBETA> DIAGRAM_ONLY.")))
+                try:
+                    await asyncio.gather(history_started.wait(), metadata_started.wait())
+                    if mode == "error":
+                        release.set()
+                        response = await task
+                        self.assertEqual((response.status, response.body), (200, ""))
+                    else:
+                        if mode == "cancel-pending":
+                            state = self.SessionState()
+                            state.persistent.update_prompt_pending = True
+                            self.runner._sessions[key] = state
+                        task.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await task
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    self.runner._sessions.pop(key, None)
+                self.assertTrue(history_done.is_set() and metadata_done.is_set())
+                self.gate.jev.ask.assert_not_awaited()
+                self.model.assert_not_awaited()
+                self.assertFalse(self.adapter._pending_messages)
+                self.assertFalse(self.downstream)
+                self.client.chat_postMessage.assert_not_awaited()
+
+    async def test_newest_page_delivers_exact_scoped_input(self):
         self.enable_semantic()
         records = [
             {
@@ -322,24 +1069,11 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             ],
         ]
         body = self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY.", ts="300.001")
-        elapsed = {}
-
-        async def latency(seconds):
-            # Causal response release models observed native HTTP latency; no sleep/polling.
-            loop = asyncio.get_running_loop()
-            response_ready = loop.create_future()
-            timer = loop.call_later(seconds, response_ready.set_result, None)
-            try:
-                await response_ready
-            finally:
-                timer.cancel()
 
         async def page(**kwargs):
             if "latest" not in kwargs:
                 return {"ok": True, "messages": []}  # Separate downstream native hydration.
-            started = time.monotonic()
-            await latency(0.42)
-            elapsed["acquisition"] = time.monotonic() - started
+
             # Root identity must not depend on being the first element.
             return {
                 "ok": True,
@@ -348,24 +1082,9 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 "response_metadata": {"next_cursor": "opaque-older-page"},
             }
 
-        classifier = self.gate.jev
-        assert isinstance(classifier, AsyncMock)
-        classify = classifier.ask.side_effect
-
-        async def delayed_classifier(batch):
-            await latency(0.12)
-            return await classify(batch)
-
-        classifier.ask.side_effect = delayed_classifier
         self.client.conversations_replies.side_effect = page
-        started = time.monotonic()
-        async with asyncio.timeout(2.5):
-            await self.dispatch(body)
-            elapsed["dispatch"] = time.monotonic() - started
-            await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
-        elapsed["complete"] = time.monotonic() - started
-        print("controlled native latency seconds:", json.dumps(elapsed, sort_keys=True))
-        self.assertGreaterEqual(elapsed["acquisition"], 0.42)
+        await self.dispatch(body)
+        await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
         self.model.assert_awaited_once()
         self.assertEqual(self.model.await_args.args[0].text, "DIAGRAM_ONLY.")
         state = context_view(self.gate.jev.ask.await_args.args[0]["state"])
@@ -481,7 +1200,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
 
     async def _preserved_prior_original_sources(self, root):
         import hashlib
-        import time
         from dataclasses import asdict, replace
 
         from test_semantic import source_from_record
@@ -525,9 +1243,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                     "messages": originals,
                     "has_more": False,
                 }
-                history = await self.gate.history(
-                    self.client, source.thread, source.identity, time.monotonic() + 2.5
-                )
+                history = await self.gate.history(self.client, source.thread, source.identity)
                 self.assertTrue(
                     [(h.identity, h.sender, h.original) for h in history]
                     == [(h.identity, h.sender, h.original) for h in source.history],
@@ -669,7 +1385,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.client.conversations_replies.side_effect = TimeoutError("private transport detail")
         with self.assertLogs("hermes_slack_agent_router.plugin", level="WARNING") as logs:
             await self.assert_rejected(self.message("<@UBETA> continue fictional work"))
-        self.assertIn("context-fetch-timeout", logs.output[0])
+        self.assertIn("context-fetch-transport-timeout", logs.output[0])
         self.gate.jev.ask.assert_not_awaited()
 
     async def test_prior_block_support_does_not_relax_current_or_skip_unknown_content(self):
@@ -705,7 +1421,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
 
     async def test_review_short_nonterminal_page_must_not_be_complete_latest_seven(self):
         """Retained QA detector: a repeating incomplete response cannot confer completeness."""
-        import time
 
         from hermes_slack_agent_router.semantic import SemanticError
 
@@ -725,7 +1440,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                     "response_metadata": {"next_cursor": "opaque-older"},
                 }
                 with self.assertRaises(SemanticError):
-                    await self.gate.history(client, self.key, "201.001", time.monotonic() + 2.5)
+                    await self.gate.history(client, self.key, "201.001")
 
     async def test_review_short_nonterminal_native_input_must_not_reach_classifier(self):
         """Retained QA native detector: an uncompletable tail must not dispatch partial work."""
@@ -794,11 +1509,8 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
 
                 self.client.conversations_replies.side_effect = page
                 started = asyncio.get_running_loop().time()
-                async with asyncio.timeout(2.5):
-                    await self.dispatch(
-                        self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY.", ts=cutoff)
-                    )
-                    await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
+                await self.dispatch(self.message("<@UALPHA> SUMMARY_ONLY; <@UBETA> DIAGRAM_ONLY.", ts=cutoff))
+                await asyncio.gather(*tuple(self.adapter._session_tasks.values()))
                 if name == "short":
                     print(
                         "short-tail controlled native complete seconds:",
@@ -828,7 +1540,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 self.client.conversations_history.assert_not_awaited()
 
     async def test_short_tail_continuation_bounds_and_validation(self):
-        import time
 
         from hermes_slack_agent_router.semantic import SemanticError
 
@@ -843,7 +1554,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             client = AsyncMock()
             client.conversations_replies.side_effect = pages
             client.conversations_history.return_value = page([root])
-            result = await self.gate.history(client, self.key, "201.001", time.monotonic() + 2.5)
+            result = await self.gate.history(client, self.key, "201.001")
             return result, client
 
         first = page([root, *recent], "a")
@@ -908,9 +1619,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(SemanticError, "incomplete-context"):
             await collect([page(recent, "a"), page([], "b"), page([], "c"), page([older])])
 
-    async def test_history_deadline_cancels_native_fetch(self):
-        import time
-
+    async def test_history_caller_cancellation_drains_native_fetch(self):
         started, cancelled = asyncio.Event(), asyncio.Event()
         client = AsyncMock()
 
@@ -938,8 +1647,15 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 else:
                     client.conversations_replies.return_value = {"ok": True, "messages": []}
                     client.conversations_history.side_effect = blocked
-                with self.assertRaises(TimeoutError):
-                    await self.gate.history(client, self.key, "201.001", time.monotonic() + 1.32)
+                task = asyncio.create_task(self.gate.history(client, self.key, "201.001"))
+                try:
+                    await started.wait()
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
                 self.assertTrue(started.is_set() and cancelled.is_set())
                 self.assertEqual(client.conversations_replies.await_count, 2 if stage == "fill" else 1)
                 if stage == "root":
@@ -948,7 +1664,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                     )
 
     async def test_history_cutoff_duplicates_exact_root_and_failures(self):
-        import time
 
         from hermes_slack_agent_router.semantic import SemanticError
 
@@ -959,7 +1674,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             client = AsyncMock()
             client.conversations_replies.return_value = page
             client.conversations_history.return_value = fallback or {"ok": True, "messages": []}
-            result = await self.gate.history(client, key or self.key, cutoff, time.monotonic() + 2.5)
+            result = await self.gate.history(client, key or self.key, cutoff)
             return result, client
 
         result, client = await collect(
@@ -970,7 +1685,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result[0].provenance[0]["field"], "text")
         client.conversations_replies.assert_awaited_once()
         client.conversations_history.assert_not_awaited()
-        self.assertEqual(await self.gate.history(client, self.key, "100.001", time.monotonic() + 2.5), ())
+        self.assertEqual(await self.gate.history(client, self.key, "100.001"), ())
         client.conversations_replies.assert_awaited_once()
         for messages in ([root], [root, child]):
             result, _ = await collect({"ok": True, "messages": messages})
@@ -1046,7 +1761,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                     ("ts", "202.001"),
                     ("ts", "NaN"),
                     ("user", None),
-                    ("text", "x" * 6001),
+                    ("text", None),
                     ("files", [{"id": "FNEW"}]),
                     ("attachments", [{"text": "hidden"}]),
                 )
@@ -1668,10 +2383,12 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
 
     async def test_semantic_sender_auth_before_context_allow_unknown_and_pending(self):
         self.enable_semantic()
+        self.adapter.config.extra["allowed_users"] = ["UOTHER"]
         self.adapter.set_authorization_check(lambda *args, **kwargs: False)
         await self.assert_rejected(self.message("<@UBETA> check diagram"))
         self.gate.jev.ask.assert_not_awaited()
         self.client.conversations_replies.assert_not_awaited()
+        self.adapter.config.extra["allowed_users"] = ["UHUMAN"]
         for decision in (True, None):
             self.adapter.set_authorization_check(lambda *args, value=decision, **kwargs: value)
             await self.dispatch(self.message("<@UALPHA> update summary; <@UBETA> check diagram"))
@@ -1998,7 +2715,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             (JevError("uncertain relevant answer: response"), "question=response"),
             (JevError("synthetic-private"), "reason=unclassified status=0"),
             (SemanticError("synthetic-private"), "reason=semantic-invalid status=0"),
-            (TimeoutError("synthetic-private"), "reason=ingress-deadline status=0"),
+            (TimeoutError("synthetic-private"), "reason=transport-timeout status=0"),
         ):
             self.gate.jev.ask.side_effect = error
             with self.assertLogs("hermes_slack_agent_router.plugin", level="WARNING") as logs:
@@ -2778,7 +3495,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         )
         print("MIZUKI_NATIVE_SYNTHETIC_RECEIPT " + json.dumps(receipt, sort_keys=True), flush=True)
 
-    async def test_native_label_cold_lookup_scope_rejection_and_parallel_budget(self):
+    async def test_native_label_cold_lookup_scope_rejection_and_parallel_completion(self):
         import time
 
         from hermes_slack_agent_router.bridge import Bridge
@@ -2788,16 +3505,13 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         topology = await bridge.participants(bound)
         before = dict(self.adapter._user_name_cache)
         active = set()
+        all_started = asyncio.Event()
 
         async def info(*, user):
             active.add(user)
-            loop = asyncio.get_running_loop()
-            ready = loop.create_future()
-            timer = loop.call_later(0.12, ready.set_result, None)
-            try:
-                await ready
-            finally:
-                timer.cancel()
+            if len(active) == len(topology[0]):
+                all_started.set()
+            await all_started.wait()
             return {
                 "ok": True,
                 "user": {
@@ -2816,8 +3530,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         labels, whoami = dict(raw_labels), dict(raw_whoami)
         elapsed = time.monotonic() - started
         self.assertEqual(active, {"UALPHA", "UBETA"})
-        self.assertGreaterEqual(elapsed, 0.12)
-        self.assertLess(elapsed, 0.4)
         self.assertEqual(labels["UBETA"], ("別の実名", "柚原こはる"))
         self.assertEqual(
             whoami["UBETA"],
@@ -3021,16 +3733,15 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.peer._team_clients["TDEMO"].users_info.assert_not_awaited()
         self.assertEqual(bound.recipient.bot_user, "UBETA")
 
-        # Context authors remain data even when bots or unknown; expired budgets
-        # never start another read, and a changed serving transport is rejected.
-        import time
-
+        # Genuine native transport failure leaves contextual authors unknown;
+        # a changed serving transport is still rejected independently.
         from hermes_slack_agent_router.bridge import TopologyError, contextual_person
 
         before = self.client.users_info.await_count
-        expired = dict(await bridge.context_people(bound, history, whoami, deadline=time.monotonic() - 1))
-        self.assertEqual(self.client.users_info.await_count, before)
-        self.assertEqual(expired["UOUTSIDE"]["kind"], "unknown")
+        self.client.users_info.side_effect = TimeoutError("fictional native SDK timeout")
+        unavailable = dict(await bridge.context_people(bound, history, whoami))
+        self.assertEqual(self.client.users_info.await_count, before + 2)
+        self.assertEqual(unavailable["UOUTSIDE"]["kind"], "unknown")
         for payload in (
             {"ok": False},
             {"ok": True, "user": {"id": "UWRONG", "team_id": "TDEMO", "is_bot": False}},
@@ -4265,7 +4976,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                     "messages": [root_original],
                     "has_more": False,
                 }
-                history = await self.gate.history(self.client, self.key, "990.001", time.monotonic() + 2.5)
+                history = await self.gate.history(self.client, self.key, "990.001")
                 for label, stamp, text, target in (
                     ("bare-name", "990.001", "Birch, please continue this conversation.", self.a),
                     ("native-at", "991.001", "<@UBETA>, please continue this conversation.", self.b),

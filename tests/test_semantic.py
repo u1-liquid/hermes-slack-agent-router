@@ -669,7 +669,7 @@ class APITransportTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(JevError("synthetic-private-body-key").diagnostic, ("unclassified", 0))
 
-    async def test_transport_status_and_deadline_have_distinct_safe_diagnostics(self):
+    async def test_transport_status_and_timeout_have_distinct_safe_diagnostics(self):
         import sys
         from types import SimpleNamespace
 
@@ -694,7 +694,7 @@ class APITransportTests(unittest.IsolatedAsyncioTestCase):
         ):
             for outcome, expected in (
                 (response, ("http-rejected", 401)),
-                (httpx.ReadTimeout("synthetic-private-key"), ("transport-deadline", 0)),
+                (httpx.ReadTimeout("synthetic-private-key"), ("transport-timeout", 0)),
                 (httpx.ConnectError("synthetic-private-key"), ("transport-failed", 0)),
             ):
                 response = outcome
@@ -798,7 +798,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def stream(self, chunks=(), *, block=False):
+    def stream(self, chunks=(), *, block=False, release=None):
         import httpx
 
         class Stream(httpx.AsyncByteStream):
@@ -810,9 +810,9 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
 
             async def __aiter__(self):
                 self.started.set()
-                if block:
+                if block or release is not None:
                     try:
-                        await asyncio.Event().wait()
+                        await (release if release is not None else asyncio.Event()).wait()
                     except asyncio.CancelledError:
                         self.cancelled = True
                         raise
@@ -824,6 +824,99 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
                 self.closed = True
 
         return Stream()
+
+    async def test_fitting_exact_wire_limit_and_one_byte_over_single_http(self):
+        from dataclasses import replace
+
+        import httpx
+
+        from hermes_slack_agent_router.jev import serialize_request
+        from hermes_slack_agent_router.plugin import Gate
+
+        root = History("1.0", "UROOT", "protected anchor")
+        seed = History("2.0", "UDROPPED", '界"\\\t')
+        source = replace(snapshot("Birch, continue."), history=(root, seed))
+        padding = JevClient.request_limit - len(serialize_request(prepare(source, B)))
+        equal = replace(source, history=(root, replace(seed, text=seed.text + "x" * padding)))
+        fitted, batch = Gate.fit(equal, B)
+        self.assertEqual(fitted, equal)
+        self.assertEqual(len(serialize_request(batch)), JevClient.request_limit)
+        above = replace(equal, history=(root, replace(equal.history[1], text=equal.history[1].text + "x")))
+        with self.assertRaisesRegex(JevError, "oversized serialized request"):
+            serialize_request(prepare(above, B))
+        fitted_above, above_batch = Gate.fit(above, B)
+        self.assertEqual(fitted_above.history, (root,))
+        self.assertEqual(fitted_above.text, source.text)
+        self.response = httpx.Response(200, json=controlled_answers(batch, {"for_UBIRCH": "u0"}))
+        await JevClient().ask(batch)
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.requests[0].content, serialize_request(batch))
+        self.assertTrue(self.clients[0].is_closed)
+        self.assertEqual(
+            above_batch["state"]["source_selection"]["current_record"], "conversation.records[1]"
+        )
+
+    def test_fitting_multiple_oldest_priors_reindexes_directory_and_rejects_old_answers(self):
+        from dataclasses import replace
+
+        from hermes_slack_agent_router.plugin import Gate
+
+        source = replace(
+            snapshot("Birch, continue " + "c" * 30000),
+            identity="5.0",
+            history=(
+                History("1.0", "UROOT", "r" * 200000),
+                History("2.0", "UDROPONE", "a" * 300000),
+                History("3.0", "UDROPTWO", "b" * 300000),
+                History("4.0", "UKEEP", "unaltered recent"),
+            ),
+        )
+        source = replace(
+            source,
+            context_people=tuple(
+                (u, {"user_id": u, "username": u, "display_name": None, "real_name": None, "kind": "human"})
+                for u in ("UROOT", "UDROPONE", "UDROPTWO", "UKEEP", source.sender)
+            ),
+        )
+        old_batch = prepare(source, B)
+        fitted, batch = Gate.fit(source, B)
+        self.assertEqual(fitted.history, (source.history[0], source.history[3]))
+        self.assertEqual(fitted.text, source.text)
+        self.assertEqual({u for u, _ in fitted.context_people}, {"UROOT", "UKEEP", source.sender})
+        self.assertEqual(set(batch["questions"]), {"response", "scope", "u0_prior0", "u0_prior1"})
+        self.assertEqual([r["order"] for r in batch["state"]["conversation"]["records"]], [0, 1, 2])
+        with self.assertRaisesRegex(JevError, "answer keys"):
+            validate_answers(batch, controlled_answers(old_batch, {"for_UBIRCH": "u0"}))
+
+    def test_fitting_protected_only_and_invalid_encoding_never_open_http(self):
+        from dataclasses import replace
+
+        from hermes_slack_agent_router.plugin import Gate
+
+        for source in (
+            replace(snapshot("x" * 200000), history=()),
+            replace(snapshot("Birch, continue."), history=(History("1.0", "UROOT", "r" * 600000),)),
+        ):
+            with self.assertRaises(JevError) as caught:
+                Gate.fit(source, B)
+            self.assertEqual(caught.exception.diagnostic, ("unsupported-request-size", 0))
+        malformed = replace(
+            snapshot(),
+            history=(
+                History(
+                    "1.0",
+                    "UROOT",
+                    "anchor",
+                    provenance=({"start": float("nan"), "end": 1, "kind": "authored"},),
+                ),
+                History("2.0", "UBIRCH", "must not shed for invalid serialization"),
+            ),
+        )
+        with self.assertRaises(JevError) as caught:
+            Gate.fit(malformed, B)
+        self.assertEqual(caught.exception.diagnostic, ("request-invalid", 0))
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.clients, [])
 
     async def test_oversized_or_nonfinite_request_never_connects(self):
         for batch in ({"state": "x" * 524289, "questions": {}}, {"state": float("nan")}):
@@ -875,35 +968,51 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
                 if headers:
                     self.assertEqual(stream.reads, 0)
 
-    async def test_async_timeout_and_cancellation_close_stream_and_client(self):
+    async def test_delayed_http_answer_has_no_plugin_or_httpx_time_cutoff(self):
         import httpx
 
-        for cancel in (False, True):
-            stream = self.stream(block=True)
-            self.response = httpx.Response(200, stream=stream)
-            client = JevClient(timeout=0.05 if not cancel else 1.2)
-            started = time.monotonic()
-            task = asyncio.create_task(client.ask(prepare(snapshot())))
-            await asyncio.wait_for(stream.started.wait(), 1)
-            if cancel:
+        batch = prepare(snapshot())
+        release = asyncio.Event()
+        stream = self.stream((json.dumps(two_topic_answers(batch)).encode(),), release=release)
+        self.response = httpx.Response(200, stream=stream)
+        loop = asyncio.get_running_loop()
+        now = [loop.time()]
+        with patch.object(loop, "time", side_effect=lambda: now[0]):
+            task = asyncio.create_task(JevClient().ask(batch))
+            timer = None
+            try:
+                await stream.started.wait()
+                timer = loop.call_at(now[0] + 9, release.set)
+                now[0] += 10
+                result = await task
+            finally:
+                if timer:
+                    timer.cancel()
                 task.cancel()
-            with self.assertRaises(asyncio.CancelledError if cancel else JevError):
-                await task
-            self.assertTrue(task.done())
-            self.assertTrue(stream.cancelled)
-            self.assertTrue(stream.closed)
-            self.assertTrue(self.clients[-1].is_closed)
-            self.assertLess(time.monotonic() - started, 1)
+                await asyncio.gather(task, return_exceptions=True)
+        self.assertEqual(result, validate_answers(batch, two_topic_answers(batch)))
+        self.assertEqual(
+            self.requests[-1].extensions["timeout"],
+            {"connect": None, "read": None, "write": None, "pool": None},
+        )
+        self.assertFalse(stream.cancelled)
+        self.assertTrue(stream.closed and self.clients[-1].is_closed)
 
-    async def test_outer_ingress_deadline_cancels_and_closes_before_subbudget(self):
+    async def test_caller_cancellation_closes_stream_and_client(self):
         import httpx
 
         stream = self.stream(block=True)
         self.response = httpx.Response(200, stream=stream)
-        with self.assertRaises(TimeoutError):
-            async with asyncio.timeout(0.02):
-                await JevClient().ask(prepare(snapshot()))
-        self.assertTrue(stream.cancelled and stream.closed)
+        task = asyncio.create_task(JevClient().ask(prepare(snapshot())))
+        try:
+            await stream.started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self.assertTrue(task.done() and stream.cancelled and stream.closed)
         self.assertTrue(self.clients[-1].is_closed)
 
     async def test_safe_transport_errors_and_typed_invalid_replies(self):

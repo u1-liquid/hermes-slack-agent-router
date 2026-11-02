@@ -6,11 +6,12 @@ import hashlib
 import json
 import logging
 import time
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from types import FunctionType
 
-from .bridge import Bridge, TopologyError, Uncertain, canonical_text, composition
-from .jev import JevClient, JevError
+from .bridge import Bridge, TopologyError, Uncertain, canonical_text
+from .jev import JevClient, JevError, serialize_request
 from .policy import Thread, identifier
 from .semantic import History, SemanticError, Snapshot, assemble, prepare
 
@@ -46,10 +47,20 @@ def constrain_backfill(event, gateway, **kwargs):
     return None  # Continue native authorization/controls; do not short-circuit other hooks.
 
 
+@dataclass(eq=False)
+class Evaluation:
+    sender: str
+    root: str
+    revision: Decimal
+    tasks: set = field(default_factory=set)
+    invalidated: bool = False
+
+
 class Gate:
     def __init__(self):
         self.disposed = False
         self.jev = JevClient()
+        self.active = {}
 
     @staticmethod
     def unresolved(reason):
@@ -57,34 +68,31 @@ class Gate:
         logger.warning("agent-router unresolved: %s", reason)
 
     @staticmethod
-    def native_policy(adapter, event, bot):
-        """Pure admission intersection; native wake runs exactly once downstream."""
-        channel = event["channel"]
-        text = event.get("text", "")
-        own = {bot, adapter._bot_user_id} - {None, ""}
-        mentioned = bool(set(composition(event)) & own) or adapter._slack_message_matches_mention_patterns(
-            text
+    async def native_policy(adapter, event, bot):
+        """Delegate original/own-CURRENT admission to the actual native channel gate."""
+        from plugins.platforms.slack.adapter import _slack_mention_detection_text
+
+        routing_text = _slack_mention_detection_text(event) or event.get("text", "") or ""
+        mentioned = bool(
+            (bot and f"<@{bot}>" in routing_text)
+            or adapter._slack_message_matches_mention_patterns(routing_text)
         )
-        allowed = adapter._slack_allowed_channels()
-        if allowed and channel not in allowed:
-            return False
-        if (
-            adapter._slack_ignore_other_user_mentions()
-            and not mentioned
-            and adapter._slack_message_addressed_to_other_user(text, own)
-        ):
-            return False
-        free = adapter._slack_is_free_channel(channel)
-        return not (
-            not mentioned
-            and (
-                (not free and adapter._slack_strict_mention())
-                or (event.get("thread_ts") and adapter._slack_thread_require_mention())
-            )
+        thread_ts = event.get("thread_ts")
+        return await adapter._channel_gate_allows(
+            channel_id=event["channel"],
+            routing_text=routing_text,
+            bot_uid=bot,
+            is_mentioned=mentioned,
+            is_thread_reply=bool(thread_ts and thread_ts != event["ts"]),
+            event_thread_ts=thread_ts,
+            user_id=event["user"],
+            team_id=event["team"],
+            is_dm=False,
+            force_process=False,
         )
 
     @staticmethod
-    async def history(client, thread, cutoff, deadline):
+    async def history(client, thread, cutoff) -> tuple[History, ...]:
         """Read newest replies, following older cursors only to fill a short tail.
 
         Selection is newest-before-cutoff; order inside each page is ascending.
@@ -136,84 +144,110 @@ class Gate:
                 raise SemanticError("foreign-or-future-context")
             return ts
 
-        async with asyncio.timeout_at(min(time.monotonic() + 1.0, deadline - 1.3)):
-            # At most four SDK calls/4 MiB decoded, INCLUDING optional exact root.
-            for page in range(4):
-                args: dict = {
-                    "channel": thread.channel,
-                    "ts": thread.root,
-                    "latest": cutoff,
-                    "inclusive": False,
-                    "limit": 7,
-                }
-                if cursor:
-                    args["cursor"] = cursor
-                response = await client.conversations_replies(**args)
-                messages, next_cursor = records(response, 7, extra_root=True)
-                last = Decimal(thread.root)
-                ceiling = Decimal(recent[0]["ts"]) if recent else Decimal(cutoff)
-                for message in messages:
-                    ts = validate(message)
-                    if ts == cutoff:
-                        continue
-                    if ts != thread.root:
-                        if Decimal(ts) < last:
-                            raise SemanticError("unordered-context")
-                        last = Decimal(ts)
-                    encoded = json.dumps(
-                        message, sort_keys=True, ensure_ascii=False, allow_nan=False
-                    ).encode()
-                    digest = hashlib.sha256(encoded).digest()
-                    if ts in seen:
-                        if seen[ts] != digest:
-                            raise SemanticError("conflicting-context")
-                        continue
-                    seen[ts] = digest
-                    if ts == thread.root:
-                        root = message  # Known ID, independent of page placement/count.
-                    else:
-                        if page and Decimal(ts) >= ceiling:
-                            raise SemanticError("unordered-context")
-                        recent.append(message)
-                recent = sorted(recent, key=lambda m: Decimal(m["ts"]))[-7:]
-                if len(recent) == 7 or not next_cursor:
-                    break  # Complete bounded tail, or proven genuinely short thread.
-                if next_cursor in cursors:
-                    raise SemanticError("incomplete-context")
-                cursors.add(next_cursor)
-                cursor = next_cursor  # Opaque older continuation, even on empty/filtered pages.
-            else:
+        # At most four SDK calls/4 MiB decoded, INCLUDING optional exact root.
+        for page in range(4):
+            args: dict = {
+                "channel": thread.channel,
+                "ts": thread.root,
+                "latest": cutoff,
+                "inclusive": False,
+                "limit": 7,
+            }
+            if cursor:
+                args["cursor"] = cursor
+            response = await client.conversations_replies(**args)
+            messages, next_cursor = records(response, 7, extra_root=True)
+            last = Decimal(thread.root)
+            ceiling = Decimal(recent[0]["ts"]) if recent else Decimal(cutoff)
+            for message in messages:
+                ts = validate(message)
+                if ts == cutoff:
+                    continue
+                if ts != thread.root:
+                    if Decimal(ts) < last:
+                        raise SemanticError("unordered-context")
+                    last = Decimal(ts)
+                encoded = json.dumps(message, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()
+                digest = hashlib.sha256(encoded).digest()
+                if ts in seen:
+                    if seen[ts] != digest:
+                        raise SemanticError("conflicting-context")
+                    continue
+                seen[ts] = digest
+                if ts == thread.root:
+                    root = message  # Known ID, independent of page placement/count.
+                else:
+                    if page and Decimal(ts) >= ceiling:
+                        raise SemanticError("unordered-context")
+                    recent.append(message)
+            recent = sorted(recent, key=lambda m: Decimal(m["ts"]))[-7:]
+            if len(recent) == 7 or not next_cursor:
+                break  # Complete bounded tail, or proven genuinely short thread.
+            if next_cursor in cursors:
                 raise SemanticError("incomplete-context")
-            if root is None:
-                if page == 3:
-                    raise SemanticError("incomplete-context")
-                # Slack's documented exact-known-message lookup; never scan channel history.
-                response = await client.conversations_history(
-                    channel=thread.channel, oldest=thread.root, inclusive=True, limit=1
-                )
-                messages, _ = records(response, 1)
-                if len(messages) != 1 or validate(messages[0]) != thread.root:
-                    raise SemanticError("missing-root-context")
-                root = messages[0]
+            cursors.add(next_cursor)
+            cursor = next_cursor  # Opaque older continuation, even on empty/filtered pages.
+        else:
+            raise SemanticError("incomplete-context")
+        if root is None:
+            if page == 3:
+                raise SemanticError("incomplete-context")
+            # Slack's documented exact-known-message lookup; never scan channel history.
+            response = await client.conversations_history(
+                channel=thread.channel, oldest=thread.root, inclusive=True, limit=1
+            )
+            messages, _ = records(response, 1)
+            if len(messages) != 1 or validate(messages[0]) != thread.root:
+                raise SemanticError("missing-root-context")
+            root = messages[0]
         history = []
         for message in (root, *recent):
             if message.get("files") or message.get("attachments"):
                 raise SemanticError("unsupported-prior-media-or-identity")
-            if len(json.dumps(message, ensure_ascii=False).encode()) > 65536:
-                raise SemanticError("oversized-prior-context")
             sender = identifier(message["user"])
             text, provenance = canonical_text(message, prior=True)
-            if not isinstance(text, str) or len(text) > 6000:
-                raise SemanticError("oversized-prior-context")
+            if not isinstance(text, str):
+                raise SemanticError("unsupported-prior-composition")
             history.append(History(message["ts"], sender, text, copy.deepcopy(message), provenance))
         return tuple(history)
 
-    async def project(self, body, bound, adapter, deadline, bridge, topology):
-        event = copy.deepcopy(body["event"])
-        if event.get("subtype") == "message_changed":
-            event.update(event.get("message") or {})
-            event.pop("message", None)
+    @staticmethod
+    def fit(source, recipient):
+        """Fit the actual wire request by shedding only whole oldest non-root priors."""
+        dropped = 0
+        while True:
+            batch = prepare(source, recipient)
+            try:
+                raw = serialize_request(batch)
+            except JevError as exc:
+                if exc.diagnostic[0] != "request-oversized":
+                    raise
+                oldest = next((h for h in source.history if h.identity != source.thread.root), None)
+                if oldest is None:
+                    raise JevError("unsupported request size", size=exc.size, dropped=dropped) from None
+                history = tuple(h for h in source.history if h is not oldest)
+                people = {
+                    source.sender,
+                    *(h.sender for h in history),
+                    *(r.bot_user for r in source.recipients),
+                }
+                source = replace(
+                    source,
+                    history=history,
+                    context_people=tuple(
+                        (user, row) for user, row in source.context_people if user in people
+                    ),
+                )
+                dropped += 1
+            else:
+                if dropped:
+                    logger.info("agent-router request-fit stage=fit bytes=%d dropped=%d", len(raw), dropped)
+                return source, batch
+
+    async def project(self, body, bound, adapter, bridge, topology):
+        event = copy.deepcopy(bound.native_event)
         thread = bound.event.thread
+        event.update(team=thread.workspace, channel=thread.channel)
 
         if bound.event.provenance == "file_shared" or event.get("files") or event.get("attachments"):
             return self.unresolved("unsupported-current-composition")
@@ -221,27 +255,25 @@ class Gate:
             text, provenance = canonical_text(event)
         except (SemanticError, KeyError, TypeError):
             return self.unresolved("unsupported-current-composition")
-        if not self.native_policy(adapter, event, bound.recipient.bot_user):
+        if not await self.native_policy(adapter, event, bound.recipient.bot_user):
             return None
         client = adapter._team_clients[thread.workspace]
         from slack_sdk.errors import SlackApiError, SlackClientError
 
         try:
-            # Both acquisitions share the existing retrieval allowance; do not
-            # serialize up to four cold presentation lookups ahead of inference.
-            acquisition_deadline = min(deadline - 1.3, time.monotonic() + 1.0)
-            async with asyncio.timeout_at(acquisition_deadline):
-                requests = [
-                    asyncio.create_task(self.history(client, thread, bound.source.message_id, deadline)),
-                    asyncio.create_task(bridge.recipient_metadata(bound, topology)),
-                ]
-                try:
-                    history, metadata = await asyncio.gather(*requests)
-                    labels, whoami = metadata
-                finally:
-                    for request in requests:
-                        request.cancel()
-                    await asyncio.gather(*requests, return_exceptions=True)
+            # Independent request-owned acquisitions; cancel and drain the sibling
+            # on failure/caller cancellation, without imposing an elapsed cutoff.
+            requests = [
+                asyncio.create_task(self.history(client, thread, bound.source.message_id)),
+                asyncio.create_task(bridge.recipient_metadata(bound, topology)),
+            ]
+            try:
+                history, metadata = await asyncio.gather(*requests)
+                labels, whoami = metadata
+            finally:
+                for request in requests:
+                    request.cancel()
+                await asyncio.gather(*requests, return_exceptions=True)
         except SlackApiError as exc:
             code = exc.response.get("error")
             if code in {
@@ -262,7 +294,7 @@ class Gate:
                 return self.unresolved("context-fetch-rate-limited")
             return self.unresolved("context-fetch-api-failed")
         except TimeoutError:
-            return self.unresolved("context-fetch-timeout")
+            return self.unresolved("context-fetch-transport-timeout")
         except (SlackClientError, OSError):
             return self.unresolved("context-fetch-failed")
         except SemanticError as exc:
@@ -277,7 +309,6 @@ class Gate:
                     "conflicting-context",
                     "unordered-context",
                     "missing-root-context",
-                    "oversized-prior-context",
                     "unsupported-prior-media-or-identity",
                 }
                 else "unsupported-prior-composition"
@@ -286,7 +317,7 @@ class Gate:
             return self.unresolved("incomplete-context")
         if await bridge.participants(bound) != topology:
             return self.unresolved("native-topology-changed")
-        people = await bridge.context_people(bound, history, whoami, deadline=acquisition_deadline)
+        people = await bridge.context_people(bound, history, whoami)
         source = Snapshot(
             thread,
             bound.event.identity,
@@ -303,21 +334,22 @@ class Gate:
         started, stage, questions = time.monotonic(), "scope", 0
         batch = None
         try:
-            async with asyncio.timeout_at(deadline):
-                # The serving runtime may differ from the receiving adapter's profile.
-                async with adapter.gateway_runner._async_profile_scope_for_source(bound.source):
-                    stage = "prepare"
-                    batch = prepare(source, bound.recipient)
-                    questions = len(batch["questions"])
-                    stage = "inference"
-                    answers = await self.jev.ask(batch) if batch["questions"] else {}
-                    stage = "assemble"
-                    plan = assemble(source, bound.recipient, answers)
+            # The serving runtime may differ from the receiving adapter's profile.
+            async with adapter.gateway_runner._async_profile_scope_for_source(bound.source):
+                if self.disposed or getattr(adapter.gateway_runner, "_draining", False):
+                    return None
+                stage = "fit"
+                source, batch = self.fit(source, bound.recipient)
+                questions = len(batch["questions"])
+                stage = "inference"
+                answers = await self.jev.ask(batch) if batch["questions"] else {}
+                stage = "assemble"
+                plan = assemble(source, bound.recipient, answers)
         except (JevError, SemanticError, TimeoutError) as exc:
             reason, status = (
                 exc.diagnostic
                 if isinstance(exc, JevError)
-                else ("ingress-deadline" if isinstance(exc, TimeoutError) else "semantic-invalid", 0)
+                else ("transport-timeout" if isinstance(exc, TimeoutError) else "semantic-invalid", 0)
             )
             question = "none"
             if reason == "answer-confidence" and stage == "inference" and batch is not None:
@@ -327,17 +359,17 @@ class Gate:
             # Source-owned codes/keys and numeric measurements, never exception payloads.
             logger.warning(
                 "agent-router unresolved: classifier-failed stage=%s reason=%s status=%d "
-                "elapsed_ms=%d questions=%d question=%s",
+                "elapsed_ms=%d questions=%d question=%s bytes=%d dropped=%d",
                 stage,
                 reason,
                 status,
                 (time.monotonic() - started) * 1000,
                 questions,
                 question,
+                exc.size if isinstance(exc, JevError) else 0,
+                exc.dropped if isinstance(exc, JevError) else 0,
             )
             return None
-        if await bridge.participants(bound) != topology:
-            return self.unresolved("native-topology-changed")
         if plan.status != "ready":
             return self.unresolved(
                 "projection-unresolved"
@@ -353,9 +385,9 @@ class Gate:
             target["text"] = text
             target = target["message"]
         target["text"] = text
-        for field in ("blocks", "attachments", "files"):
-            target.pop(field, None)
-            projected["event"].pop(field, None)
+        for name in ("blocks", "attachments", "files"):
+            target.pop(name, None)
+            projected["event"].pop(name, None)
         current = "".join(
             plan.source[u.start : u.end]
             for u in plan.units
@@ -363,8 +395,10 @@ class Gate:
         )
         admission = {**event, "text": current}
         admission.pop("blocks", None)
-        if not self.native_policy(adapter, admission, bound.recipient.bot_user):
+        if not await self.native_policy(adapter, admission, bound.recipient.bot_user):
             return None
+        if await bridge.participants(bound) != topology:
+            return self.unresolved("native-topology-changed")
 
         def proof(delivered, gateway):
             source = delivered.source
@@ -378,7 +412,7 @@ class Gate:
                 and adapter._team_bot_user_ids.get(thread.workspace) == bound.recipient.bot_user
                 and source.scope_id == thread.workspace
                 and source.chat_id == thread.channel
-                and source.thread_id == thread.root
+                and source.thread_id == bound.source.thread_id
                 and source.user_id == bound.event.sender
                 and source.message_id == bound.source.message_id
                 and delivered.message_id == bound.source.message_id
@@ -391,50 +425,150 @@ class Gate:
     def dispose(self):
         self.disposed = True
 
+    @staticmethod
+    def coordinates(body):
+        """Structural source/revision only, before any awaited identity lookup."""
+        event = body.get("event") or {}
+        if body.get("type") != "event_callback" or event.get("type") not in ("message", "app_mention"):
+            return None
+        changed = event.get("subtype") == "message_changed"
+        message = event.get("message") if changed else event
+        if not isinstance(message, dict):
+            return None
+        team = body.get("team_id")
+        channel = message.get("channel") or event.get("channel")
+        ts, sender = message.get("ts"), message.get("user")
+        if (
+            not isinstance(team, str)
+            or not isinstance(channel, str)
+            or not isinstance(ts, str)
+            or not isinstance(sender, str)
+        ):
+            return None
+        for item in (event, message):
+            if (item.get("team") and item["team"] != team) or (
+                item.get("channel") and item["channel"] != channel
+            ):
+                raise SemanticError("conflicting revision source")
+        Thread(team, channel, ts)
+        identifier(sender)
+        root = message.get("thread_ts") or ts
+        Thread(team, channel, root)
+        edit = message.get("edited")
+        if changed and (not isinstance(edit, dict) or not edit.get("ts")):
+            return None  # An unfurl/delivery event_ts is not an edit revision.
+        revision = ts
+        if edit is not None:
+            if not isinstance(edit, dict) or not isinstance(edit.get("ts"), str):
+                raise SemanticError("invalid edit revision")
+            revision = edit["ts"]
+            Thread(team, channel, revision)
+            if Decimal(revision) <= Decimal(ts):
+                raise SemanticError("invalid edit revision")
+        return (team, channel, ts), sender, root, Decimal(revision)
+
     def wire(self, native, adapter):
         from slack_bolt.response import BoltResponse
 
         bridge = Bridge(adapter)
 
-        async def evaluate(body, deadline):
+        async def evaluate(body):
             bound = await bridge.bind(body)
-            key = bound.event.thread
+
             if bridge.pending(bound):
                 return body
-            if adapter._early_reject_unauthorized(bound.event.sender, key.channel, False, thread_id=key.root):
+            if not adapter.gateway_runner._is_user_authorized_for_source(bound.source):
                 return None
             try:
                 topology = await bridge.participants(bound)
-                projected = await self.project(body, bound, adapter, deadline, bridge, topology)
-            except (Exception, asyncio.CancelledError):
+                projected = await self.project(body, bound, adapter, bridge, topology)
+            except Exception:
                 if bridge.pending(bound):
                     return body
                 raise
-            if self.disposed or bridge.pending(bound):
+            if self.disposed or getattr(adapter.gateway_runner, "_draining", False):
+                return None
+            if bridge.pending(bound):
                 return body
-            if adapter._team_bot_user_ids.get(key.workspace) != bound.recipient.bot_user:
-                return self.unresolved("native-receiver-changed")
             return projected
 
         async def middleware(body, next, req):
             if self.disposed:
-                return await next()
+                return await next()  # Existing quiescent-unload native pass-through.
+            entry = task = key = None
             try:
-                deadline = time.monotonic() + 2.5
-                async with asyncio.timeout_at(deadline):
-                    projected = await evaluate(body, deadline)
-                if projected is None:
+                if getattr(adapter.gateway_runner, "_draining", False):
+                    return BoltResponse(status=200, body="")
+                coordinates = self.coordinates(body)
+                if coordinates is not None:
+                    key, sender, root, revision = coordinates
+                    previous = self.active.get(key)
+                    if previous is not None:
+                        if (previous.sender, previous.root) != (sender, root):
+                            raise SemanticError("conflicting revision source")
+                        if revision < previous.revision:
+                            return BoltResponse(status=200, body="")
+                    if previous is None or revision > previous.revision:
+                        retiring = set(previous.tasks) if previous is not None else set()
+                        if previous is not None:
+                            previous.invalidated = True
+                        entry = Evaluation(sender, root, revision, set(retiring))
+                        self.active[key] = entry  # Invalidate BEFORE awaiting old cleanup.
+                        for old in retiring:
+                            if not old.cancelling():
+                                old.cancel()
+                        if retiring:
+                            await asyncio.gather(*retiring, return_exceptions=True)
+                            entry.tasks.difference_update(retiring)
+                        if self.active.get(key) is not entry or entry.invalidated:
+                            return BoltResponse(status=200, body="")
+                    else:
+                        entry = previous  # Equal-revision duplicate, not a cancellation.
+                if self.disposed or getattr(adapter.gateway_runner, "_draining", False):
+                    return BoltResponse(status=200, body="")
+                task = asyncio.create_task(evaluate(body))
+                adapter._background_tasks.add(task)
+                task.add_done_callback(adapter._background_tasks.discard)
+                if entry is not None:
+                    entry.tasks.add(task)
+                try:
+                    projected = await task
+                except Uncertain:
+                    logger.debug("agent-router native exemption or unknown identity/control; pass-through")
+                    projected = body
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise  # Caller cancellation is never a native pending fallback.
+                    if entry is None or not entry.invalidated:
+                        raise  # Native adapter shutdown remains definitive cancellation.
+                    return BoltResponse(status=200, body="")  # Superseded child, already drained.
+                if task.cancelling() and (entry is None or not entry.invalidated):
+                    raise asyncio.CancelledError  # A transport cannot turn definitive cancellation into success.
+                if (
+                    projected is None
+                    or self.disposed
+                    or getattr(adapter.gateway_runner, "_draining", False)
+                    or (entry is not None and (entry.invalidated or self.active.get(key) is not entry))
+                ):
                     return BoltResponse(status=200, body="")
                 req.body = projected
-            except Uncertain:
-                logger.debug("agent-router native exemption or unknown identity/control; pass-through")
+                return await next()  # No intervening awaited plugin work before native handoff.
             except TopologyError:
                 self.unresolved("native-topology-unresolved")
                 return BoltResponse(status=200, body="")
-            except Exception:  # noqa: BLE001 - fail closed at ingress without logging untrusted payloads
+            except Exception:  # noqa: BLE001 - fixed diagnostics, no untrusted payload
                 self.unresolved("ingress-failed")
                 return BoltResponse(status=200, body="")
-            return await next()
+            finally:
+                if task is not None:
+                    if not task.done():
+                        task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                if entry is not None:
+                    entry.tasks.difference_update(t for t in tuple(entry.tasks) if t.done())
+                    if self.active.get(key) is entry and not entry.tasks:
+                        self.active.pop(key, None)
 
         native.use(middleware)
 

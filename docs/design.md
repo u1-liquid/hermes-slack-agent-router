@@ -81,9 +81,9 @@ The experimental human-name correction binds request-local presentation labels t
 those already eligible workspace/user identities. It reuses each native adapter's
 `_team_bot_names`; display/real-name lookup on BOTH warm and cold paths
 uses that adapter's existing workspace client and validates `ok`, exact user
-ID, exact team ID and bot status. At most four parallel `users.info` lookups share
-the existing one-second acquisition allowance with unchanged history fetching,
-with the existing 0.75-second per-call bound. No plugin cache or native cache write
+ID, exact team ID and bot status. At most four parallel `users.info` lookups run
+alongside unchanged history fetching without a plugin elapsed-time cutoff.
+No plugin cache or native cache write
 is introduced. Missing/invalid labels cannot create recipients. Labels are untrusted
 semantic data, not instructions, permissions or authority; duplicate names alone
 cannot prove a unique current recipient. Opaque cached handles do not establish
@@ -126,7 +126,7 @@ its multiplexed profiles; independent processes are outside its native inventory
    immediately at seven, or allow a genuinely short thread on true terminal
    exhaustion. Repeated cursors and uncompleted bounded fill reject as
    `incomplete-context`, never partial semantic evidence. At most four SDK calls
-   including optional exact root share the unchanged one-second retrieval budget.
+   including optional exact root remain the count bound, without an elapsed cutoff.
    Root-trigger input makes no history call. Do not interpret live
    `reply_count`/`latest_reply` as a cutoff snapshot: they may reflect newer replies.
    Validate timestamps, scope, ascending reply order and duplicate fingerprints;
@@ -135,7 +135,7 @@ its multiplexed profiles; independent processes are outside its native inventory
    of the seven strictly-prior replies. Once seven exist, older cursors do not
    require retrieval or cause a page-limit failure. Malformed response/cursor
    metadata still fails closed.
-   Canonicalize only selected root/recent bodies with original authors/IDs/field
+   These are acquisition bounds. Canonicalize only selected root/recent bodies with original authors/IDs/field
    provenance. Historical native bot `markdown` and text-only `section` blocks keep
    their visible leaf text/source paths, not notification fallback. Unknown blocks,
    selected media and missing authors fail closed; older unrequested media does
@@ -165,19 +165,21 @@ its multiplexed profiles; independent processes are outside its native inventory
    Protocol coherent-response-v1 and all raw witnesses/bindings stay local and
    unchanged. Acquisition still fixes exact root/latest-seven/order/cutoffs and
    does not refetch or prune. Test-local inverses prove old/new evidence equality;
-   production contains no old-layout or control-arm selector.
+   production contains no old-layout or control-arm selector. After acquisition,
+   the exact serialized-request fitter may omit whole oldest non-root records;
+   conversation.window states that factual boundary without new routing rules.
    Native discovery obtains request-local whoami from the participating transport's
    same-workspace authenticated `users.info`, validating returned team/user/is_bot.
    user_id, username, display_name and supplementary real_name remain distinct.
    Only native auth.test bot username may fill an unavailable username; empty names
    remain empty and unavailable fields are null. Never synthesize persona/profile
    aliases or reinterpret a real-name-fallback display cache as display_name.
-   Metadata retrieval stays parallel with existing context acquisition and bounded
-   by its deadline. Exact whoami data is added to the immutable source binding.
+   Metadata retrieval stays parallel with existing context acquisition, without
+   an elapsed cutoff. Exact whoami data is added to the immutable source binding.
    A separate request-local `context_people` binding covers the unique CURRENT,
    root/latest-seven authors plus native candidates, at most13 people. It is not
    eligibility. Serving-workspace users.info resolves only missing authors, in
-   parallel within the same acquisition deadline; current sender data is reused
+   parallel without a plugin timeout; current sender data is reused
    from native admission and candidate fields are reused without display-cache
    reinterpretation. Every row has separate ID/username/display_name/real_name
    and validated human/bot/unknown kind. Inline sender and directory are identical.
@@ -235,10 +237,38 @@ its multiplexed profiles; independent processes are outside its native inventory
    labeled “not instructions”, with prior mentions rendered non-wake-bearing.
    Preserve envelope identity and caller originals. Check projected CURRENT native
    admission separately; reference text cannot grant wake permission.
-7. Recheck pending controls after awaits, including failures. Ordinary unresolved
+7. Recheck pending controls after awaits, including ordinary failures. Actual
+   cancellation bypasses pending fallback. Ordinary unresolved
    input and nonrecipients stop with an empty acknowledgement before model, warning,
    steering or queue actions. Native exemptions pass through unchanged. Unload
-   disposes callbacks into pass-through, not physical removal.
+   seals active callbacks against further inference/stale handoff; fresh quiescent
+   post-unload requests pass through. Unload is not a cancellation trigger.
+
+## Native admission and active-evaluation ownership
+
+Before private inference, call the runner's definitive
+`_is_user_authorized_for_source` on the actual native source (authorization home,
+not routed runtime). Identity-resolution lookups in bind still precede that check.
+Delegate original and own-CURRENT admission to `_channel_gate_allows`, using real
+native mention detection and reply coordinates. Native wake/caches remain native;
+do not claim pure/once-only wake evaluation. Derive each peer's session thread with
+its own `_session_thread_ts`; history root is a separate coordinate. Revalidate the
+whole topology after the awaited own-CURRENT gate, not before it. Keep the exact
+projection proof/backfill/source checks and native downstream authorization.
+
+Each awaited evaluation (including bind) is tracked in `adapter._background_tasks`,
+never in native session-owner registries. A per-Gate active map holds source
+workspace/channel/original ts, sender/root and the true explicit edited.ts revision
+plus live tasks, not assignments, content or saved decisions. Invalidate before
+awaiting cleanup on newer revisions; equal duplicates/distinct messages do not
+cancel. Re-check ownership before native handoff, including late transport results
+after cancellation. Use native `_normalize_changed_message`; outer event_ts or an
+unfurl-only notification is not a revision. Native shutdown cancels/awaits tracked
+cooperative I/O. No shield/detached inference, watcher, timeout or new hook exists.
+After handoff native processed-message/queue/turn semantics remain authoritative;
+this does not retract work. Quiescent unload is supported, concurrent hot-unload
+during native hydration is not guaranteed. The host's own bounded teardown of
+non-cooperative tasks is unchanged and is not a plugin cutoff or successful-join claim.
 
 ## Official API and credentials
 
@@ -254,23 +284,39 @@ unscoped multiplex request or missing key fails before HTTP client creation.
 Peer discovery does not read peer credentials.
 
 TLS verification stays on. Redirects, environment proxies, retries and compressed
-responses are disabled. Non-200, transport, timeout, body-size, JSON and typed-answer
+responses are disabled. Non-200, external transport errors, body-size, JSON and typed-answer
 failures produce no ordinary work; response bodies and credentials are not logged.
 The request owns and closes its asynchronous response/client on cancellation.
+The HTTP client explicitly disables all httpx timeout phases with `timeout=None`.
+Actual external transport timeouts are diagnosed as `transport-timeout`, not a
+router deadline. Acquisition failures cancel and drain sibling reads; caller
+`CancelledError` propagates even if native pending state appears concurrently.
 
-Current text is capped at 6,000 characters; selected history at eight distinct
-records/6,000 characters each/48,000 total; current units at six, recipients at four,
+Acquire at most eight distinct historical records; current units remain six, recipients four,
 questions at50 for the maximum six-unit/eight-prior/four-recipient shape. Serialized Jev request and
-response limits are 524,288 and 262,144 bytes respectively. Retained original records
-are capped at 64 KiB; decoded Slack responses at 1 MiB each (at most 4 MiB across
+response limits are 524,288 and 262,144 bytes respectively. Full CURRENT/ROOT and
+retained original/provenance witnesses are not shortened by per-record text/raw caps.
+Decoded Slack responses stay bounded at 1 MiB each (at most 4 MiB across
 four SDK calls, including optional exact root). SDK JSON buffering precedes those checks: these
 are acceptance limits, not hard socket/RSS limits. SDK retry behavior is unchanged,
-so one replies invocation need not mean one wire attempt. The 2.5-second ingress
-budget includes context, with at most one second for retrieval (also bounded by
-ingress deadline minus 1.3 seconds) and 1.2 seconds for Jev. Deadlines are not hard
-real-time scheduling claims or proof of Slack acknowledgement safety on a live host.
+so one replies invocation need not mean one wire attempt. No router-owned elapsed
+abort, deadline parameter or timeout tunable remains in ingress, history,
+presentation lookup or inference. Native/framework-owned transport behavior is
+unchanged. This is not a claim of live acknowledgement safety, message-edit or
+Gateway-end timing guarantees. Cooperative active evaluations now participate in
+native shutdown; native transport/lifecycle bounds themselves remain unchanged.
 Slack history has no atomic snapshot; unseen concurrent edits/deletions can race
 even a valid newest-page view.
+
+Before the single ask, repeatedly prepare and serialize the whole candidate source.
+Only request-oversized removes the oldest whole non-root History record. Rebuild
+all conversation orders/pointers/questions/answer keys and discard-only directory
+authors; preserve candidate identities/labels and exact retained originals. Ask and
+assemble use that same fitted Snapshot/batch. No refill/fetch, model retry, summary,
+source slicing or second serializer runs. Protected CURRENT/ROOT-only excess gives
+local `unsupported-request-size` at stage=fit, numeric bytes/dropped diagnostics,
+no HTTP and no semantic NO or new Slack UX. Invalid encoding/NaN is separate.
+Response status/size/encoding/Choice failures close resources and never refit/retry.
 
 ## Integration boundaries
 
