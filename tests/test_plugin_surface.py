@@ -36,6 +36,35 @@ class NamespaceIdentity(unittest.TestCase):
 
 @unittest.skipUnless(SOURCE, "requires isolated official host")
 class PluginSurface(unittest.TestCase):
+    def test_checkout_root_doctor_and_registration(self):
+        assert SOURCE
+        sys.path.insert(0, SOURCE)
+        self.addCleanup(sys.path.remove, SOURCE)
+        import shutil
+
+        from hermes_cli.plugin_dev import doctor_plugin
+        from hermes_cli.plugins import PluginManager
+
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            plugins = Path(temporary) / "plugins"
+            installed = plugins / "slack-agent-router"
+            shutil.copytree(
+                root,
+                installed,
+                ignore=shutil.ignore_patterns(
+                    ".git", ".venv", "__pycache__", ".ruff_cache", "dist", "build", "*.egg-info"
+                ),
+            )
+            manager = PluginManager()
+            manifests = manager._scan_directory(plugins, source="user")
+            self.assertEqual([(m.key, Path(m.path)) for m in manifests], [("slack-agent-router", installed)])
+            manager._load_plugin(manifests[0])
+            self.assertIsNone(manager._plugins["slack-agent-router"].error)
+            self.assertEqual(len(manager.get_platform_handler_factories("slack")), 1)
+            report = doctor_plugin(installed)
+            self.assertTrue(report.ok, report.format_text())
+
     def test_real_discovery_activation_doctor_without_database_or_admin(self):
         assert SOURCE
         sys.path.insert(0, SOURCE)

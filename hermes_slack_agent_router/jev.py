@@ -1,15 +1,44 @@
 """Official TypeSafe System One Choice protocol; Hermes-scoped credentials."""
 
-import asyncio
 import json
 import math
 
 
 class JevError(ValueError):
-    pass
+    def __init__(self, message, *, status=0, size=0, dropped=0):
+        super().__init__(message)
+        self.status = status if type(status) is int and 100 <= status <= 599 else 0
+        self.size = size if type(size) is int and size >= 0 else 0
+        self.dropped = dropped if type(dropped) is int and dropped >= 0 else 0
+
+    @property
+    def diagnostic(self):
+        # Only source-owned categories leave this boundary, never exception text.
+        message = str(self)
+        code = {
+            "invalid serialized request": "request-invalid",
+            "oversized serialized request": "request-oversized",
+            "unsupported request size": "unsupported-request-size",
+            "Hermes Jev credential scope unavailable": "scope-unavailable",
+            "Hermes Jev credential unavailable": "credential-unavailable",
+            "Jev HTTP request failed": "http-rejected",
+            "Jev HTTPS transport failed": "transport-failed",
+            "Jev HTTPS transport timed out": "transport-timeout",
+            "unsupported Jev response encoding": "response-encoding",
+            "oversized or invalid Jev response length": "response-length",
+            "oversized Jev response": "response-oversized",
+            "invalid Jev JSON": "answer-json",
+            "answer keys do not match request": "answer-coverage",
+            "invalid Choice answer": "answer-choice",
+            "nonfinite or out-of-range probability": "answer-probability",
+            "invalid probability distribution": "answer-distribution",
+            "uncertain or contradictory answer": "answer-contradiction",
+            "malformed native Jev answer": "answer-malformed",
+        }.get(message, "unclassified")
+        return code, self.status if code == "http-rejected" else 0
 
 
-def validate_answers(batch, result, confidence=0.8):
+def validate_answers(batch, result):
     try:
         answers = result["answers"]
         if not isinstance(answers, dict) or set(answers) != set(batch["questions"]):
@@ -35,39 +64,43 @@ def validate_answers(batch, result, confidence=0.8):
             if distribution[choice] < max(distribution.values()):
                 raise JevError("uncertain or contradictory answer")
             selected[name] = choice
-        for name, answer in answers.items():
-            relevant = True
-            if name.startswith("u") and "_" in name:
-                unit, field = name.split("_", 1)
-                relevant = field in ("kind", "mixed", "destination", "address") or selected.get(
-                    unit + "_kind"
-                ) not in (
-                    "ack",
-                    "reference",
-                )
-                if field == "address" and selected.get(unit + "_kind") == "action":
-                    relevant = False  # Specific actions consume the complete coarse specific_address audit.
-                if selected.get(unit + "_destination") == "generic" and field not in (
-                    "kind",
-                    "mixed",
-                    "destination",
-                ):
-                    relevant = False  # Generic routing consumes only the local main_fact family.
-            elif name.startswith("same"):
-                left, right = name[4:].split("_")
-                relevant = all(selected.get(f"u{i}_kind") == "action" for i in (left, right))
-            elif name == "main" or name.startswith("main_"):
-                relevant = any(
-                    key.endswith("_destination")
-                    and value == "generic"
-                    and selected.get(key.replace("_destination", "_kind")) == "action"
-                    for key, value in selected.items()
-                )
-            if relevant and answer["confidence"] < confidence:
-                raise JevError("uncertain relevant answer: " + name)
+        # Exhaustive native-generated families: only exact optional priors may omit.
+        state = batch["state"]
+        authored = [
+            unit for unit, span in state["source_selection"]["segments"].items() if not span["quoted"]
+        ]
+        required = {"response", "scope"} if authored else set()
+        priors = {
+            f"{unit}_prior{j}" for unit in authored for j in range(len(state["conversation"]["records"]) - 1)
+        }
+        if set(answers) != required | priors:
+            raise JevError("answer keys do not match request")
+        admitted = (
+            bool(authored) and selected["response"] == "yes" and answers["response"]["confidence"] > 0.5
+        )
+        if authored:
+            selected["response"] = "yes" if admitted else "no"
+        extent = set(selected["scope"].split("+")) if admitted and selected["scope"] != "unsafe" else set()
+        for name in priors:
+            unit = name.split("_prior", 1)[0]
+            if unit not in extent or answers[name]["confidence"] < 0.8 or selected[name] != "include":
+                selected[name] = "omit"
         return selected
     except (KeyError, TypeError, AttributeError) as exc:
         raise JevError("malformed native Jev answer") from exc
+
+
+def serialize_request(batch):
+    """Exact production encoding, also used by bound/qualification tests."""
+    try:
+        raw = json.dumps(
+            {"model": JevClient.model, **batch}, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        ).encode()
+    except (ValueError, TypeError, UnicodeError):
+        raise JevError("invalid serialized request") from None
+    if len(raw) > JevClient.request_limit:
+        raise JevError("oversized serialized request", size=len(raw))
+    return raw
 
 
 class JevClient:
@@ -78,17 +111,12 @@ class JevClient:
     limit = 262144
     request_limit = 524288
 
-    def __init__(self, timeout=1.2):
-        if not math.isfinite(timeout) or not 0 < timeout <= 1.2:
-            raise ValueError("Jev sub-budget must be in (0, 1.2] seconds")
-        self.timeout = timeout
-
     async def _exchange(self, raw, key):
         import httpx
 
         async with (
             httpx.AsyncClient(
-                timeout=self.timeout,
+                timeout=None,
                 follow_redirects=False,
                 trust_env=False,
             ) as client,
@@ -106,7 +134,7 @@ class JevClient:
         ):
             # Never follow redirects, retry errors, or expose service error bodies.
             if response.status_code != 200:
-                raise JevError("Jev HTTP request failed")
+                raise JevError("Jev HTTP request failed", status=response.status_code)
             if response.headers.get("Content-Encoding", "identity").lower() != "identity":
                 raise JevError("unsupported Jev response encoding")
             length = response.headers.get("Content-Length")
@@ -121,12 +149,7 @@ class JevClient:
             return b"".join(chunks)
 
     async def ask(self, batch):
-        try:
-            raw = json.dumps({"model": self.model, **batch}, ensure_ascii=False, allow_nan=False).encode()
-        except (ValueError, TypeError, UnicodeError):
-            raise JevError("invalid serialized request") from None
-        if len(raw) > self.request_limit:
-            raise JevError("oversized serialized request")
+        raw = serialize_request(batch)
         # Import and resolve inside the calling request's native Hermes scope, not
         # at registration/construction or through CLI-specific auth/environment files.
         try:
@@ -140,16 +163,15 @@ class JevClient:
         import httpx
 
         try:
-            # The total sub-budget includes connect/send/stream and resource cleanup;
-            # the caller's whole-ingress deadline may cancel it earlier.
-            async with asyncio.timeout(self.timeout):
-                stdout = await self._exchange(raw, key)
+            stdout = await self._exchange(raw, key)
             try:
                 result = json.loads(stdout)
             except (ValueError, UnicodeError):
                 raise JevError("invalid Jev JSON") from None
             return validate_answers(batch, result)
-        except (TimeoutError, httpx.HTTPError, OSError, ValueError) as exc:
+        except (TimeoutError, httpx.TimeoutException):
+            raise JevError("Jev HTTPS transport timed out") from None
+        except (httpx.HTTPError, OSError, ValueError) as exc:
             if isinstance(exc, JevError):
                 raise
             raise JevError("Jev HTTPS transport failed") from None

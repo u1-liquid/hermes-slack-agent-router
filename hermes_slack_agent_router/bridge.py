@@ -1,10 +1,11 @@
 """Read-only integration with official Hermes bf0203a794a0 private seams."""
 
 import asyncio
+import copy
 import re
 from dataclasses import dataclass
 
-from .policy import Event, Recipient, Thread, addresses
+from .policy import Event, Recipient, Thread
 
 
 class Uncertain(ValueError):
@@ -15,8 +16,13 @@ class TopologyError(ValueError):
     """An ordinary request lacks a stable, authoritative native candidate view."""
 
 
-def canonical_text(event):
-    """Flatten supported authored rich_text; retain exact leaf paths/ranges and kinds."""
+def canonical_text(event, *, prior=False):
+    """Flatten supported source fields, preserving exact leaf paths and ranges.
+
+    Human CURRENT composition remains rich_text-only. Prior Slack bot responses
+    also use native markdown and text-only section blocks; their notification
+    fallback is not a substitute for the visible authored source.
+    """
     from .semantic import SemanticError
 
     if not event.get("blocks"):
@@ -89,11 +95,45 @@ def canonical_text(event):
             raise SemanticError("unsupported authored rich_text element")
 
     for i, block in enumerate(event["blocks"]):
-        if block.get("type") != "rich_text":
-            raise SemanticError("unsupported current block")
+        path = f"blocks[{i}]"
         if i:
             append("\n", "blocks", "separator")
-        visit(block, f"blocks[{i}]")
+        if block.get("type") == "rich_text":
+            visit(block, path)
+        elif prior and block.get("type") == "markdown" and isinstance(block.get("text"), str):
+            append(block["text"], path + ".text", "authored")
+        elif (
+            prior
+            and block.get("type") == "section"
+            and not (set(block) - {"type", "block_id", "text", "expand"})
+            and isinstance(block.get("text"), dict)
+            and block["text"].get("type") in ("mrkdwn", "plain_text")
+            and isinstance(block["text"].get("text"), str)
+        ):
+            append(block["text"]["text"], path + ".text.text", "authored")
+        elif prior and block.get("type") == "context":
+            if (
+                set(block) - {"type", "block_id", "elements"}
+                or ("block_id" in block and not isinstance(block["block_id"], str))
+                or not isinstance(block.get("elements"), list)
+                or not block["elements"]
+            ):
+                raise SemanticError("unsupported prior context block")
+            for j, leaf in enumerate(block["elements"]):
+                if not isinstance(leaf, dict) or leaf.get("type") not in ("mrkdwn", "plain_text"):
+                    raise SemanticError("unsupported prior context leaf")
+                optional = "verbatim" if leaf["type"] == "mrkdwn" else "emoji"
+                if (
+                    set(leaf) - {"type", "text", optional}
+                    or not isinstance(leaf.get("text"), str)
+                    or (optional in leaf and type(leaf[optional]) is not bool)
+                ):
+                    raise SemanticError("unsupported prior context leaf")
+                if j:
+                    append("\n", path, "separator")
+                append(leaf["text"], f"{path}.elements[{j}].text", "authored")
+        else:
+            raise SemanticError("unsupported prior block" if prior else "unsupported current block")
     result = "".join(pieces)
     for part in provenance:
         mapping = part["mapping"]
@@ -108,27 +148,41 @@ def canonical_text(event):
     return result, tuple(provenance)
 
 
-def composition(event):
-    direct = set() if event.get("blocks") else set(addresses(event.get("text", "")))
+def contextual_person(user_id, payload, team):
+    """Whitelist same-workspace Slack identity fields, never an entire profile."""
+    result = {
+        "user_id": user_id,
+        "username": None,
+        "display_name": None,
+        "real_name": None,
+        "kind": "unknown",
+    }
+    user = payload.get("user") if callable(getattr(payload, "get", None)) else None
+    if not (
+        isinstance(user, dict)
+        and payload.get("ok") is True
+        and user.get("id") == user_id
+        and user.get("team_id") == team
+        and type(user.get("is_bot")) is bool
+        and isinstance(user.get("profile", {}), dict)
+    ):
+        return result
+    profile = user.get("profile", {})
 
-    def visit(node):
-        kind = node.get("type")
-        if kind in ("rich_text_quote", "rich_text_preformatted"):
-            return
-        if kind == "user":
-            if not node.get("style", {}).get("code"):
-                direct.add(node["user_id"])
-        elif kind in ("rich_text", "rich_text_section", "rich_text_list"):
-            for child in node.get("elements", []):
-                visit(child)
-        elif kind not in ("text", "link", "emoji", "broadcast", "channel", "color", "date"):
-            raise Uncertain("unrecognized block composition")
+    def field(value):
+        return (
+            value
+            if isinstance(value, str) and len(value) <= 128 and not any(ord(c) < 32 for c in value)
+            else None
+        )
 
-    for block in event.get("blocks", []):
-        if block.get("type") != "rich_text":
-            raise Uncertain("unsupported non-composition block")
-        visit(block)
-    return tuple(sorted(direct))
+    result.update(
+        username=field(user.get("name")),
+        display_name=field(profile.get("display_name")),
+        real_name=field(profile["real_name"] if "real_name" in profile else user.get("real_name")),
+        kind="bot" if user["is_bot"] else "human",
+    )
+    return result
 
 
 @dataclass
@@ -138,15 +192,83 @@ class Bound:
     source: object
     identity: object
     session_key: str
+    native_event: dict
+    sender_metadata: dict | None = None
 
 
 class Bridge:
-    def __init__(self, adapter, *, timeout=0.75):
+    def __init__(self, adapter):
         self.adapter = adapter
-        self.timeout = timeout
 
-    async def call(self, awaitable):
-        return await asyncio.wait_for(awaitable, self.timeout)
+    async def recipient_metadata(self, bound, topology):
+        """Request-local, separately named Slack identity fields.
+
+        A display-name cache may contain real-name fallbacks, so never reinterpret
+        it as display_name. auth.test's bot username is the only warm fallback.
+        """
+        team = bound.event.thread.workspace
+
+        async def resolve(recipient, witness):
+            runner = self.adapter.gateway_runner
+            maps = [runner._primary_adapters(), *runner._profile_adapters_map().values()]
+            from gateway.config import Platform
+            from slack_sdk.errors import SlackClientError
+
+            adapter = next(
+                m[Platform.SLACK] for m in maps if Platform.SLACK in m and id(m[Platform.SLACK]) == witness[0]
+            )
+            handle = adapter._team_bot_names.get(team)
+            fallback = {
+                "user_id": recipient.bot_user,
+                "username": handle
+                if isinstance(handle, str) and len(handle) <= 128 and not any(ord(c) < 32 for c in handle)
+                else None,
+                "display_name": None,
+                "real_name": None,
+            }
+            person = fallback
+            try:
+                response = await adapter._team_clients[team].users_info(user=recipient.bot_user)
+                verified = contextual_person(recipient.bot_user, response, team)
+                if verified["kind"] == "bot":
+                    person = verified
+                    if "name" not in response["user"]:
+                        person["username"] = fallback["username"]
+            except (TimeoutError, SlackClientError, OSError):
+                pass
+            return recipient.bot_user, {key: value for key, value in person.items() if key != "kind"}
+
+        async with asyncio.TaskGroup() as group:
+            lookups = [group.create_task(resolve(r, w)) for r, w in zip(*topology)]
+        return tuple(task.result() for task in lookups)
+
+    async def context_people(self, bound, history, whoami):
+        """Exact source-window people, via serving client only; never eligibility."""
+        from slack_sdk.errors import SlackClientError
+
+        team = bound.event.thread.workspace
+        if (
+            self.adapter._team_bot_user_ids.get(team) != bound.recipient.bot_user
+            or bound.identity.adapter() is not self.adapter
+            or bound.source.scope_id != team
+        ):
+            raise TopologyError("serving metadata client mismatch")
+        client = self.adapter._team_clients[team]
+        people = {user: {**fields, "kind": "bot"} for user, fields in whoami}
+        people[bound.event.sender] = bound.sender_metadata or contextual_person(bound.event.sender, {}, team)
+        authors = {bound.event.sender, *(h.sender for h in history)}
+
+        async def resolve(user):
+            try:
+                payload = await client.users_info(user=user)
+                return user, contextual_person(user, payload, team)
+            except (TimeoutError, SlackClientError, OSError):
+                return user, contextual_person(user, {}, team)
+
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(resolve(user)) for user in sorted(authors - set(people))]
+        people.update(task.result() for task in tasks)
+        return tuple(sorted(people.items()))
 
     async def participants(self, bound):
         """Resolve this event on each live local transport, without retaining a registry."""
@@ -179,7 +301,7 @@ class Bridge:
                 chat_id=thread.channel,
                 chat_type="group",
                 user_id=bound.event.sender,
-                thread_id=thread.root,
+                thread_id=adapter._session_thread_ts(bound.native_event, bound.source.message_id, False, {}),
                 scope_id=team,
                 message_id=bound.source.message_id,
             )
@@ -204,7 +326,7 @@ class Bridge:
             if not adapter.is_connected or task is None or task.done() or adapter._message_handler is None:
                 continue
             app, handler = adapter._app, adapter._handler
-            connected = await self.call(adapter._socket_transport_connected())
+            connected = await adapter._socket_transport_connected()
             if connected is None:
                 raise TopologyError("unknown native socket state")
             if not connected or adapter._socket_ping_pong_stale():
@@ -230,6 +352,8 @@ class Bridge:
                 identity,
                 id(transport),
                 id(runtime),
+                adapter._team_bot_names.get(team),
+                adapter._user_name_cache.get((team, bot)),
             )
             result.append((recipient, witness))
             observed.append((adapter, bot, client, app, handler, task, identity, transport, runtime))
@@ -301,17 +425,23 @@ class Bridge:
         event = dict(event)
         provenance = "message"
         if event.get("subtype") == "message_changed":
-            event = {**event, **(event.get("message") or {})}
-            event.pop("message", None)
-            if not event.get("edited", {}).get("ts"):
+            event = adapter._normalize_changed_message(event)
+            if event is None:
+                raise Uncertain("native edit not admitted")
+            if not isinstance(event.get("edited"), dict) or not event["edited"].get("ts"):
                 raise Uncertain("edit identity missing")
+        if event.get("edited"):
+            edit = event["edited"]
+            if not isinstance(edit, dict) or not isinstance(edit.get("ts"), str):
+                raise Uncertain("edit identity missing")
+            Thread(team, event.get("channel") or event.get("channel_id") or "", edit["ts"])
             provenance = "edit"
         channel = event.get("channel") or event.get("channel_id")
         if not channel:
             raise Uncertain("missing channel")
         channel_type = event.get("channel_type")
         if channel_type is None:
-            info = await self.call(client.conversations_info(channel=channel))
+            info = await client.conversations_info(channel=channel)
             obj = info.get("channel") or {}
             if info.get("ok") is not True or obj.get("id") != channel:
                 raise Uncertain("unverified conversation")
@@ -322,7 +452,7 @@ class Bridge:
             file_id = event.get("file_id")
             if not file_id:
                 raise Uncertain("missing file id")
-            result = await self.call(client.files_info(file=file_id))
+            result = await client.files_info(file=file_id)
             file = result.get("file") or {}
             if result.get("ok") is not True or not file.get("mimetype", "").startswith("video/"):
                 raise Uncertain("outside verified video fallback")
@@ -342,7 +472,7 @@ class Bridge:
         sender = event.get("user")
         if not sender or sender == bot or adapter._event_declares_bot_sender(event):
             raise Uncertain("native bot/self/unknown sender")
-        payload = await self.call(client.users_info(user=sender))
+        payload = await client.users_info(user=sender)
         user = payload.get("user") or {}
         if payload.get("ok") is not True or user.get("id") != sender or user.get("is_bot") is not False:
             raise Uncertain("no positive human evidence")
@@ -363,7 +493,12 @@ class Bridge:
         root = event.get("thread_ts") or ts
         thread = Thread(team, channel, root)
         source = adapter.build_source(
-            chat_id=channel, chat_type="group", user_id=sender, thread_id=root, scope_id=team, message_id=ts
+            chat_id=channel,
+            chat_type="group",
+            user_id=sender,
+            thread_id=adapter._session_thread_ts(event, ts, False, {}),
+            scope_id=team,
+            message_id=ts,
         )
         identity = adapter._canonicalize(source)
         if identity is None or identity.adapter() is not adapter or identity.transport_inferred:
@@ -371,16 +506,12 @@ class Bridge:
         session_key = adapter._source_session_key(source)
         recipient = Recipient(team, bot, identity.runtime_profile)
         event_id = ts + (":" + event["edited"]["ts"] if provenance == "edit" else "")
-        try:
-            direct = composition(event)
-        except Uncertain:
-            # A verified ordinary human with unknown composition is not a native control exemption.
-            # Semantic ingress validates it before any native listener, without retaining content.
-            direct = addresses(event.get("text", ""))
         return Bound(
-            Event(thread, event_id, sender, direct, provenance=provenance),
+            Event(thread, event_id, sender, provenance=provenance),
             recipient,
             source,
             identity,
             session_key,
+            copy.deepcopy(event),
+            contextual_person(sender, payload, team),
         )
