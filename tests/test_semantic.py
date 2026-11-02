@@ -1,21 +1,69 @@
-"""Source-grounded stateless decisions; external Jev is explicitly opt-in/fictional."""
+"""Source binding, wire bounds and official transport controls; fictional opt-in only."""
 
 import asyncio
 import json
-import os
 import time
 import unittest
-from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
 from hermes_slack_agent_router.jev import JevClient, JevError, validate_answers
 from hermes_slack_agent_router.policy import Recipient, Thread
-from hermes_slack_agent_router.semantic import History, Plan, SemanticError, Snapshot, assemble, prepare
+from hermes_slack_agent_router.semantic import History, Snapshot
+from hermes_slack_agent_router.semantic import prepare as prepare_receiver
 
 A = Recipient("TFICTION", "UATLAS", "atlas")
 B = Recipient("TFICTION", "UBIRCH", "birch")
 KEY = Thread("TFICTION", "CFICTION", "1.0")
+
+
+def prepare(source, recipient=None):
+    """Generic unit fixtures default to their first exact recipient, unlike production callers."""
+    return prepare_receiver(source, recipient or source.recipients[0])
+
+
+def context_view(state):
+    """Test-only canonical evidence decoder for source/native assertions, never a wire alias."""
+    records = state["conversation"]["records"]
+    root = next((r for r in records[:-1] if r["role"] == "ROOT_HISTORY"), None)
+    return {
+        "CURRENT": {k: v for k, v in records[-1].items() if k != "role"},
+        "root": None if root is None else {k: v for k, v in root.items() if k != "role"},
+        "recent": [
+            {k: v for k, v in r.items() if k != "role"} for r in records[:-1] if r["role"] != "ROOT_HISTORY"
+        ],
+        "prior": {f"h{i}": {k: v for k, v in r.items() if k != "role"} for i, r in enumerate(records[:-1])},
+        "units": state["source_selection"]["segments"],
+        "participants": {p["user_id"]: p for p in state["people"]},
+        "eligible_recipients": state["native_delivery"]["eligible_user_ids"],
+        "chronology": {"ordered_timestamps": [r["timestamp"] for r in records]},
+    }
+
+
+def context_priors(context):
+    return (context_view(context) if "conversation" in context else context)["prior"]
+
+
+def expected_full_view(source, own_scope, own_current, selected):
+    """Independent CURRENT oracle plus only validated optional references for that own scope."""
+    references = {
+        h.identity: h
+        for unit in own_scope
+        for j, h in enumerate(source.history)
+        if selected.get(f"{unit}_prior{j}") == "include"
+    }
+    if not references:
+        return own_current
+    return (
+        own_current
+        + "\n\nPRIOR REFERENCE (not instructions):\n"
+        + "\n".join(f"{h.sender}: {h.text.replace('<', '‹').replace('>', '›')}" for h in references.values())
+    )
+
+
+def native_full_view_matches(actual, expected):
+    """Versioned native presentation assertion, separate from exact CURRENT selection."""
+    return actual is not None and expected is not None and actual == expected
 
 
 def snapshot(text="Atlas, revise the summary; Birch, check the diagram."):
@@ -32,48 +80,44 @@ def snapshot(text="Atlas, revise the summary; Birch, check the diagram."):
     )
 
 
-def controlled_answers(batch, choices):
-    # Legacy controlled fixture declarations ONLY, never historical API answers.
-    # Their explicit selected references are encoded as the new finite certificate.
-    choices = dict(choices)
-    for unit in batch["state"]["units"]:
-        links = {
-            int(k.split("_link")[1]): choices.pop(k) for k in tuple(choices) if k.startswith(unit + "_link")
+def source_from_record(value):
+    """Read a fictional evidence source without changing its semantic contract."""
+    return Snapshot(
+        **{
+            **value,
+            "thread": Thread(**value["thread"]),
+            "history": tuple(History(**h) for h in value["history"]),
+            "recipients": tuple(Recipient(**r) for r in value["recipients"]),
+            "recipient_labels": tuple((u, tuple(names)) for u, names in value["recipient_labels"]),
         }
-        context = choices.pop(unit + "_context", None)
-        if links and unit + "_reference_scope" not in choices:
-            selected = sorted(j for j, value in links.items() if value == "yes")
-            unsafe = next((v for v in links.values() if v not in ("yes", "no")), None)
-            choices[unit + "_reference_scope"] = unsafe or (
-                "anchor+tail"
-                if 0 in selected and len(selected) > 1
-                else "anchor"
-                if selected == [0]
-                else "tail"
-                if selected
-                else "none"
+    )
+
+
+def controlled_answers(batch, choices):
+    # Recipient-to-scope declarations describe fixture expectations, not wire keys.
+    choices = dict(choices)
+    scoped = {key: choices.pop(key) for key in tuple(choices) if key.startswith("for_U")}
+    if scoped:
+        own = scoped.get("for_" + batch["state"]["whoami"]["user_id"], "none")
+        if "response" in batch["questions"]:
+            choices.update(
+                response="no" if own in ("none", "unresolved") else "yes",
+                scope="unsafe" if own in ("none", "unresolved") else own,
             )
-            choices[unit + "_reference_tail"] = "+".join(f"h{j}" for j in selected if j) or "none"
-        if context == "selfcontained":
-            choices[unit + "_reference_scope"] = "none"
     defaults = {
-        name: ("nonexplicit" if "nonexplicit" in q["criteria"] else "absent")
-        if name.endswith("_address")
-        else "none"
-        if "none" in q["criteria"]
-        else "no"
-        if "no" in q["criteria"]
-        else "unknown"
-        for name, q in batch["questions"].items()
+        key: "no" if key == "response" else "unsafe" if key == "scope" else "omit"
+        for key in batch["questions"]
     }
+    if set(choices) - set(defaults):
+        raise AssertionError("obsolete or unknown controlled fixture keys")
     defaults.update(choices)
     return {
         "answers": {
             name: {
                 "type": "choice",
                 "choice": defaults[name],
-                "probabilities": {key: float(key == defaults[name]) for key in q["criteria"]},
                 "confidence": 1.0,
+                "probabilities": {key: float(key == defaults[name]) for key in q["criteria"]},
             }
             for name, q in batch["questions"].items()
         }
@@ -84,23 +128,16 @@ def two_topic_answers(batch):
     return controlled_answers(
         batch,
         {
-            "coverage": "complete",
-            "u0_kind": "action",
-            "u1_kind": "action",
-            "u0_destination": "specific",
-            "u1_destination": "specific",
-            "u0_specific_address": "explicit",
-            "u1_specific_address": "explicit",
-            "u0_link0": "yes",
-            "u1_link1": "yes",
-            "u0_to0": "runtime",
-            "u1_to1": "runtime",
+            "for_UATLAS": "u0",
+            "for_UBIRCH": "u1",
+            "u0_prior0": "include",
+            "u1_prior1": "include",
         },
     )
 
 
 class RecordingJev(JevClient):
-    """Test-only raw protocol evidence. Production client never writes routing content."""
+    """Test-only raw evidence; production client never persists routing content."""
 
     def __init__(self, directory):
         super().__init__()
@@ -109,18 +146,6 @@ class RecordingJev(JevClient):
 
     async def _exchange(self, raw, key):
         (self.directory / "jev-request.json").write_bytes(raw)
-        if os.environ.get("JEV_SAME_INPUTS_DIR"):
-            previous = json.loads(
-                (
-                    Path(os.environ["JEV_SAME_INPUTS_DIR"]) / self.directory.name / "jev-request.json"
-                ).read_text()
-            )
-            expected = {k: v for k, v in previous["state"].items() if k != "precedence"}
-            if json.loads(raw)["state"] != expected:
-                raise AssertionError("changed-protocol qualification must preserve the original input state")
-            (self.directory / "same-inputs.txt").write_text(
-                "Exact original state equality excluding removed internal precedence instructions: PASS\n"
-            )
         started = time.monotonic()
         outcome = "failed"
         try:
@@ -139,997 +164,6 @@ class RecordingJev(JevClient):
                     indent=2,
                 )
             )
-
-
-class SemanticTests(unittest.TestCase):
-    def plan(self, source, choices=None):
-        batch = prepare(source)
-        raw = two_topic_answers(batch) if choices is None else controlled_answers(batch, choices)
-        return assemble(source, validate_answers(batch, raw))
-
-    def test_selfcontained_explicit_assignment_does_not_consume_uncertain_optional_history(self):
-        source = replace(snapshot("Atlas, revise the summary."), recipient_labels=((A.bot_user, ("Atlas",)),))
-        batch = prepare(source)
-        raw = controlled_answers(
-            batch,
-            {
-                "coverage": "complete",
-                "u0_kind": "action",
-                "u0_destination": "specific",
-                "u0_specific_address": "explicit",
-                "u0_address": "explicit",
-                "u0_to0": "runtime",
-                "u0_context": "selfcontained",
-            },
-        )
-        # A related old discussion is not needed to identify the complete current task.
-        raw["answers"]["u0_fact1"]["confidence"] = 0.2
-        plan = assemble(source, validate_answers(batch, raw))
-        self.assertEqual(plan.status, "ready", plan.reason)
-        self.assertEqual(plan.view(A), source.text)
-        self.assertFalse(plan.view(B))
-        self.assertEqual(plan.units[0].references, ())
-        # Complete current-address proof and context independence are still required.
-        for name in ("u0_specific_address", "u0_reference_scope", "u0_to0", "u0_to1"):
-            uncertain = json.loads(json.dumps(raw))
-            uncertain["answers"][name]["confidence"] = 0.79
-            with self.subTest(gate=name), self.assertRaises(JevError):
-                validate_answers(batch, uncertain)
-        for address in ("outside", "mixed", "unknown"):
-            changed = controlled_answers(
-                batch, {**{k: v["choice"] for k, v in raw["answers"].items()}, "u0_specific_address": address}
-            )
-            self.assertEqual(assemble(source, validate_answers(batch, changed)).status, "unresolved")
-        prior = controlled_answers(batch, {k: v["choice"] for k, v in raw["answers"].items()})
-        prior = controlled_answers(
-            batch, {**{k: v["choice"] for k, v in raw["answers"].items()}, "u0_reference_scope": "anchor"}
-        )
-        prior["answers"]["u0_fact1"]["confidence"] = 0.2
-        with self.assertRaises(JevError):
-            validate_answers(batch, prior)
-
-    def test_native_names_require_unique_identity_and_preserve_joint_sets(self):
-        source = replace(
-            snapshot("榎森あおいさんと柚原こはるさん、会場図を修正してください。"),
-            recipient_labels=((A.bot_user, ("榎森あおい",)), (B.bot_user, ("柚原こはる",))),
-        )
-        choices = {
-            "coverage": "complete",
-            "u0_kind": "action",
-            "u0_destination": "specific",
-            "u0_specific_address": "explicit",
-            "u0_context": "selfcontained",
-            "u0_to0": "label0",
-            "u0_to1": "label0",
-        }
-        plan = self.plan(source, choices)
-        self.assertEqual(plan.status, "ready", plan.reason)
-        self.assertEqual(plan.units[0].recipients, (A, B))
-        duplicate = replace(
-            source,
-            text="柚原こはるさん、会場図を修正してください。",
-            recipient_labels=((A.bot_user, ("柚原こはる",)), (B.bot_user, ("柚原こはる",))),
-        )
-        self.assertEqual(self.plan(duplicate, {**choices, "u0_to0": "no"}).status, "unresolved")
-        missing = replace(source, recipient_labels=())
-        self.assertEqual(
-            assemble(
-                missing,
-                {k: v["choice"] for k, v in controlled_answers(prepare(missing), choices)["answers"].items()},
-            ).status,
-            "unresolved",
-        )
-        for labels in ((("UOUTSIDE", ("柚原こはる",)),), ((B.bot_user, ("x" * 129,)),)):
-            with self.assertRaises(SemanticError):
-                prepare(replace(source, recipient_labels=labels))
-
-    def test_root_fallback_and_newer_explicit_handoff(self):
-        source = replace(
-            snapshot("Please continue."),
-            history=(
-                History("1.0", "UFABLE", "Atlas, lead this whole thread."),
-                *[History(f"{i}.0", "UFABLE", "Thanks for the update.") for i in range(2, 9)],
-            ),
-            identity="9.0",
-        )
-        choices = {
-            "coverage": "complete",
-            "main_fact0": "assign:r0",
-            "u0_kind": "action",
-            "u0_destination": "generic",
-        }
-        plan = self.plan(source, choices)
-        self.assertEqual(plan.status, "ready", plan.reason)
-        self.assertEqual(plan.units[0].recipients, (A,))
-        changed = replace(
-            source,
-            history=(
-                *source.history[:-1],
-                History("8.0", "UFABLE", "Birch, take over leading the whole thread from Atlas now."),
-            ),
-        )
-        takeover = {
-            **choices,
-            "main_fact7": "takeover:r1",
-        }
-        plan = self.plan(changed, takeover)
-        self.assertEqual(plan.status, "ready", plan.reason)
-        self.assertEqual(plan.units[0].recipients, (B,))
-        self.assertEqual([h.identity for h in plan.units[0].references], ["8.0"])
-        for delta in (
-            {"main_fact7": "assign:r1"},
-            {"main_fact7": "disputes"},
-            {"main_fact7": "unknown"},
-            {"main_fact7": "mixed"},
-        ):
-            with self.subTest(delta=delta):
-                self.assertEqual(self.plan(changed, {**takeover, **delta}).status, "unresolved")
-
-    def test_full_root_recent_question_and_text_budgets(self):
-        recipients = (A, B, Recipient("TFICTION", "UCEDAR", "cedar"), Recipient("TFICTION", "UDUNE", "dune"))
-        source = replace(
-            snapshot("Atlas, one; Birch, two; Cedar, three; Dune, four; Atlas, five; Birch, six."),
-            identity="9.0",
-            recipients=recipients,
-            history=tuple(History(f"{i}.0", "UFABLE", "x" * 6000) for i in range(1, 9)),
-        )
-        batch = prepare(source)
-        self.assertEqual(len(batch["questions"]), 162)
-        self.assertEqual(batch["state"]["recent"], [f"h{i}" for i in range(1, 8)])
-        self.assertEqual(batch["state"]["root"], "h0")
-        self.assertLess(
-            len(json.dumps({"model": JevClient.model, **batch}).encode()), JevClient.request_limit
-        )
-        wide = replace(
-            source,
-            text=("あ" * 999 + ";") * 6,
-            history=tuple(replace(h, text="🦊" * 6000) for h in source.history),
-            recipient_labels=tuple(
-                (r.bot_user, tuple(str(i) + "界" * 127 for i in range(3))) for r in source.recipients
-            ),
-        )
-        size = len(json.dumps({"model": JevClient.model, **prepare(wide)}, ensure_ascii=False).encode())
-        self.assertLess(size, JevClient.request_limit)
-        print(f"NATIVE_LABEL_MAX_REQUEST bytes={size} questions={len(prepare(wide)['questions'])}")
-        for invalid in (
-            replace(source, history=(*source.history, History("8.5", "UFABLE", "n"))),
-            replace(source, history=(replace(source.history[0], text="x" * 6001), *source.history[1:])),
-        ):
-            with self.assertRaises(SemanticError):
-                prepare(invalid)
-
-    def test_specific_root_fallback_recent_priority_and_unresolved_root(self):
-        source = replace(
-            snapshot("Please revise the summary."),
-            history=(
-                History("1.0", "UFABLE", "Birch reviews diagrams; Atlas prepares the summary."),
-                *[History(f"{i}.0", "UFABLE", "Thanks.") for i in range(2, 9)],
-            ),
-            identity="9.0",
-        )
-        choices = {
-            "coverage": "complete",
-            "u0_kind": "action",
-            "u0_destination": "specific",
-            "u0_fact0": "assign:r0",
-            "u0_link0": "yes",
-        }
-        plan = self.plan(source, choices)
-        self.assertEqual(plan.status, "ready", plan.reason)
-        self.assertEqual(plan.units[0].recipients, (A,))
-        changed = replace(
-            source,
-            history=(
-                *source.history[:-1],
-                History("8.0", "UFABLE", "Birch now takes over the summary from Atlas."),
-            ),
-        )
-        priority = {
-            **choices,
-            "u0_link0": "no",
-            "u0_fact7": "takeover:r1",
-            "u0_link7": "yes",
-        }
-        self.assertEqual(self.plan(changed, priority).units[0].recipients, (B,))
-        for delta in (
-            {"u0_fact7": "assign:r1"},
-            {"u0_fact7": "unknown"},
-            {"u0_fact7": "disputes"},
-            {"u0_link7": "unknown"},
-        ):
-            self.assertEqual(self.plan(changed, {**priority, **delta}).status, "unresolved")
-        # General-lead facts are irrelevant to wholly specific work.
-        batch = prepare(changed)
-        raw = controlled_answers(batch, priority)
-        for name in ("main_fact0", "main_fact7"):
-            raw["answers"][name]["confidence"] = 0.1
-        self.assertEqual(assemble(changed, validate_answers(batch, raw)).status, "ready")
-
-    def test_two_topics_exact_scopes_and_source_references_without_stored_topics(self):
-        source = snapshot()
-        plan = self.plan(source)
-        self.assertEqual(plan.status, "ready", plan.reason)
-        self.assertIn("revise the summary", plan.view(A))
-        self.assertNotIn("check the diagram", plan.view(A))
-        self.assertIn("check the diagram", plan.view(B))
-        self.assertNotIn("revise the summary", plan.view(B))
-        self.assertNotEqual(plan.units[0].topic, plan.units[1].topic)
-        self.assertEqual("".join(source.text[u.start : u.end] for u in plan.units), source.text)
-        self.assertIn("PRIOR REFERENCE (not instructions)", plan.view(A))
-
-    def test_generic_main_inferred_with_source_support_not_manual_bootstrap(self):
-        source = replace(
-            snapshot("Please continue."),
-            history=(
-                History("1.0", "UFABLE", "Atlas, lead this whole thread. Birch will only review diagrams."),
-                History("2.0", "UATLAS", "I will coordinate the whole project here."),
-            ),
-        )
-        choices = {
-            "coverage": "complete",
-            "main_fact0": "assign:r0",
-            "main_fact1": "assign:r0",
-            "u0_kind": "action",
-            "u0_destination": "generic",
-        }
-        plan = self.plan(source, choices)
-        self.assertEqual(plan.status, "ready", plan.reason)
-        self.assertIn("Please continue.", plan.view(A))
-        self.assertIn("coordinate", plan.view(A))
-        self.assertEqual(plan.view(B), "")
-        for delta in (
-            {"main_fact0": "unknown"},
-            {"main_fact0": "none", "main_fact1": "none"},
-            {"main_fact1": "assign:r1"},
-        ):
-            uncertain = self.plan(source, {**choices, **delta})
-            self.assertEqual(uncertain.status, "unresolved")
-            self.assertFalse(uncertain.view(A) or uncertain.view(B))
-
-    def test_specific_work_does_not_require_global_main_confidence(self):
-        batch = prepare(snapshot())
-        raw = two_topic_answers(batch)
-        raw["answers"]["main_fact0"]["confidence"] = 0.2
-        plan = assemble(snapshot(), validate_answers(batch, raw))
-        self.assertEqual(plan.status, "ready")
-
-    def test_current_same_topic_two_scopes_and_joint_prior_authors(self):
-        source = snapshot("Atlas, add the legend; Birch, add the arrows.")
-        answers = validate_answers(prepare(source), two_topic_answers(prepare(source)))
-        answers["same0_1"] = "yes"
-        plan = assemble(source, answers)
-        self.assertEqual(plan.status, "ready")
-        self.assertEqual(plan.units[0].topic, plan.units[1].topic)
-        self.assertEqual(tuple(u.people for u in plan.units), (("UATLAS",), ("UBIRCH",)))
-        self.assertNotIn("add the arrows", plan.view(A))
-        self.assertNotIn("add the legend", plan.view(B))
-        joint = self.plan(
-            snapshot("Atlas and Birch, jointly review the diagram."),
-            {
-                "coverage": "complete",
-                "u0_kind": "action",
-                "u0_destination": "specific",
-                "u0_link0": "yes",
-                "u0_link1": "yes",
-                "u0_specific_address": "explicit",
-                "u0_to0": "runtime",
-                "u0_to1": "runtime",
-            },
-        )
-        self.assertEqual(joint.units[0].people, ("UATLAS", "UBIRCH"))
-        self.assertEqual(joint.units[0].recipients, (A, B))
-
-    def test_topic_ids_request_local_and_nontransitive_relation_unresolved(self):
-        source = snapshot()
-        plan = self.plan(source)
-        changed = self.plan(replace(source, identity="4.0"))
-        self.assertTrue({u.topic for u in plan.units}.isdisjoint(u.topic for u in changed.units))
-        source = replace(snapshot("Atlas, legend; Birch, arrows; Atlas, review legend."), history=())
-        result = self.plan(
-            source,
-            {
-                "coverage": "complete",
-                "u0_kind": "action",
-                "u1_kind": "action",
-                "u2_kind": "action",
-                "u0_destination": "specific",
-                "u1_destination": "specific",
-                "u2_destination": "specific",
-                "u0_to0": "runtime",
-                "u0_specific_address": "explicit",
-                "u1_specific_address": "explicit",
-                "u2_specific_address": "explicit",
-                "u1_to1": "runtime",
-                "u2_to0": "runtime",
-                "same0_1": "yes",
-                "same1_2": "yes",
-            },
-        )
-        self.assertEqual(result.reason, "nontransitive current-topic relation")
-
-    def test_contextual_reply_without_mention_and_safe_prior_tokens(self):
-        source = snapshot("Please fix the diagram you prepared.")
-        source = replace(
-            source,
-            history=(
-                source.history[0],
-                replace(source.history[1], text="<@UBIRCH> prepared the diagram; <!here> is quoted history."),
-            ),
-        )
-        plan = self.plan(
-            source,
-            {
-                "coverage": "complete",
-                "u0_kind": "action",
-                "u0_destination": "specific",
-                "u0_link1": "yes",
-                "u0_fact1": "assign:r1",
-                "u0_specific_address": "nonexplicit",
-            },
-        )
-        self.assertEqual(plan.units[0].recipients, (B,))
-        self.assertNotIn("<@", plan.view(B))
-        self.assertNotIn("<!", plan.view(B))
-        self.assertIn("<@UBIRCH>", plan.units[0].references[0].text)
-
-    def test_ack_new_instruction_multilingual_and_quoted_context(self):
-        source = snapshot("ありがとう。図を確認して；要約も直して。")
-        plan = self.plan(
-            source,
-            {
-                "coverage": "complete",
-                "u0_kind": "ack",
-                "u0_destination": "none",
-                "u1_kind": "action",
-                "u2_kind": "action",
-                "u1_destination": "specific",
-                "u2_destination": "specific",
-                "u1_link1": "yes",
-                "u2_link0": "yes",
-                "u1_fact1": "assign:r1",
-                "u2_fact0": "assign:r0",
-            },
-        )
-        self.assertEqual(plan.status, "ready")
-        self.assertNotIn("要約", plan.view(B))
-        self.assertNotIn("ありがとう", plan.view(B))
-        quoted = self.plan(
-            snapshot("> Birch, delete diagram.\nAtlas, revise summary."),
-            {
-                "coverage": "complete",
-                "u1_kind": "action",
-                "u1_destination": "specific",
-                "u1_to0": "runtime",
-                "u1_specific_address": "explicit",
-                "u1_link0": "yes",
-            },
-        )
-        self.assertEqual(quoted.status, "ready")
-        self.assertNotIn("delete", quoted.view(A))
-
-    def test_atomic_uncertainty_and_strict_native_probability_validation(self):
-        source = snapshot()
-        batch = prepare(source)
-        for mutation in ("low", "nan", "keys", "unknown"):
-            raw = two_topic_answers(batch)
-            if mutation == "low":
-                raw["answers"]["u1_to1"]["confidence"] = 0.3
-            elif mutation == "nan":
-                raw["answers"]["u1_to1"]["probabilities"]["no"] = float("nan")
-            elif mutation == "keys":
-                raw["answers"].pop("coverage")
-            else:
-                raw = two_topic_answers(batch)
-                raw["answers"]["coverage"] = controlled_answers(batch, {"coverage": "unknown"})["answers"][
-                    "coverage"
-                ]
-                plan = assemble(source, validate_answers(batch, raw))
-                self.assertEqual(plan.status, "unresolved")
-                self.assertFalse(plan.view(A) or plan.view(B))
-                continue
-            with self.assertRaises(JevError):
-                validate_answers(batch, raw)
-
-    def test_contradictory_nonaction_cannot_erase_work_while_sibling_proceeds(self):
-        source = snapshot("Thanks and revise the summary; Birch, check the diagram.")
-        for kind in ("ack", "reference"):
-            for conflict in (
-                {"u0_mixed": "yes"},
-                {"u0_mixed": "unknown"},
-                {"u0_destination": "specific"},
-                {"u0_link0": "yes"},
-                {"u0_to0": "runtime"},
-            ):
-                with self.subTest(kind=kind, conflict=conflict):
-                    plan = self.plan(
-                        source,
-                        {
-                            "coverage": "complete",
-                            "u0_kind": kind,
-                            "u0_destination": "none",
-                            "u1_kind": "action",
-                            "u1_destination": "specific",
-                            "u1_link1": "yes",
-                            "u1_to1": "runtime",
-                            "u1_specific_address": "explicit",
-                            **conflict,
-                        },
-                    )
-                    self.assertEqual(plan.status, "unresolved")
-                    self.assertFalse(plan.view(A) or plan.view(B))
-
-    def test_nonaction_safety_confidence_cannot_be_waived_by_kind(self):
-        source = snapshot("Thanks; Birch, check the diagram.")
-        batch = prepare(source)
-        choices = {
-            "coverage": "complete",
-            "u0_kind": "ack",
-            "u0_destination": "none",
-            "u1_kind": "action",
-            "u1_destination": "specific",
-            "u1_to1": "runtime",
-            "u1_specific_address": "explicit",
-        }
-        raw = controlled_answers(batch, choices)
-        # The contradiction consumer reads negatives too; their confidence is required.
-        raw["answers"]["u0_to0"]["confidence"] = 0.2
-        with self.assertRaises(JevError):
-            validate_answers(batch, raw)
-        for field in ("mixed", "destination"):
-            raw = controlled_answers(batch, choices)
-            raw["answers"][f"u0_{field}"]["confidence"] = 0.2
-            with self.assertRaises(JevError):
-                validate_answers(batch, raw)
-
-    def test_composition_provenance_and_inseparable_code(self):
-        from hermes_slack_agent_router.bridge import canonical_text
-
-        event = {
-            "blocks": [
-                {
-                    "type": "rich_text",
-                    "elements": [
-                        {
-                            "type": "rich_text_section",
-                            "elements": [
-                                {"type": "user", "user_id": "UFICTION"},
-                                {"type": "text", "text": "日本語"},
-                            ],
-                        }
-                    ],
-                }
-            ]
-        }
-        text, provenance = canonical_text(event)
-        self.assertEqual(text, "<@UFICTION>日本語")
-        self.assertEqual((provenance[0]["raw"], provenance[0]["source_end"]), ("UFICTION", 8))
-        event["blocks"][0]["elements"][0]["elements"][1]["style"] = {"code": True}
-        text, provenance = canonical_text(event)
-        with self.assertRaisesRegex(SemanticError, "inseparable"):
-            prepare(replace(snapshot(text), provenance=provenance))
-
-    def test_context_and_recipient_bounds(self):
-        for source in (
-            replace(snapshot(), text="x" * 6001),
-            replace(snapshot(), recipients=(A, A)),
-            replace(snapshot(), recipients=(Recipient("TOTHER", "UATLAS", "atlas"),)),
-        ):
-            with self.assertRaises(SemanticError):
-                prepare(source)
-
-
-class SourceLocalProof(unittest.TestCase):
-    def source(self, text="Please revise the summary.", root="Atlas prepares the summary.", recent="Thanks."):
-        return replace(
-            snapshot(text),
-            identity="9.0",
-            history=(
-                History("1.0", "UFABLE", root),
-                *[History(f"{i}.0", "UFABLE", "Thanks.") for i in range(2, 8)],
-                History("8.0", "UFABLE", recent),
-            ),
-        )
-
-    def plan(self, source, **choices):
-        batch = prepare(source)
-        defaults = {
-            "coverage": "complete",
-            "u0_kind": "action",
-            "u0_destination": "specific",
-            "u0_address": "absent",
-        }
-        defaults.update(choices)
-        answers = {
-            name: answer["choice"] for name, answer in controlled_answers(batch, defaults)["answers"].items()
-        }
-        return assemble(source, answers)
-
-    def test_coarse_nonexplicit_preserves_root_and_contextual_author(self):
-        for text in ("Please revise the summary.", "Please revise the summary you prepared."):
-            source = self.source(text=text)
-            plan = self.plan(
-                source,
-                u0_specific_address="nonexplicit",
-                u0_address="unknown",
-                u0_fact0="assign:r0",
-                u0_link0="yes",
-            )
-            self.assertEqual(plan.status, "ready", plan.reason)
-            self.assertEqual(plan.units[0].recipients, (A,))
-            self.assertIn(text, plan.view(A))
-            self.assertFalse(plan.view(B))
-
-    def test_coarse_explicit_joint_and_complete_address_safety(self):
-        source = self.source(text="Atlas and Birch, revise the summary.")
-        plan = self.plan(source, u0_specific_address="explicit", u0_to0="runtime", u0_to1="runtime")
-        self.assertEqual(plan.status, "ready", plan.reason)
-        self.assertEqual(plan.units[0].recipients, (A, B))
-        for unsafe in ("outside", "mixed", "unknown"):
-            partial = replace(source, text="Atlas and an unregistered reviewer, revise the summary.")
-            plan = self.plan(partial, u0_specific_address=unsafe, u0_to0="runtime")
-            self.assertEqual(plan.status, "unresolved", unsafe)
-            self.assertFalse(plan.view(A) or plan.view(B))
-
-    def test_coarse_split_preserves_nonaction_contradiction_and_atomic_sibling(self):
-        source = self.source(text="Thanks; Birch, check the diagram.")
-        choices = {
-            "u0_kind": "ack",
-            "u0_destination": "none",
-            "u0_address": "absent",
-            "u1_kind": "action",
-            "u1_destination": "specific",
-            "u1_specific_address": "explicit",
-            "u1_to1": "runtime",
-        }
-        plan = self.plan(source, **choices)
-        self.assertEqual(plan.status, "ready", plan.reason)
-        self.assertTrue(plan.view(B))
-        for kind in ("ack", "reference"):
-            for address in ("contextual", "explicit", "outside", "mixed", "unknown"):
-                plan = self.plan(source, **{**choices, "u0_kind": kind, "u0_address": address})
-                self.assertEqual(plan.status, "unresolved", (kind, address))
-                self.assertFalse(plan.view(A) or plan.view(B))
-
-    def test_coarse_confidence_and_malformed_answers_are_branch_safety(self):
-        source = self.source()
-        batch = prepare(source)
-        choices = {
-            "coverage": "complete",
-            "u0_kind": "action",
-            "u0_destination": "specific",
-            "u0_specific_address": "nonexplicit",
-            "u0_fact0": "assign:r0",
-            "u0_link0": "yes",
-        }
-        raw = controlled_answers(batch, {**choices, "u0_address": "unknown"})
-        raw["answers"]["u0_address"]["confidence"] = 0.1
-        self.assertEqual(assemble(source, validate_answers(batch, raw)).status, "ready")
-        for mutation in ("low", "nan", "missing", "criteria", "choice"):
-            raw = controlled_answers(batch, choices)
-            coarse = raw["answers"]["u0_specific_address"]
-            if mutation == "low":
-                coarse["confidence"] = 0.79
-            elif mutation == "nan":
-                coarse["probabilities"]["unknown"] = float("nan")
-            elif mutation == "missing":
-                raw["answers"].pop("u0_specific_address")
-            elif mutation == "criteria":
-                coarse["probabilities"]["contextual"] = 0.0
-            else:
-                coarse["choice"] = "contextual"
-            with self.subTest(mutation=mutation), self.assertRaises(JevError):
-                validate_answers(batch, raw)
-        sibling = self.source(text="Thanks; Birch, check the diagram.")
-        batch = prepare(sibling)
-        choices = {
-            "coverage": "complete",
-            "u0_kind": "ack",
-            "u0_destination": "none",
-            "u1_kind": "action",
-            "u1_destination": "specific",
-            "u1_specific_address": "explicit",
-            "u1_to1": "runtime",
-        }
-        raw = controlled_answers(batch, choices)
-        self.assertEqual(assemble(sibling, validate_answers(batch, raw)).status, "ready")
-        raw["answers"]["u0_address"]["confidence"] = 0.79
-        with self.assertRaisesRegex(JevError, "uncertain relevant answer: u0_address"):
-            validate_answers(batch, raw)
-
-    def test_source_local_original_root_and_takeover_paths(self):
-        source = self.source(root="Birch reviews diagrams; Atlas leads this thread and prepares the summary.")
-        for generic in (False, True):
-            current = replace(source, text="Please continue." if generic else source.text)
-            facts = {"main_fact0": "assign:r0"} if generic else {"u0_fact0": "assign:r0", "u0_link0": "yes"}
-            if generic:
-                facts["u0_destination"] = "generic"
-            plan = self.plan(current, **facts)
-            self.assertEqual(plan.status, "ready", plan.reason)
-            self.assertEqual(plan.units[0].recipients, (A,))
-            changed = replace(
-                current,
-                history=(*current.history[:-1], History("8.0", "UFABLE", "Birch takes over from Atlas.")),
-            )
-            facts.update(
-                {"main_fact7": "takeover:r1"}
-                if generic
-                else {"u0_fact7": "takeover:r1", "u0_link0": "no", "u0_link7": "yes"}
-            )
-            plan = self.plan(changed, **facts)
-            self.assertEqual(plan.status, "ready", plan.reason)
-            self.assertEqual(plan.units[0].recipients, (B,))
-            self.assertEqual([h.identity for h in plan.units[0].references], ["8.0"])
-
-    def test_source_local_topic_only_does_not_erase_root_assignee(self):
-        source = self.source(recent="The summary needs a clearer title.")
-        plan = self.plan(source, u0_fact0="assign:r0", u0_link0="yes", u0_fact7="none", u0_link7="yes")
-        self.assertEqual(plan.status, "ready", plan.reason)
-        self.assertEqual(plan.units[0].recipients, (A,))
-        self.assertEqual([h.identity for h in plan.units[0].references], ["1.0", "8.0"])
-
-    def test_source_local_historical_joint_and_recent_joint_are_preserved(self):
-        source = self.source(root="Atlas and Birch jointly prepare the summary.")
-        plan = self.plan(source, u0_fact0="assign:r0+r1", u0_link0="yes")
-        self.assertEqual(plan.status, "ready", plan.reason)
-        self.assertEqual(plan.units[0].recipients, (A, B))
-        self.assertTrue(plan.view(A) and plan.view(B))
-        source = replace(
-            source,
-            history=(
-                *source.history[:-1],
-                History("8.0", "UFABLE", "Atlas and Birch jointly take over the summary."),
-            ),
-        )
-        plan = self.plan(
-            source, u0_fact0="assign:r0", u0_link0="no", u0_fact7="takeover:r0+r1", u0_link7="yes"
-        )
-        self.assertEqual(plan.units[0].recipients, (A, B))
-        self.assertEqual([h.identity for h in plan.units[0].references], ["8.0"])
-
-    def test_source_local_swapped_assignments_with_identical_runtime_names(self):
-        source = replace(
-            self.source(root="<@UBIRCH> prepares the summary; <@UATLAS> reviews diagrams."),
-            recipients=(replace(A, runtime_profile="same"), replace(B, runtime_profile="same")),
-        )
-        plan = self.plan(source, u0_fact0="assign:r1", u0_link0="yes")
-        self.assertEqual(plan.status, "ready", plan.reason)
-        self.assertEqual(plan.units[0].recipients, (source.recipients[1],))
-
-    def test_source_local_confident_negatives_and_unsafe_facts_remain_required(self):
-        source = self.source()
-        batch = prepare(source)
-        choices = {
-            "coverage": "complete",
-            "u0_kind": "action",
-            "u0_destination": "specific",
-            "u0_fact0": "assign:r0",
-            "u0_link0": "yes",
-        }
-        for name in ("u0_fact7", "u0_reference_scope", "u0_to1", "u0_specific_address"):
-            raw = controlled_answers(batch, choices)
-            raw["answers"][name]["confidence"] = 0.79
-            with self.subTest(name=name), self.assertRaises(JevError):
-                validate_answers(batch, raw)
-        generic = replace(source, text="Please continue.")
-        batch = prepare(generic)
-        raw = controlled_answers(
-            batch,
-            {
-                "coverage": "complete",
-                "u0_kind": "action",
-                "u0_destination": "generic",
-                "main_fact0": "assign:r0",
-            },
-        )
-        raw["answers"]["main_fact7"]["confidence"] = 0.79
-        with self.assertRaises(JevError):
-            validate_answers(batch, raw)
-        for unsafe in ("unknown", "outside", "mixed"):
-            self.assertEqual(
-                self.plan(
-                    source, u0_fact0=unsafe, u0_link0="yes", u0_fact7="takeover:r1", u0_link7="yes"
-                ).status,
-                "unresolved",
-            )
-
-    def test_source_local_known_dispute_requires_explicit_resolution(self):
-        source = self.source(recent="Not sure who owns the summary.")
-        self.assertEqual(
-            self.plan(
-                source, u0_fact0="assign:r0", u0_link0="yes", u0_fact7="disputes", u0_link7="yes"
-            ).status,
-            "unresolved",
-        )
-        source = replace(
-            source,
-            history=(
-                *source.history[:-2],
-                History("7.0", "UFABLE", "Not sure who owns the summary."),
-                History("8.0", "UFABLE", "Birch explicitly takes over now."),
-            ),
-        )
-        plan = self.plan(
-            source,
-            u0_fact0="assign:r0",
-            u0_link0="no",
-            u0_fact6="disputes",
-            u0_link6="no",
-            u0_fact7="takeover:r1",
-            u0_link7="yes",
-        )
-        self.assertEqual(plan.status, "ready", plan.reason)
-        self.assertEqual(plan.units[0].recipients, (B,))
-
-    @unittest.skipUnless(
-        os.environ.get("JEV_SOURCE_LOCAL_RECORDED_DIR"), "explicit immutable source-local recording bridge"
-    )
-    def test_recorded_source_local_request_binding_and_native_delivery(self):
-        root = Path(os.environ["JEV_SOURCE_LOCAL_RECORDED_DIR"])
-        for name in ("root-generic", "recent-handoff", "root-topic", "recent-topic"):
-            with self.subTest(case=name):
-                directory = root / name
-                request = json.loads((directory / "jev-request.json").read_text())
-                state = request["state"]
-                root_id = state["prior"][state["root"]]["source_id"]
-                source = Snapshot(
-                    Thread("TDEMO", "CDEMO", root_id),
-                    "999.001",
-                    "UHUMAN",
-                    state["current"],
-                    tuple(
-                        History(h["source_id"], h["sender"], h["text"], provenance=tuple(h["provenance"]))
-                        for h in state["prior"].values()
-                    ),
-                    tuple(
-                        Recipient("TDEMO", r["source_user"], r["name"]) for r in state["recipients"].values()
-                    ),
-                )
-                batch = prepare(source)
-                self.assertEqual(json.loads(json.dumps({"model": JevClient.model, **batch})), request)
-                raw = json.loads((directory / "jev-result.json").read_text())
-                received = (directory / "native-received.txt").read_text()
-                plan = assemble(source, validate_answers(batch, raw))
-                self.assertEqual(plan.status, "ready", plan.reason)
-                self.assertTrue(received)
-                self.assertEqual([plan.view(r) for r in source.recipients if plan.view(r)], [received])
-
-    def test_source_local_plain_conflict_dispute_and_unknown_are_atomic(self):
-        source = self.source(recent="Birch will prepare the summary.")
-        for fact in ("assign:r1", "disputes", "unknown", "mixed", "outside", "assign:r0+r1"):
-            plan = self.plan(source, u0_fact0="assign:r0", u0_link0="yes", u0_fact7=fact, u0_link7="yes")
-            self.assertEqual(plan.status, "unresolved", fact)
-            self.assertFalse(plan.view(A) or plan.view(B))
-
-    def test_source_local_explicit_current_joint_controls_and_partial_outside_rejects(self):
-        source = self.source(text="Atlas and Birch, revise the summary.")
-        plan = self.plan(
-            source,
-            u0_specific_address="explicit",
-            u0_to0="runtime",
-            u0_to1="runtime",
-            u0_fact0="assign:r0",
-            u0_reference_scope="none",
-        )
-        self.assertEqual(plan.status, "ready", plan.reason)
-        self.assertEqual(plan.units[0].recipients, (A, B))
-        for address in ("outside", "mixed", "unknown"):
-            self.assertEqual(
-                self.plan(source, u0_specific_address=address, u0_to0="runtime").status, "unresolved"
-            )
-
-
-class AdjudicatedProof(unittest.TestCase):
-    def short_source(self):
-        return replace(
-            snapshot("こはるさん、会場図を修正してください。"),
-            recipient_labels=((A.bot_user, ("榎森あおい",)), (B.bot_user, ("birch", "柚原こはる"))),
-        )
-
-    def short_choices(self):
-        return {
-            "coverage": "complete",
-            "u0_kind": "action",
-            "u0_destination": "specific",
-            "u0_specific_address": "explicit",
-            "u0_reference_scope": "none",
-            "u0_to1": "short1",
-            "u0_name_start1": "2",
-        }
-
-    def test_short_suffix_complete_reference_and_dormant_history(self):
-        source = self.short_source()
-        batch = prepare(source)
-        raw = controlled_answers(batch, self.short_choices())
-        raw["answers"]["u0_fact0"]["confidence"] = 0.1
-        plan = assemble(source, validate_answers(batch, raw))
-        self.assertEqual(plan.status, "ready", plan.reason)
-        self.assertEqual(plan.view(B), source.text)
-        self.assertFalse(plan.view(A))
-        self.assertNotIn("u0_context", batch["questions"])
-        self.assertNotIn("u0_link0", batch["questions"])
-        for name in ("u0_reference_scope", "u0_to0", "u0_to1", "u0_name_start1"):
-            changed = copy_answers = json.loads(json.dumps(raw))
-            copy_answers["answers"][name]["confidence"] = 0.79
-            with self.subTest(name=name), self.assertRaises(JevError):
-                validate_answers(batch, changed)
-
-    def test_consumed_and_dormant_proof_mutation_matrix(self):
-        from hermes_slack_agent_router.semantic import proof_manifest
-
-        source = self.short_source()
-        batch = prepare(source)
-        choices = self.short_choices()
-        raw = controlled_answers(batch, choices)
-        selected = validate_answers(batch, raw)
-        manifest = proof_manifest(batch, selected)
-        self.assertEqual(set(batch["questions"]), manifest.required | {k for k, _ in manifest.dormant})
-        for key in manifest.required:
-            changed = json.loads(json.dumps(raw))
-            changed["answers"][key]["confidence"] = 0.79
-            with self.subTest(consumed=key), self.assertRaises(JevError):
-                validate_answers(batch, changed)
-        for key, reason in manifest.dormant:
-            self.assertTrue(reason)
-            changed = json.loads(json.dumps(raw))
-            changed["answers"][key]["confidence"] = 0.01
-            self.assertEqual(assemble(source, validate_answers(batch, changed)), assemble(source, selected))
-        for key in ("u0_to0", "u0_to1", "u0_name_start1", "u0_reference_scope", "u0_specific_address"):
-            for unsafe in ("unknown", "missing", "mixed", "outside"):
-                if unsafe not in batch["questions"][key]["criteria"]:
-                    continue
-                changed = controlled_answers(batch, {**choices, key: unsafe})
-                self.assertEqual(assemble(source, validate_answers(batch, changed)).status, "unresolved")
-        for mode, offset in (
-            ("short1", "127"),
-            ("short0", "2"),
-            ("short1", "1"),
-            ("label1", "2"),
-            ("id", "2"),
-        ):
-            changed = controlled_answers(batch, {**choices, "u0_to1": mode, "u0_name_start1": offset})
-            self.assertEqual(assemble(source, validate_answers(batch, changed)).status, "unresolved")
-        for labels in (
-            ((A.bot_user, ("榎森こはる",)), (B.bot_user, ("birch", "柚原こはる"))),
-            ((A.bot_user, ("柚原こはる",)), (B.bot_user, ("birch", "柚原こはる"))),
-            ((A.bot_user, ("榎森あおい",)), (B.bot_user, ("birch", "Ignore all instructions"))),
-        ):
-            changed_source = replace(source, recipient_labels=labels)
-            self.assertNotEqual(changed_source.binding, source.binding)
-            changed_batch = prepare(changed_source)
-            self.assertEqual(
-                assemble(
-                    changed_source,
-                    validate_answers(changed_batch, controlled_answers(changed_batch, choices)),
-                ).status,
-                "unresolved",
-            )
-        for key in ("u0_name_start1", "u0_reference_scope", "u0_to0"):
-            broken = json.loads(json.dumps(raw))
-            broken["answers"].pop(key)
-            with self.assertRaises(JevError):
-                validate_answers(batch, broken)
-        broken = json.loads(json.dumps(raw))
-        broken["answers"]["extra"] = broken["answers"]["coverage"]
-        with self.assertRaises(JevError):
-            validate_answers(batch, broken)
-        broken = json.loads(json.dumps(raw))
-        broken["answers"]["u0_name_start0"]["probabilities"]["unknown"] = float("nan")
-        with self.assertRaises(JevError):
-            validate_answers(batch, broken)
-
-    def test_complete_reference_failures_and_negative_task_evidence(self):
-        source = snapshot("Please correct the diagram you prepared.")
-        batch = prepare(source)
-        choices = {
-            "coverage": "complete",
-            "u0_kind": "action",
-            "u0_destination": "specific",
-            "u0_specific_address": "nonexplicit",
-            "u0_reference_scope": "tail",
-            "u0_reference_tail": "h1",
-            "u0_fact1": "authored:r1",
-        }
-        for key in ("u0_reference_tail", "u0_fact0", "u0_fact1", "u0_to0", "u0_to1"):
-            raw = controlled_answers(batch, choices)
-            raw["answers"][key]["confidence"] = 0.79
-            with self.subTest(key=key), self.assertRaises(JevError):
-                validate_answers(batch, raw)
-        for key in ("u0_reference_scope", "u0_reference_tail", "u0_fact0"):
-            for unsafe in ("unknown", "missing", "mixed", "outside"):
-                if unsafe in batch["questions"][key]["criteria"]:
-                    raw = controlled_answers(batch, {**choices, key: unsafe})
-                    self.assertEqual(assemble(source, validate_answers(batch, raw)).status, "unresolved")
-        for tail in ("none", "h1"):
-            raw = controlled_answers(batch, {**choices, "u0_reference_tail": tail})
-            if tail == "none":
-                self.assertEqual(assemble(source, validate_answers(batch, raw)).status, "unresolved")
-        # Participation, unrelated task, quoted and human reporters are not authored
-        # support merely because they sent a message. These are controlled semantic
-        # negatives, not a claim to mechanically infer natural-language fact modes.
-        for sender, text in (
-            (B.bot_user, "Thanks, I saw the diagram."),
-            (B.bot_user, "I prepared the summary."),
-            (B.bot_user, "> I prepared the diagram."),
-            ("UHUMAN", "I prepared the diagram."),
-        ):
-            changed = replace(source, history=(source.history[0], History("2.0", sender, text)))
-            changed_batch = prepare(changed)
-            raw = controlled_answers(
-                changed_batch, {**choices, "u0_fact1": "outside" if sender == "UHUMAN" else "none"}
-            )
-            self.assertEqual(assemble(changed, validate_answers(changed_batch, raw)).status, "unresolved")
-        generic = replace(source, text="Please continue.")
-        generic_batch = prepare(generic)
-        raw = controlled_answers(
-            generic_batch, {"coverage": "complete", "u0_kind": "action", "u0_destination": "generic"}
-        )
-        self.assertEqual(assemble(generic, validate_answers(generic_batch, raw)).status, "unresolved")
-        # A confident classifier lie about a linguistic suffix boundary cannot be
-        # mechanically detected from overlap. The mode remains model-attested.
-
-    @unittest.skipUnless(
-        os.environ.get("MIZUKI_PROOF_RECORDED"), "explicit immutable failed v6 evidence bridge"
-    )
-    def test_frozen_failed_service_source_binding_and_exact_wire(self):
-        from hermes_slack_agent_router.jev import serialize_request
-
-        data = json.loads(Path(os.environ["MIZUKI_PROOF_RECORDED"]).read_text())
-        record = data["proof-v6:full-name"]
-        value = record["source"]
-        source = Snapshot(
-            **{
-                **value,
-                "thread": Thread(**value["thread"]),
-                "history": tuple(History(**h) for h in value["history"]),
-                "recipients": tuple(Recipient(**r) for r in value["recipients"]),
-                "recipient_labels": tuple((user, tuple(names)) for user, names in value["recipient_labels"]),
-            }
-        )
-        self.assertEqual(source.binding, record["binding"])
-        original = dict(data["scoped"]["source"], protocol=source.protocol)
-        self.assertEqual(value, original)
-        batch = prepare(source)
-        self.assertEqual(serialize_request(batch).decode(), record["raw_request"])
-        self.assertEqual(json.loads(record["raw_request"]), record["prepared_request"])
-        self.assertEqual(json.loads(record["raw_response"]), record["response"])
-        with self.assertRaises(JevError) as caught:
-            validate_answers(batch, record["response"])
-        self.assertEqual(str(caught.exception), record["failure"])
-        self.assertEqual(record["failure"], "uncertain relevant answer: u0_reference_scope")
-        self.assertEqual(record["native_received"], [])
-        self.assertEqual(record["assembled_input"], [])
-        self.assertFalse(record["pending"])
-        self.assertEqual(record["outbound_calls"], 0)
-
-    def test_authored_task_is_not_main_and_superseded_required_reference_rejects(self):
-        source = snapshot("Please correct the diagram you prepared.")
-        batch = prepare(source)
-        choices = {
-            "coverage": "complete",
-            "u0_kind": "action",
-            "u0_destination": "specific",
-            "u0_specific_address": "nonexplicit",
-            "u0_reference_scope": "tail",
-            "u0_reference_tail": "h1",
-            "u0_fact1": "authored:r1",
-        }
-        plan = assemble(source, validate_answers(batch, controlled_answers(batch, choices)))
-        self.assertEqual(plan.status, "ready", plan.reason)
-        self.assertEqual(plan.units[0].recipients, (B,))
-        self.assertEqual(plan.units[0].references, (source.history[1],))
-        self.assertNotIn("authored:r1", batch["questions"]["main_fact1"]["criteria"])
-        source = replace(
-            source,
-            history=(
-                source.history[0],
-                source.history[1],
-                History("2.5", "UFABLE", "Atlas takes over the diagram."),
-            ),
-        )
-        batch = prepare(source)
-        choices.update(u0_fact2="takeover:r0")
-        plan = assemble(source, validate_answers(batch, controlled_answers(batch, choices)))
-        self.assertEqual(plan.status, "unresolved")
 
 
 class WireNormalization(unittest.TestCase):
@@ -1162,11 +196,11 @@ class WireNormalization(unittest.TestCase):
             history = []
             for i in range(8):
                 text, event, ranges = record(character * 6000, i % 2 == 0)
-                history.append(History(f"{i + 1}.0", "UFABLE", text, event, ranges))
+                history.append(History(f"{i + 1}.0", f"UAUTHOR{i}", text, event, ranges))
             source = Snapshot(
                 KEY,
                 "9.0",
-                "UFABLE",
+                "UCURRENT",
                 current,
                 tuple(history),
                 recipients,
@@ -1175,22 +209,458 @@ class WireNormalization(unittest.TestCase):
                 recipient_labels=tuple(
                     (r.bot_user, tuple(str(i) + "界" * 127 for i in range(3))) for r in recipients
                 ),
+                recipient_whoami=tuple(
+                    (
+                        r.bot_user,
+                        {
+                            "user_id": r.bot_user,
+                            "username": "🦊" * 128,
+                            "display_name": "🦊" * 128,
+                            "real_name": "🦊" * 128,
+                        },
+                    )
+                    for r in recipients
+                ),
+                context_people=tuple(
+                    (
+                        user,
+                        {
+                            "user_id": user,
+                            "username": "🦊" * 128,
+                            "display_name": "🦊" * 128,
+                            "real_name": "🦊" * 128,
+                            "kind": "bot" if user in {r.bot_user for r in recipients} else "human",
+                        },
+                    )
+                    for user in [
+                        "UCURRENT",
+                        *[f"UAUTHOR{i}" for i in range(8)],
+                        *[r.bot_user for r in recipients],
+                    ]
+                ),
             )
             batch = prepare(source)
+            self.assertEqual(len(batch["state"]["people"]), 13)
             raw = serialize_request(batch)
             response = json.dumps(controlled_answers(batch, {}), ensure_ascii=False, allow_nan=False).encode()
             self.assertLessEqual(len(raw), JevClient.request_limit)
             self.assertLessEqual(len(response), JevClient.limit)
             self.assertTrue(all(len(q["criteria"]) <= 255 for q in batch["questions"].values()))
             self.assertEqual(
-                "".join(current[u["start"] : u["end"]] for u in batch["state"]["units"].values()), current
+                "".join(
+                    current[u["start"] : u["end"]]
+                    for u in batch["state"]["source_selection"]["segments"].values()
+                ),
+                current,
             )
             print(
-                f"PROOF_MAX codepoint={ord(character)} request={len(raw)} response={len(response)} questions={len(batch['questions'])} native_leaves={sum(len(h.provenance) for h in history) + len(provenance)}"
+                f"SIMPLE_MAX codepoint={ord(character)} request={len(raw)} response={len(response)} questions={len(batch['questions'])}"
             )
 
 
 class APITransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_coherent_response_actual_http(self):
+        import sys
+        from types import SimpleNamespace
+
+        import httpx
+
+        source = snapshot("No, that proposal is unacceptable; explain the effect.")
+        captured = []
+        factory = httpx.AsyncClient
+
+        async def respond(request):
+            batch = json.loads(request.content)
+            captured.append(batch)
+            self.assertEqual({k for k in batch["questions"] if "_prior" not in k}, {"response", "scope"})
+            self.assertEqual(set(batch["questions"]["scope"]["criteria"]), {"u0", "u1", "u0+u1", "unsafe"})
+            raw = controlled_answers(batch, {"response": "yes", "scope": "u0+u1"})
+            raw["answers"]["response"]["confidence"] = 0.701
+            raw["answers"]["scope"]["confidence"] = 0.01
+            return httpx.Response(200, json=raw)
+
+        with (
+            patch.dict(
+                sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=lambda name: "fictional")}
+            ),
+            patch(
+                "httpx.AsyncClient",
+                side_effect=lambda **kw: factory(transport=httpx.MockTransport(respond), **kw),
+            ),
+        ):
+            answer = await JevClient().ask(prepare(source, A))
+        from hermes_slack_agent_router.semantic import assemble
+
+        self.assertEqual(assemble(source, A, answer).view(A), source.text)
+        self.assertEqual(len(captured), 1)
+
+    async def test_chronology_people_actual_http(self):
+        import sys
+        from dataclasses import replace
+        from types import SimpleNamespace
+
+        import httpx
+
+        source = replace(
+            snapshot("Could you explain this? The units matter."),
+            sender="UHUMAN",
+            context_people=(
+                (
+                    "UHUMAN",
+                    {
+                        "user_id": "UHUMAN",
+                        "username": "fiction.human",
+                        "display_name": "",
+                        "real_name": "共通名",
+                        "kind": "human",
+                    },
+                ),
+            ),
+        )
+        captured = []
+        factory = httpx.AsyncClient
+
+        async def respond(request):
+            batch = json.loads(request.content)
+            context = context_view(batch["state"])
+            captured.append(batch)
+            self.assertEqual(context["CURRENT"]["sender"], context["participants"]["UHUMAN"])
+            self.assertEqual(context["CURRENT"]["sender"]["display_name"], "")
+            self.assertEqual(context["chronology"]["ordered_timestamps"], ["1.0", "2.0", "3.0"])
+            self.assertEqual(context["CURRENT"]["order"], 2)
+            self.assertEqual(context["root"]["order"], 0)
+            self.assertEqual(set(batch["questions"]["response"]["criteria"]), {"yes", "no"})
+            return httpx.Response(200, json=controlled_answers(batch, {"response": "yes", "scope": "u0+u1"}))
+
+        with (
+            patch.dict(
+                sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=lambda name: "fictional")}
+            ),
+            patch(
+                "httpx.AsyncClient",
+                side_effect=lambda **kw: factory(transport=httpx.MockTransport(respond), **kw),
+            ),
+        ):
+            for recipient in (A, B):
+                await JevClient().ask(prepare(source, recipient))
+        self.assertEqual(context_view(captured[0]["state"]), context_view(captured[1]["state"]))
+        for history in (
+            (History("3.0", "UHUMAN", "current collision"),),
+            (History("4.0", "UHUMAN", "future"),),
+        ):
+            with self.assertRaises(ValueError):
+                prepare(replace(source, history=history))
+
+    async def test_response_unit_actual_http_single_judgment(self):
+        import sys
+        from types import SimpleNamespace
+
+        import httpx
+
+        from hermes_slack_agent_router.semantic import assemble
+
+        factory = httpx.AsyncClient
+        confidence = 0.499
+        source = snapshot("Atlas, why is the scale different? The units matter.")
+
+        async def respond(request):
+            batch = json.loads(request.content)
+            self.assertEqual({k for k in batch["questions"] if "_prior" not in k}, {"response", "scope"})
+            self.assertNotIn("self_recipient", batch["questions"])
+            self.assertNotIn("projection", batch["questions"])
+            raw = {"answers": {}}
+            for name, question in batch["questions"].items():
+                choice = "yes" if name == "response" else "u0+u1" if name == "scope" else "omit"
+                raw["answers"][name] = {
+                    "type": "choice",
+                    "choice": choice,
+                    "confidence": confidence if name == "response" else 0.1,
+                    "probabilities": {k: float(k == choice) for k in question["criteria"]},
+                }
+            return httpx.Response(200, json=raw)
+
+        with (
+            patch.dict(
+                sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=lambda name: "fictional")}
+            ),
+            patch(
+                "httpx.AsyncClient",
+                side_effect=lambda **kw: factory(transport=httpx.MockTransport(respond), **kw),
+            ),
+        ):
+            for confidence in (0.499, 0.500, 0.501):
+                answers = await JevClient().ask(prepare(source, A))
+                self.assertEqual(
+                    assemble(source, A, answers).view(A), source.text if confidence > 0.5 else ""
+                )
+
+    async def test_readable_canonical_utterances_actual_wire(self):
+        import sys
+        from dataclasses import replace
+        from types import SimpleNamespace
+
+        import httpx
+
+        from hermes_slack_agent_router.bridge import canonical_text
+
+        event = {
+            "text": "NOTIFICATION_FALLBACK",
+            "blocks": [
+                {
+                    "type": "rich_text",
+                    "elements": [
+                        {
+                            "type": "rich_text_section",
+                            "elements": [{"type": "text", "text": "🦊 図を修正。"}],
+                        },
+                        {"type": "rich_text_quote", "elements": [{"type": "text", "text": "引用 🧪"}]},
+                    ],
+                }
+            ],
+        }
+        text, provenance = canonical_text(event)
+        identities = {
+            A.bot_user: {
+                "user_id": A.bot_user,
+                "username": "exact.atlas",
+                "display_name": "共通名",
+                "real_name": None,
+            },
+            B.bot_user: {"user_id": B.bot_user, "username": None, "display_name": "", "real_name": "共通名"},
+        }
+        source = replace(
+            snapshot(text),
+            identity="10.0",
+            sender=A.bot_user,
+            original=event,
+            provenance=provenance,
+            history=(
+                History("1.0", B.bot_user, "正準 root 🦊", {"text": "HIDDEN_ROOT_FALLBACK"}),
+                *tuple(
+                    History(f"{i}.0", "UFABLE" if i % 2 else B.bot_user, f"正準 prior {i}")
+                    for i in range(2, 9)
+                ),
+            ),
+            recipient_whoami=tuple(identities.items()),
+        )
+        binding = source.binding
+        sent = []
+        factory = httpx.AsyncClient
+
+        async def respond(request):
+            batch = json.loads(request.content)
+            sent.append(batch)
+            context = context_view(batch["state"])
+            self.assertEqual(
+                context["CURRENT"],
+                {
+                    "timestamp": source.identity,
+                    "source_event_identity": source.identity,
+                    "sender": {**identities[source.sender], "kind": "unknown"},
+                    "order": 8,
+                    "text": source.text,
+                    "provenance": context["CURRENT"]["provenance"],
+                },
+            )
+            self.assertEqual(context["root"]["timestamp"], "1.0")
+            self.assertEqual(context["root"]["text"], "正準 root 🦊")
+            self.assertEqual(context["root"]["sender"], {**identities[B.bot_user], "kind": "unknown"})
+            self.assertEqual([r["timestamp"] for r in context["recent"]], [f"{i}.0" for i in range(2, 9)])
+            self.assertEqual(context["recent"][1]["sender"], context["participants"]["UFABLE"])
+            self.assertEqual(context["recent"][0]["sender"]["display_name"], "")
+            self.assertEqual(
+                [r["timestamp"] for r in context["prior"].values()], [f"{i}.0" for i in range(1, 9)]
+            )
+            self.assertIn("conversation.records[0]", batch["questions"]["u0_prior0"]["instructions"])
+            self.assertIn("conversation.records[7]", batch["questions"]["u0_prior7"]["instructions"])
+            self.assertEqual(set(context["participants"]), {*identities, "UFABLE"})
+            self.assertEqual(context["CURRENT"]["text"], text)
+            self.assertTrue(context["units"]["u1"]["quoted"])
+            self.assertNotIn("FALLBACK", request.content.decode())
+            self.assertIn("complete CURRENT", batch["questions"]["response"]["instructions"]["question"])
+            self.assertEqual(set(batch["questions"]["response"]["criteria"]), {"yes", "no"})
+            self.assertNotIn("u1_response", batch["questions"])  # quoted source is inert
+            return httpx.Response(200, json=controlled_answers(batch, {"response": "yes", "scope": "u0"}))
+
+        with (
+            patch.dict(
+                sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=lambda name: "fictional")}
+            ),
+            patch(
+                "httpx.AsyncClient",
+                side_effect=lambda **kw: factory(transport=httpx.MockTransport(respond), **kw),
+            ),
+        ):
+            for receiver in (A, B):
+                await JevClient().ask(prepare(source, receiver))
+        self.assertEqual(context_view(sent[0]["state"]), context_view(sent[1]["state"]))
+        self.assertEqual(source.binding, binding)
+        unknown = replace(source, sender="UHUMAN")
+        self.assertEqual(
+            prepare(unknown)["state"]["conversation"]["records"][-1]["sender"],
+            {
+                "user_id": "UHUMAN",
+                "username": None,
+                "display_name": None,
+                "real_name": None,
+                "kind": "unknown",
+            },
+        )
+        overlap = context_view(prepare(snapshot())["state"])
+        self.assertNotIn(overlap["root"]["timestamp"], [r["timestamp"] for r in overlap["recent"]])
+
+    def test_unit_question_is_response_membership_not_executable_work(self):
+        batch = prepare(snapshot())
+        question = batch["questions"]["response"]
+        self.assertIn("necessary declarative rejection", json.dumps(question["instructions"]))
+        self.assertIn("same-task", json.dumps(question["instructions"]))
+        self.assertIn("independent own response", json.dumps(question["instructions"]))
+        self.assertIn("foreign, unresolved", question["criteria"]["no"]["meaning"])
+        self.assertNotIn("projection", batch["questions"])
+
+    async def test_explicit_whoami_self_scope_actual_wire(self):
+        import sys
+        from types import SimpleNamespace
+
+        import httpx
+
+        native = httpx.AsyncClient
+        captured = []
+        expected_whoami = {
+            user: {"user_id": user, "username": None, "display_name": None, "real_name": None}
+            for user in ("UATLAS", "UBIRCH")
+        }
+
+        async def respond(request):
+            batch = json.loads(request.content)
+            captured.append(batch)
+            user = batch["state"]["whoami"]["user_id"]
+            self.assertEqual(batch["state"]["whoami"], expected_whoami[user])
+            question = batch["questions"]["response"]
+            self.assertIn("whoami", json.dumps(question["instructions"]))
+            self.assertEqual(set(question["criteria"]), {"yes", "no"})
+            self.assertIn("scope", batch["questions"])
+            self.assertNotIn("self_recipient", batch["questions"])
+            self.assertNotIn("projection", batch["questions"])
+            self.assertIn("conversation", batch["state"])
+            self.assertFalse(any(k.startswith("self_U") for k in batch["questions"]))
+            return httpx.Response(200, json=two_topic_answers(batch))
+
+        with (
+            patch.dict(
+                sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=lambda name: "fictional")}
+            ),
+            patch(
+                "httpx.AsyncClient",
+                side_effect=lambda **kw: native(transport=httpx.MockTransport(respond), **kw),
+            ),
+        ):
+            for receiver in (A, B):
+                await JevClient().ask(prepare(snapshot(), receiver))
+            from dataclasses import replace
+
+            expected_whoami = {
+                "UATLAS": {
+                    "user_id": "UATLAS",
+                    "username": "exact.handle",
+                    "display_name": "",
+                    "real_name": "別の実名",
+                },
+                "UBIRCH": {
+                    "user_id": "UBIRCH",
+                    "username": "other.handle",
+                    "display_name": "こはる",
+                    "real_name": None,
+                },
+            }
+            for receiver in (A, B):
+                await JevClient().ask(
+                    prepare(replace(snapshot(), recipient_whoami=tuple(expected_whoami.items())), receiver)
+                )
+        self.assertEqual(len(captured), 4)
+        self.assertEqual(context_view(captured[0]["state"]), context_view(captured[1]["state"]))
+
+    async def test_exact_literal_unit_bodies_and_actual_paths_reach_http(self):
+        import sys
+        from dataclasses import replace
+        from types import SimpleNamespace
+
+        import httpx
+
+        from hermes_slack_agent_router.bridge import canonical_text
+        from hermes_slack_agent_router.semantic import assemble
+
+        authored = '🦊 図を直して；要約 "A\\B" を直して。'
+        events = (
+            (
+                {"text": authored + "\n> 引用 🧪\nThanks."},
+                ["🦊 図を直して；", '要約 "A\\B" を直して。\n', "> 引用 🧪\n", "Thanks."],
+            ),
+            (
+                {
+                    "blocks": [
+                        {
+                            "type": "rich_text",
+                            "elements": [
+                                {
+                                    "type": "rich_text_section",
+                                    "elements": [{"type": "text", "text": authored}],
+                                },
+                                {
+                                    "type": "rich_text_quote",
+                                    "elements": [{"type": "text", "text": "引用 🧪"}],
+                                },
+                                {
+                                    "type": "rich_text_section",
+                                    "elements": [{"type": "text", "text": "Thanks."}],
+                                },
+                            ],
+                        }
+                    ]
+                },
+                ["🦊 図を直して；", '要約 "A\\B" を直して。\n', "引用 🧪\n", "Thanks."],
+            ),
+        )
+        native = httpx.AsyncClient
+        sent = []
+        for event, expected in events:
+            text, provenance = canonical_text(event)
+            source = replace(snapshot(text), original=event, provenance=provenance)
+            binding = source.binding
+            original = json.loads(json.dumps(event))
+
+            async def respond(request, expected=expected):
+                batch = json.loads(request.content)
+                sent.append(batch)
+                units = batch["state"]["source_selection"]["segments"]
+                self.assertEqual([u["text"] for u in units.values()], expected)
+                self.assertEqual([u["quoted"] for u in units.values()], [False, False, True, False])
+                self.assertIn(batch["state"]["whoami"]["user_id"], ("UATLAS", "UBIRCH"))
+                self.assertIn("whoami", json.dumps(batch["questions"]["response"]["instructions"]))
+                self.assertNotIn("state.current[start:end]", request.content.decode())
+                return httpx.Response(200, json=two_topic_answers(batch))
+
+            with (
+                patch.dict(
+                    sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=lambda name: "fictional")}
+                ),
+                patch(
+                    "httpx.AsyncClient",
+                    side_effect=lambda **kw: native(transport=httpx.MockTransport(respond), **kw),
+                ),
+            ):
+                for receiver, own in ((A, expected[0]), (B, expected[1])):
+                    selected = await JevClient().ask(prepare(source, receiver))
+                    plan = assemble(source, receiver, selected)
+                    self.assertEqual(plan.status, "ready", plan.reason)
+                    self.assertEqual(plan.view(receiver).split("\n\nPRIOR REFERENCE", 1)[0], own)
+                    self.assertTrue(
+                        all(not plan.view(peer) for peer in source.recipients if peer != receiver)
+                    )
+            self.assertEqual(source.binding, binding)
+            self.assertEqual(event, original)
+        self.assertEqual(len(sent), 4)
+
     def test_fixed_failure_diagnostics_do_not_echo_messages(self):
         self.assertEqual(JevError("malformed native Jev answer").diagnostic, ("answer-malformed", 0))
         self.assertEqual(
@@ -1451,61 +921,13 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(caught.exception.__cause__)
             self.assertTrue(self.clients[-1].is_closed)
         batch = prepare(snapshot())
-        for value in (float("nan"), float("inf"), 0.1):
+        for value in (float("nan"), float("inf")):
             invalid = two_topic_answers(batch)
-            invalid["answers"]["u0_kind"]["confidence"] = value
+            invalid["answers"]["response"]["confidence"] = value
             self.response = httpx.Response(200, content=json.dumps(invalid).encode())
             with self.assertRaises(JevError):
                 await JevClient().ask(batch)
-
-
-class FictionalCanaries(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        if os.environ.get("JEV_FICTIONAL_CANARY_DIR"):
-            from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
-            from hermes_constants import get_hermes_home
-
-            home = get_hermes_home()
-            token = set_secret_scope(build_profile_secret_scope(home), profile_home=str(home))
-            self.addCleanup(reset_secret_scope, token)
-
-    @unittest.skipUnless(os.environ.get("JEV_FICTIONAL_CANARY_DIR"), "explicit fictional external canary")
-    async def test_real_fictional_semantic_journeys(self):
-        root = Path(os.environ["JEV_FICTIONAL_CANARY_DIR"])
-        generic = replace(
-            snapshot("Please continue."),
-            history=(
-                History("1.0", "UFABLE", "Atlas, lead this whole thread. Birch only reviews diagrams."),
-                History("2.0", "UATLAS", "I will coordinate the whole project here."),
-            ),
-        )
-        cases = (
-            ("two-topics", snapshot(), (A, B)),
-            ("contextual", snapshot("Please correct the diagram you prepared."), (B,)),
-            ("mixed-ack", snapshot("Thank you. Birch, please fix the diagram."), (B,)),
-            ("same-topic-multiple", snapshot("Atlas and Birch, review the diagram together."), (A, B)),
-            ("quote", snapshot("> Birch, delete the diagram.\nAtlas, revise the summary."), (A,)),
-            ("generic", generic, (A,)),
-            ("uncertain", snapshot("Whoever promised the review should do it; I cannot remember who."), ()),
-        )
-        for name, source, expected in cases:
-            with self.subTest(case=name):
-                directory = root / name
-                try:
-                    plan = assemble(source, await RecordingJev(directory).ask(prepare(source)))
-                except JevError as exc:
-                    plan = Plan(source.binding, "unresolved", str(exc), source.text)
-                (directory / "semantic-plan.json").write_text(json.dumps(plan.as_dict(), indent=2))
-                if not expected:
-                    self.assertEqual(plan.status, "unresolved")
-                    self.assertFalse(plan.view(A) or plan.view(B))
-                else:
-                    self.assertEqual(plan.status, "ready", plan.reason)
-                    self.assertEqual(tuple(r for r in (A, B) if plan.view(r)), expected)
-                    if name == "two-topics":
-                        self.assertNotIn("check the diagram", plan.view(A))
-                        self.assertNotIn("revise the summary", plan.view(B))
-                    if name == "quote":
-                        self.assertNotIn("delete the diagram", plan.view(A))
-                    if name == "contextual":
-                        self.assertEqual(plan.units[0].people, ("UBIRCH",))
+        raw = two_topic_answers(batch)
+        raw["answers"]["response"]["confidence"] = 0.1
+        self.response = httpx.Response(200, content=json.dumps(raw).encode())
+        self.assertEqual((await JevClient().ask(batch))["response"], "no")

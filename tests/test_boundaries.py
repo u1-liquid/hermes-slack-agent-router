@@ -3,10 +3,10 @@
 import unittest
 from dataclasses import replace
 
-from test_semantic import A, B, snapshot
+from test_semantic import A, B, prepare, snapshot
 
 from hermes_slack_agent_router.policy import Recipient, Thread
-from hermes_slack_agent_router.semantic import SemanticError, prepare
+from hermes_slack_agent_router.semantic import SemanticError
 
 
 class BoundaryTests(unittest.TestCase):
@@ -30,7 +30,7 @@ class BoundaryTests(unittest.TestCase):
         changed = replace(source, identity="3.0:4.0", text="Birch, review the new diagram.")
         self.assertNotEqual(source.binding, changed.binding)
         self.assertNotEqual(prepare(source), prepare(changed))
-        self.assertEqual(prepare(changed)["state"]["current"], changed.text)
+        self.assertEqual(prepare(changed)["state"]["conversation"]["records"][-1]["text"], changed.text)
 
     def test_duplicate_bot_runtime_mapping_and_duplicate_source_rejected(self):
         source = snapshot()

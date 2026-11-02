@@ -229,13 +229,15 @@ class Gate:
         try:
             # Both acquisitions share the existing retrieval allowance; do not
             # serialize up to four cold presentation lookups ahead of inference.
-            async with asyncio.timeout_at(min(deadline - 1.3, time.monotonic() + 1.0)):
+            acquisition_deadline = min(deadline - 1.3, time.monotonic() + 1.0)
+            async with asyncio.timeout_at(acquisition_deadline):
                 requests = [
                     asyncio.create_task(self.history(client, thread, bound.source.message_id, deadline)),
-                    asyncio.create_task(bridge.recipient_labels(bound, topology)),
+                    asyncio.create_task(bridge.recipient_metadata(bound, topology)),
                 ]
                 try:
-                    history, labels = await asyncio.gather(*requests)
+                    history, metadata = await asyncio.gather(*requests)
+                    labels, whoami = metadata
                 finally:
                     for request in requests:
                         request.cancel()
@@ -284,6 +286,7 @@ class Gate:
             return self.unresolved("incomplete-context")
         if await bridge.participants(bound) != topology:
             return self.unresolved("native-topology-changed")
+        people = await bridge.context_people(bound, history, whoami, deadline=acquisition_deadline)
         source = Snapshot(
             thread,
             bound.event.identity,
@@ -294,6 +297,8 @@ class Gate:
             copy.deepcopy(body["event"]),
             provenance,
             recipient_labels=labels,
+            recipient_whoami=whoami,
+            context_people=people,
         )
         started, stage, questions = time.monotonic(), "scope", 0
         batch = None
@@ -302,12 +307,12 @@ class Gate:
                 # The serving runtime may differ from the receiving adapter's profile.
                 async with adapter.gateway_runner._async_profile_scope_for_source(bound.source):
                     stage = "prepare"
-                    batch = prepare(source)
+                    batch = prepare(source, bound.recipient)
                     questions = len(batch["questions"])
                     stage = "inference"
-                    answers = await self.jev.ask(batch)
+                    answers = await self.jev.ask(batch) if batch["questions"] else {}
                     stage = "assemble"
-                    plan = assemble(source, answers)
+                    plan = assemble(source, bound.recipient, answers)
         except (JevError, SemanticError, TimeoutError) as exc:
             reason, status = (
                 exc.diagnostic
@@ -334,7 +339,11 @@ class Gate:
         if await bridge.participants(bound) != topology:
             return self.unresolved("native-topology-changed")
         if plan.status != "ready":
-            return self.unresolved("coverage-or-grounding-unresolved")
+            return self.unresolved(
+                "projection-unresolved"
+                if plan.reason == "projection-unresolved"
+                else "coverage-or-grounding-unresolved"
+            )
         text = plan.view(bound.recipient)
         if not text:
             return None

@@ -1,5 +1,62 @@
 # Hermes Slack Agent Router — runtime design
 
+## Shared ordered routing contract
+
+The current yes05-joint-v1 keeps this structure with the accepted J rule7 correction:
+a correctly addressed eligible bot may participate despite human/context-only/outside
+co-assignees, preserving complete own joint meaning without invoking outsiders or
+claiming their receipt/consent/execution. Main cardinality and native self-auth,
+identity ambiguity and independent foreign-source boundaries are unchanged. The
+primary selected YES requires native confidence>.5; exactly.500 rejects/.501 admits.
+NO never admits; probabilities and scope confidence cannot rescue admission.
+Classify FN/extra triggers as classifier observations, separately from hard native
+authorization/source/format/isolation failures. Historical thresholds/vetoes below
+remain historical evidence where explicitly labelled prior.
+
+Both response and conditional scope serialize the identical full ordered nine-rule
+routing_contract. Their instructions contain exactly question, evidence,
+routing_contract and worked_contrasts, in that order. Existing question/evidence
+strings remain exact; only accepted J explanation/criteria and the self-contained
+example people member prospectively amend the original shared-contract version.
+This is the adopted shared-contract consistency correction,
+not evidence of semantic qualification. State, extents, priors and native gates do
+not change. The existing frozen campaign evaluates all167 recovery-stage rows with
+fresh requests, never old-answer replay as evidence against changed instructions.
+
+## Readable-rubric-v2 clarification boundary
+
+The original source layout, protocol, identity facts, candidate catalogue and consumer gates
+are retained. A redundant `current_author_content` view is literal unquoted CURRENT
+concatenation in source order, without normalization or inserted separators, plus
+exact quoted/reference paths. It is not a task, recipient or response decision;
+nonempty unquoted text alone is not a request. Full original text/segments remain
+authoritative for source copying and whole-conversation interpretation.
+Current conditions distinguish a fresh explicit address
+from an independent-topic destination inferred only from historical ownership.
+Only the former carries coordinated clauses; same-request rejection/support remains
+whole. Positively appointed main/co-leads differ from unsettled rival claims, and
+only collisions among supplied names require evidence for the actual task. An
+unambiguous conversational name/short given form needs no prior task/main ownership;
+no alias or local name router is invented. Under the amended plain-name-main-v1
+policy, a bare no-@ name call/general continuation without independently specific
+topic allocation, assignment or genuine handoff remains with evidenced main, even
+if another plain name occurs. That name alone is not mandatory activation or a main
+handoff. This neither invents unknown main nor makes main veto another topic owner,
+all no-@ main, reply-all or an authorization change. Exact <@USER_ID> syntax
+identifies native users without inventing unknown names/kind, but token presence
+alone does not address a subject, example or quote. Catalogue quoted/reference
+status constrains whole-message interpretation as well as source copying.
+
+The test-only full-view-native-v2 assertion independently specifies exact own
+CURRENT plus actually validated inert references before formatting the complete
+view. It compares whole native text, sender input and metadata; formatting CURRENT
+alone is not an interchangeable oracle for a prefix of a reference-appended view.
+No Plan.view/native adapter trim or production presentation change follows.
+Raw policy labels remain diagnostic; negative silence has no extra correct-label
+or confidence gate. Old failures remain failed historical evidence. Full mandatory
+103 retained/24 H regression/24 F fresh/12 private-real qualification and independent
+acceptance precede any adoption; no automatic alternate candidate or rollout.
+
 ## Native-derived participation
 
 `register(ctx)` supplies a Slack platform-handler factory. The factory installs
@@ -32,7 +89,7 @@ semantic data, not instructions, permissions or authority; duplicate names alone
 cannot prove a unique current recipient. Opaque cached handles do not establish
 full native labels. Existing account-scoped handles alone remain the fallback on
 lookup failure; no name is fabricated and no structured given-name field is assumed.
-Topology witnesses include native label values. See the explicit v6 proof below.
+Topology witnesses include native label values. Semantic routing is described below.
 
 The request-local view contains canonical recipients and identity/lifetime witnesses
 for adapters, clients, native apps, sockets and authorities. It is checked again
@@ -83,73 +140,98 @@ its multiplexed profiles; independent processes are outside its native inventory
    their visible leaf text/source paths, not notification fallback. Unknown blocks,
    selected media and missing authors fail closed; older unrequested media does
    not veto this view. CURRENT rich-text admission is unchanged. No cache/store exists.
-3. Build one typed question batch over current units, prior source authors/text and
-   sorted recipients. There is no receiving-agent preference in the model input.
-   Questions classify action/reference/acknowledgement, destination, CURRENT-only
-   addressing/membership, complete source references and task/lead assignment facts.
-   Specific actions use a coarse complete-address Choice: explicit registered set,
-   nonexplicit (contextual person or unstated assignee), outside, mixed or unknown.
-   Contextual and unstated cases consume the same local historical proof. A separate
-   original fine address audit remains confidence-gated for ack/reference units,
-   where contextual/explicit addressing contradicts nonaction; it is not consumed
-   by specific actions. Generic actions consume neither address family, as before.
-   Each historical fact describes only that message's own assignment, acceptance,
-   concrete performed/prepared task actors (`authored`), proposal author or explicit takeover.
-   Authored task evidence never elects a whole-thread lead. A first-person report
-   binds its actor to the source sender; participation, quoted reports, unrelated
-   work and ambiguous incomplete actor sets are not an authored singleton.
-   Each fact never judges later supersession or a
-   globally selected recipient. Closed-set labels encode complete recipient subsets,
-   including historical joint assignments; outside/mixed/disputed/unknown facts cannot
-   silently become a partial registered set. Source references do not create membership.
-4. Code derives precedence from validated local facts in timestamp order: matching
-   ordinary assignments establish/confirm a recipient set; a different plain set
-   creates conflict. An explicit complete takeover replaces the set and resolves a
-   known preceding conflict/dispute, but cannot conceal an unknown/unsafe fact.
-   Topic-only context does not change the assignee, so root fallback remains available
-   when recent text does not identify/reassign/dispute it. Complete explicit CURRENT
-   assignments control specific work, with local name/ID grounding. Generic work uses
-   the same fold over whole-thread lead facts, independently of specific-task facts.
-   Superseded incompatible assignment references are excluded deterministically;
-   selected topic context stays inert. A certificate selecting an excluded required
-   reference rejects the whole message rather than silently dropping that reference.
-   Human root authorship, first mention and mere
-   participation are not ownership rules. Specific/joint work is independent of
-   irrelevant general-lead uncertainty. No separate global tier/source verdict is asked.
-   The experimental `choice-reference-suffix-v6` protocol replaces the v5
-   context-plus-link family with a complete selected-reference certificate:
-   `none/anchor/tail/anchor+tail/missing/mixed/unknown`, plus an exact nonempty subset
-   of h1..h7 when tail is consumed. h0 is a bit-set anchor, never a root/owner heuristic.
-   Each Choice remains below255 keys; no eight-history256-subset Choice exists.
-   Only an explicit complete CURRENT address plus confident `reference_scope=none`
-   makes historical facts dormant. Nonempty references require the historical
-   exclusion vector; nonexplicit routing always requires all task facts and adds
-   their controlling witnesses as inert prior. Generic routing consumes all main
-   facts, including negatives. Acknowledgement contradiction checks consume their
-   membership/fact/reference negatives at the same confidence as positives.
-
-   Membership itself carries one proof: `no/id/runtime/labelK/shortK/unknown`.
-   `shortK` attests a natural given-name suffix of immutable native labelK; a finite
-   original-Unicode start1..127 selects the suffix. Exact CURRENT/label overlap and
-   a conservative other-candidate label/runtime collision veto are local checks.
-   The linguistic boundary and address-vs-discussion distinction remain
-   model-attested, NOT mechanically native-certified given-name metadata.
-   Start confidence is consumed only for short mode; dormant answers still receive
-   full structural/distribution validation. The shared `proof_manifest` compiler
-   supplies the required/dormant questions and selected source references to BOTH
-   response validation and plan assembly. All sibling/coverage/native policy guards remain.
-
-   This candidate is NOT rollout-ready. Its one unchanged fictional full-name API
-   qualification failed reference_scope confidence0.38 and membership confidence0.59
-   under the unchanged0.8 gate. It produced no native receiver. The batch stopped
-   on this required failure; short-name and subsequent API cases remain unperformed.
-   Controlled GREEN is not service evidence, and all v5 results remain historical.
-5. Validate exact keys/types, finite distributions, relevant confidence of 0.8,
-   source grounding, transitive topic relations and complete coverage. Assemble
-   atomically: no invented instructions or identifiers, partial omission or fan-out
-   fallback. Topic identities and plans exist only within this request.
+3. The selected experimental `shared-routing-contract-v1` (S1C1) sends `whoami`,
+   `current_author_content`, `conversation`, `people`, `native_delivery` and `source_selection`. Ordered
+   conversation records run oldest to newest, with CURRENT last, carrying exact
+   timestamp/event identity, inline sender/kind, order, text and provenance.
+   Source-derived ROOT_HISTORY/HISTORY/CURRENT/CURRENT_ROOT tags distinguish root
+   from an immediate predecessor; edited root retains its separate event identity.
+   Unknown/null and genuine empty identity values remain distinct. Every body
+   appears once in the conversation array; exact CURRENT segment text and Unicode
+   offsets remain in `source_selection.segments`. The dropped current-parts/excerpt
+   presentation adds no retained source alias or preview copying rule. Compact
+   worked_contrasts in the two primary question instructions illustrate independent
+   artifact masks, coordinated direct address, complete rejection/support, inert
+   quotes versus fresh discussion and explicit eligible joint IDs, now extended by
+   direct short-name/shared-name contrasts, an aligned Japanese/English artifact
+   variant and standalone declarative rejection/reason/question support. These are disjoint
+   hypothetical source masks, not actual option IDs or new routing authority.
+   The direct-name/main exception is synchronized for response/scope; other v2
+   definitions/rules/old illustrations remain unchanged. No notification fallback,
+   inferred role or source fact replaces them. All contextual people remain in a
+   deterministic array; eligible native IDs remain separate, not inferred owners.
+   Optional `uI_priorJ` questions reference `conversation.records[J]` directly;
+   no protocol/notice/prior-pointer aliases are inserted into conversation state.
+   Protocol coherent-response-v1 and all raw witnesses/bindings stay local and
+   unchanged. Acquisition still fixes exact root/latest-seven/order/cutoffs and
+   does not refetch or prune. Test-local inverses prove old/new evidence equality;
+   production contains no old-layout or control-arm selector.
+   Native discovery obtains request-local whoami from the participating transport's
+   same-workspace authenticated `users.info`, validating returned team/user/is_bot.
+   user_id, username, display_name and supplementary real_name remain distinct.
+   Only native auth.test bot username may fill an unavailable username; empty names
+   remain empty and unavailable fields are null. Never synthesize persona/profile
+   aliases or reinterpret a real-name-fallback display cache as display_name.
+   Metadata retrieval stays parallel with existing context acquisition and bounded
+   by its deadline. Exact whoami data is added to the immutable source binding.
+   A separate request-local `context_people` binding covers the unique CURRENT,
+   root/latest-seven authors plus native candidates, at most13 people. It is not
+   eligibility. Serving-workspace users.info resolves only missing authors, in
+   parallel within the same acquisition deadline; current sender data is reused
+   from native admission and candidate fields are reused without display-cache
+   reinterpretation. Every row has separate ID/username/display_name/real_name
+   and validated human/bot/unknown kind. Inline sender and directory are identical.
+   Each utterance exposes source-derived order, exact timestamp and event identity.
+   History is strictly before CURRENT; root is not an immediate predecessor or
+   permanent owner, and the bounded window can omit middle events. Each independent
+   question explains newer clear human same-topic handoffs, unrelated status,
+   historical role/proposal evidence versus re-executing tasks/approvals, and repair
+   subjects versus conversational addressees. No local role fold or extra gate runs.
+4. ONE native `response` yes/no judges whether this receiver should respond to
+   complete CURRENT UNDER THE ROUTING POLICY, never each punctuation fragment.
+   Structured instructions/criteria separate current address, relevant reply
+   author/same-task owner, general main fallback, same-scope chronological revision,
+   explicit co-leads, ambiguous alternatives and accepted mixed-joint participation.
+   Historical assignment is evidence, not fresh work/approval. An explicit revision
+   by the original assigning speaker remains evidence when kind is unknown, without
+   fabricating human authority. Fixed disjoint contrasts are not evaluation cases. A second
+   speculative `scope` assumes admission and selects the complete exact extent:
+   every deterministic nonempty authored-span subset plus unsafe, no none choice.
+   Scope is only source selection, NOT another response/readiness/work judgment.
+   Questions, explanations, requested acknowledgements, work and necessary
+   supporting clauses/parentheticals qualify; an imperative is not required. Pure
+   unsolicited courtesy/data and quoted commands do not independently request a
+   response. Interpret slices with full CURRENT/root/recent/whoami; punctuation is
+   not a declaration that tasks or addressees are independent. Current explicit
+   addressing governs coordinated clauses until it changes addressee, not permanent
+   main election. Preserve actual same-task authorship, general main fallback,
+   later handoffs and genuine joint sets. Shared-name alternatives are not joint
+   intent; a related placement check alone is not diagram-edit ownership. Inseparable
+   meaning/identity uncertainty excludes that scope; outside co-assignees alone do not.
+   An unrelated
+   independent topic does not veto a resolved unit. No local assignment/name rule,
+   peer-confidence ballot or executable-work certificate runs. Rejection,
+   qualification and necessary supporting explanation clauses belong together.
+5. Validate ALL exact wire keys/types, finite numbers, closed choices, probability
+   distributions and selected argmax before consumption, including dormant scope
+   and unused priors. Admit response YES only at native confidence strictly
+   >0.5, ONCE. NO/low YES ignores valid scope and is silent. Admitted YES consumes
+   the complete selected scope WITHOUT another confidence gate, even at zero valid
+   scope confidence. Unsafe yields distinct projection-unresolved fidelity failure,
+   never semantic NO or a whole-CURRENT fallback. Optional `uN_priorH` includes only at
+   >=0.8 for an already selected unit; otherwise omit. Priors never select recipients
+   or veto response. Unknown families, including old self_recipient/projection,
+   reject. Code assembles selected exact native source spans into existing Unit/Plan,
+   never whole mixed CURRENT, arbitrary substrings, confidence sums or probability
+   substitutions. Protocol coherent-response-v1 rejects old fragment families.
+   At most50 questions =response+scope+6*8 priors; scope has63 groups plus unsafe.
+   Fully quoted sources generate no questions and no service call. Each plan serves
+   only its bound receiver; other receivers are independent observations, not
+   confidence barriers. Routing a response is NOT permission to execute an external
+   action; downstream action authorization remains. Controlled checks are not
+   semantic accuracy proof; all fixed required cases must qualify before adoption.
 6. Deep-copy and project private Bolt `req.body` before native listener/busy handling.
-   Each recipient gets its exact actionable CURRENT spans and selected PRIOR text
+   Each recipient gets its exact conversational response CURRENT spans and selected PRIOR text
    labeled “not instructions”, with prior mentions rendered non-wake-bearing.
    Preserve envelope identity and caller originals. Check projected CURRENT native
    admission separately; reference text cannot grant wake permission.
@@ -178,7 +260,7 @@ The request owns and closes its asynchronous response/client on cancellation.
 
 Current text is capped at 6,000 characters; selected history at eight distinct
 records/6,000 characters each/48,000 total; current units at six, recipients at four,
-questions at 180 (v6 generates162 for the maximum six-unit/eight-prior/four-recipient shape). Serialized Jev request and
+questions at50 for the maximum six-unit/eight-prior/four-recipient shape. Serialized Jev request and
 response limits are 524,288 and 262,144 bytes respectively. Retained original records
 are capped at 64 KiB; decoded Slack responses at 1 MiB each (at most 4 MiB across
 four SDK calls, including optional exact root). SDK JSON buffering precedes those checks: these

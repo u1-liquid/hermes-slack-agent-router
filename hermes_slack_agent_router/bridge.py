@@ -110,6 +110,27 @@ def canonical_text(event, *, prior=False):
             and isinstance(block["text"].get("text"), str)
         ):
             append(block["text"]["text"], path + ".text.text", "authored")
+        elif prior and block.get("type") == "context":
+            if (
+                set(block) - {"type", "block_id", "elements"}
+                or ("block_id" in block and not isinstance(block["block_id"], str))
+                or not isinstance(block.get("elements"), list)
+                or not block["elements"]
+            ):
+                raise SemanticError("unsupported prior context block")
+            for j, leaf in enumerate(block["elements"]):
+                if not isinstance(leaf, dict) or leaf.get("type") not in ("mrkdwn", "plain_text"):
+                    raise SemanticError("unsupported prior context leaf")
+                optional = "verbatim" if leaf["type"] == "mrkdwn" else "emoji"
+                if (
+                    set(leaf) - {"type", "text", optional}
+                    or not isinstance(leaf.get("text"), str)
+                    or (optional in leaf and type(leaf[optional]) is not bool)
+                ):
+                    raise SemanticError("unsupported prior context leaf")
+                if j:
+                    append("\n", path, "separator")
+                append(leaf["text"], f"{path}.elements[{j}].text", "authored")
         else:
             raise SemanticError("unsupported prior block" if prior else "unsupported current block")
     result = "".join(pieces)
@@ -149,6 +170,43 @@ def composition(event):
     return tuple(sorted(direct))
 
 
+def contextual_person(user_id, payload, team):
+    """Whitelist same-workspace Slack identity fields, never an entire profile."""
+    result = {
+        "user_id": user_id,
+        "username": None,
+        "display_name": None,
+        "real_name": None,
+        "kind": "unknown",
+    }
+    user = payload.get("user") if callable(getattr(payload, "get", None)) else None
+    if not (
+        isinstance(user, dict)
+        and payload.get("ok") is True
+        and user.get("id") == user_id
+        and user.get("team_id") == team
+        and type(user.get("is_bot")) is bool
+        and isinstance(user.get("profile", {}), dict)
+    ):
+        return result
+    profile = user.get("profile", {})
+
+    def field(value):
+        return (
+            value
+            if isinstance(value, str) and len(value) <= 128 and not any(ord(c) < 32 for c in value)
+            else None
+        )
+
+    result.update(
+        username=field(user.get("name")),
+        display_name=field(profile.get("display_name")),
+        real_name=field(profile["real_name"] if "real_name" in profile else user.get("real_name")),
+        kind="bot" if user["is_bot"] else "human",
+    )
+    return result
+
+
 @dataclass
 class Bound:
     event: Event
@@ -156,6 +214,7 @@ class Bound:
     source: object
     identity: object
     session_key: str
+    sender_metadata: dict | None = None
 
 
 class Bridge:
@@ -166,65 +225,114 @@ class Bridge:
     async def call(self, awaitable):
         return await asyncio.wait_for(awaitable, self.timeout)
 
-    async def recipient_labels(self, bound, topology):
-        """Verify native full presentation data on warm AND cold paths, request-local.
+    async def recipient_metadata(self, bound, topology):
+        """Request-local native labels and separately named Slack identity fields.
 
-        Topology establishes eligibility. Labels cannot add or authorize a candidate.
-        Cold users.info uses that candidate's authenticated workspace client, with
-        exact returned user/workspace validation rather than native fallback names.
+        A display-name cache may contain real-name fallbacks, so never reinterpret
+        it as display_name. auth.test's bot username is the only warm fallback.
         """
         team = bound.event.thread.workspace
 
+        def field(value):
+            return (
+                value
+                if isinstance(value, str) and len(value) <= 128 and not any(ord(c) < 32 for c in value)
+                else None
+            )
+
         def bounded(values):
-            return tuple(
-                sorted(
-                    {
-                        v
-                        for v in values
-                        if isinstance(v, str)
-                        and v.strip()
-                        and len(v) <= 128
-                        and not any(ord(c) < 32 for c in v)
-                    }
-                )
-            )[:3]
+            return tuple(sorted({v for v in values if field(v) is not None and v.strip()}))[:3]
 
         async def resolve(recipient, witness):
-            # Witness pins the actual participating transport, not a profile-name lookup.
             runner = self.adapter.gateway_runner
             maps = [runner._primary_adapters(), *runner._profile_adapters_map().values()]
             from gateway.config import Platform
+            from slack_sdk.errors import SlackClientError
 
             adapter = next(
                 m[Platform.SLACK] for m in maps if Platform.SLACK in m and id(m[Platform.SLACK]) == witness[0]
             )
             handle = adapter._team_bot_names.get(team)
-
-            from slack_sdk.errors import SlackClientError
-
+            whoami = {
+                "user_id": recipient.bot_user,
+                "username": field(handle),
+                "display_name": None,
+                "real_name": None,
+            }
+            labels = bounded((handle,))
             try:
                 response = await self.call(adapter._team_clients[team].users_info(user=recipient.bot_user))
                 user = response.get("user")
                 if (
-                    response.get("ok") is not True
-                    or not isinstance(user, dict)
-                    or user.get("id") != recipient.bot_user
-                    or user.get("team_id") != team
-                    or user.get("is_bot") is not True
+                    response.get("ok") is True
+                    and isinstance(user, dict)
+                    and user.get("id") == recipient.bot_user
+                    and user.get("team_id") == team
+                    and user.get("is_bot") is True
+                    and isinstance(user.get("profile", {}), dict)
                 ):
-                    return recipient.bot_user, bounded((handle,))
-                profile = user.get("profile", {})
-                if not isinstance(profile, dict):
-                    return recipient.bot_user, bounded((handle,))
-                return recipient.bot_user, bounded(
-                    (handle, profile.get("display_name"), profile.get("real_name") or user.get("real_name"))
-                )
+                    profile = user.get("profile", {})
+                    whoami.update(
+                        username=field(user["name"]) if "name" in user else field(handle),
+                        display_name=field(profile.get("display_name")),
+                        real_name=field(
+                            profile["real_name"] if "real_name" in profile else user.get("real_name")
+                        ),
+                    )
+                    labels = bounded(
+                        (
+                            handle,
+                            profile.get("display_name"),
+                            profile.get("real_name") or user.get("real_name"),
+                        )
+                    )
             except (TimeoutError, SlackClientError, OSError):
-                return recipient.bot_user, bounded((handle,))
+                pass
+            return recipient.bot_user, labels, whoami
 
         async with asyncio.TaskGroup() as group:
             lookups = [group.create_task(resolve(r, w)) for r, w in zip(*topology)]
-        return tuple(task.result() for task in lookups)
+        rows = [task.result() for task in lookups]
+        return tuple((user, labels) for user, labels, _ in rows), tuple(
+            (user, whoami) for user, _, whoami in rows
+        )
+
+    async def context_people(self, bound, history, whoami, *, deadline=None):
+        """Exact source-window people, via serving client only; never eligibility."""
+        import time
+
+        from slack_sdk.errors import SlackClientError
+
+        team = bound.event.thread.workspace
+        if (
+            self.adapter._team_bot_user_ids.get(team) != bound.recipient.bot_user
+            or bound.identity.adapter() is not self.adapter
+            or bound.source.scope_id != team
+        ):
+            raise TopologyError("serving metadata client mismatch")
+        client = self.adapter._team_clients[team]
+        people = {user: {**fields, "kind": "bot"} for user, fields in whoami}
+        people[bound.event.sender] = bound.sender_metadata or contextual_person(bound.event.sender, {}, team)
+        authors = {bound.event.sender, *(h.sender for h in history)}
+
+        async def resolve(user):
+            if deadline is not None and deadline <= time.monotonic():
+                return user, contextual_person(user, {}, team)
+            timeout = (
+                self.timeout
+                if deadline is None
+                else max(0.001, min(self.timeout, deadline - time.monotonic()))
+            )
+            try:
+                payload = await asyncio.wait_for(client.users_info(user=user), timeout)
+                return user, contextual_person(user, payload, team)
+            except (TimeoutError, SlackClientError, OSError):
+                return user, contextual_person(user, {}, team)
+
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(resolve(user)) for user in sorted(authors - set(people))]
+        people.update(task.result() for task in tasks)
+        return tuple(sorted(people.items()))
 
     async def participants(self, bound):
         """Resolve this event on each live local transport, without retaining a registry."""
@@ -463,4 +571,5 @@ class Bridge:
             source,
             identity,
             session_key,
+            contextual_person(sender, payload, team),
         )

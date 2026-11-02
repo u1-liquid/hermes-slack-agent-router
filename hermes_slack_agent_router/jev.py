@@ -38,7 +38,7 @@ class JevError(ValueError):
         return code, self.status if code == "http-rejected" else 0
 
 
-def validate_answers(batch, result, confidence=0.8):
+def validate_answers(batch, result):
     try:
         answers = result["answers"]
         if not isinstance(answers, dict) or set(answers) != set(batch["questions"]):
@@ -64,12 +64,27 @@ def validate_answers(batch, result, confidence=0.8):
             if distribution[choice] < max(distribution.values()):
                 raise JevError("uncertain or contradictory answer")
             selected[name] = choice
-        from .semantic import proof_manifest
-
-        proof = proof_manifest(batch, selected)
-        for name, answer in answers.items():
-            if name in proof.required and answer["confidence"] < confidence:
-                raise JevError("uncertain relevant answer: " + name)
+        # Exhaustive native-generated families: only exact optional priors may omit.
+        state = batch["state"]
+        authored = [
+            unit for unit, span in state["source_selection"]["segments"].items() if not span["quoted"]
+        ]
+        required = {"response", "scope"} if authored else set()
+        priors = {
+            f"{unit}_prior{j}" for unit in authored for j in range(len(state["conversation"]["records"]) - 1)
+        }
+        if set(answers) != required | priors:
+            raise JevError("answer keys do not match request")
+        admitted = (
+            bool(authored) and selected["response"] == "yes" and answers["response"]["confidence"] > 0.5
+        )
+        if authored:
+            selected["response"] = "yes" if admitted else "no"
+        extent = set(selected["scope"].split("+")) if admitted and selected["scope"] != "unsafe" else set()
+        for name in priors:
+            unit = name.split("_prior", 1)[0]
+            if unit not in extent or answers[name]["confidence"] < 0.8 or selected[name] != "include":
+                selected[name] = "omit"
         return selected
     except (KeyError, TypeError, AttributeError) as exc:
         raise JevError("malformed native Jev answer") from exc

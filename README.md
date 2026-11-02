@@ -6,6 +6,24 @@ and topic each current instruction addresses. Each eligible agent receives only
 its own actionable CURRENT spans and selected, explicitly inert PRIOR references.
 A message can address several agents with different work.
 
+The working candidate is yes05-joint-v1 on lossless readable-rubric-v2, retaining
+the worked contrasts and separate exact source segments. A fresh unambiguous name,
+including a short/given form resolved by supplied names/context, needs no prior task
+ownership to identify its referent; it is not a mandatory handoff away from known
+main for a bare no-@ call/general conversation continuation without independent
+specific-topic allocation, assignment or genuine handoff. Main stays the target in
+that case, not reply-all or activation of the other named agent. Native @ and genuine
+topic owners/handoffs remain distinct; no absent main is invented and not all no-@
+goes to main. Only colliding supplied names need actual same-task resolution. Native
+authority remains separate. `current_author_content` adds literal unquoted CURRENT
+text and exact quoted/reference paths, not a computed request/recipient. Complete
+original source remains. Fixed disjoint illustrations add shared-name contrasts,
+aligned Japanese/English independent artifacts and declarative support. No rejected
+CURRENT.parts/excerpts return. One whole-message gate, repaired native fixture
+and full-view-native-v2 assertion remain unchanged. Controlled checks and example
+presence are not semantic qualification or independent acceptance; no install/restart
+follows from this work. See docs/native-acceptance.md for the fixed full campaign.
+
 ## Install and use
 
 Requires Python 3.11+, Hermes v0.22.5 at
@@ -51,13 +69,40 @@ prepared a diagram, “Atlas, revise the summary; Birch, check the diagram” ca
 two different recipient inputs. “Please continue” needs unambiguous prior evidence
 of a general conversational lead. It does not establish a permanent owner.
 
+For the complete CURRENT and actual bound receiver, ONE native `response` yes/no
+asks whether a conversational response is requested. Only YES with native confidence
+strictly greater than0.5 admits the coherent request, once. NO/low YES is silence.
+The same official request includes ONE conditional `scope` choice: assuming admission,
+select the COMPLETE exact source extent from generated nonempty span subsets or
+`unsafe`. It has NO second confidence/work/readiness gate and NO none alternative.
+Valid low scope confidence cannot trim or veto an admitted request. Unsafe means
+no faithful own extent is representable; it is distinct projection-unresolved
+fidelity failure, not successful semantic NO. No whole mixed-CURRENT fallback runs.
+Questions, explanations, requested acknowledgements, work and necessary supporting
+clauses can qualify. Punctuation slices are not independent-task declarations.
+Current explicit addressing carries across coordinated clauses until the addressee
+changes, without electing a permanent main. An unrelated independent topic does
+not veto a resolved response; inseparable meaning/identity/joint-member uncertainty
+still cannot be chopped or shrunk into a partial instruction.
+
+Canonical root, recent and CURRENT utterances carry their exact timestamp and
+author UID inline, with verified native names only when already available. Unknown
+authors remain UID-only. Visible rich-text bodies are not replaced by notification
+fallback text; all competing candidates remain visible. Equal names alone do not
+force rejection when same-task authorship/assignment/handoff or explicit IDs resolve
+the intended actor. Conversely possible same-name alternatives are not a genuine
+joint request, and related-task participation alone is not ownership of another artifact.
+
 ## Participation and external processing
 
 Candidates come from the current GatewayRunner's primary and multiplexed-profile
 Slack adapters. Each candidate needs authenticated identity in the same Slack
 workspace, a live native socket and a served runtime. Native source routing is
 resolved separately for each transport and this sender/channel/thread; configured
-profiles, display names, history authors and human allowlists are not participants.
+profiles, display names, history authors and human allowlists do not establish native delivery eligibility.
+The request-local people directory separately includes CURRENT/root/latest-seven human and bot authors plus verified native candidates (at most13 people, still only four eligible recipients). It carries exact IDs, separate username/display_name/real_name and validated human/bot/unknown kind; missing metadata stays explicit. Serving-client users.info reads only missing source-window author IDs, deduped within the existing acquisition deadline. No workspace enumeration or persistent people registry runs. Inline sender metadata uses the same directory fields.
+
+Every utterance carries its actual timestamp and source-derived order; CURRENT is newer than all included priors. Native edit event IDs stay separately bound. Root is an old anchor, and the root+seven window may omit middle messages. Newer clear human same-topic handoffs supersede older assignments only for that scope; historical proposals/assignments remain evidence, not executable approvals. A correction can address a preceding proposal's author without addressing somebody named as its repair object. Chronology and people data add no role/approval/confidence gate.
 
 Discovery is limited to one GatewayRunner. It does not discover agents in other
 processes or on other hosts. A shared bot contributes one event-specific native
@@ -67,7 +112,7 @@ change during evaluation yields no ordinary work. There is no hidden all-agent
 or receiver-only fallback. Native policy still decides whether each receiver may act;
 a discovered peer is not proof of channel membership or delivery.
 
-Eligible current text, bounded prior text, source authors and candidate bot/runtime
+Eligible current text, bounded prior text, source authors and candidate Slack
 identities are sent to `https://api.typesafe.ai/v1/systemone` using `jev-latest`.
 Enable this plugin only where you are authorized to send that conversation to
 TypeSafe. Slack read access is not external-processing consent. There is no plugin
@@ -77,9 +122,27 @@ log keys, transcripts or service error bodies, or store routing decisions.
 
 ## Behavior and limits
 
-- Jev returns closed-set typed decisions, not executable text. Relevant confidence
-  must be at least 0.8; source grounding and complete instruction coverage are checked.
-  Uncertainty in any actionable unit rejects the whole message, not just one clause.
+- Jev returns coherent `response` and speculative conditional exact `scope` for the
+  bound receiver, judged with full oldest-to-newest conversation records and exact whoami context.
+  Only response consumes confidence>.5; scope has no confidence threshold. Pure unsolicited
+  courtesy/data/quoted commands do not independently request a response, whereas
+  necessary support of one addressed request may belong. Exact source-owned `source_selection.segments.uN.text` is supplied
+  with unchanged Unicode spans. Whoami separates user_id, username, display_name
+  and supplementary real_name. Validated same-team/user/bot `users.info` supplies
+  these fields; only the native authenticated bot username is a cache fallback.
+  Empty display_name remains empty; unavailable fields are null, never synthesized
+  from persona/runtime names or a real-name fallback. Native labels remain bound
+  for historical provenance but runtime profile tags are not semantic self identity.
+  Natural names, subject, root, handoff and joint intent remain Jev judgments;
+  An eligible correctly addressed bot may participate in a joint request with human,
+  context-only or outside co-assignees. Preserve its complete own joint source;
+  never invoke outsiders or claim their receipt/consent/execution. Native self-auth
+  stays mandatory. Classifier FN and extra triggers are reported separately from
+  hard source/native invariants; the gate is not a promise of semantic perfection.
+  code assembles exact native IDs/spans only. Optional inert-prior Choices cannot
+  select recipients and retain include only at native confidence >=0.8. Every
+  answer, including dormant speculative scope and unused priors, is structurally validated before
+  consumption. Unknown question families reject. Native confidence is never p(YES).
 - Replies use the actual latest seven messages strictly before the trigger, plus
   the verified root even outside that window. Overlap is represented once. On the
   qualified native endpoint, one `conversations.replies` request with `limit=7`,
@@ -112,7 +175,7 @@ log keys, transcripts or service error bodies, or store routing decisions.
   memory cap. Native SDK retries may add wire attempts. Slack has no atomic history
   snapshot; unseen concurrent edits/deletions can race.
 - Current input is limited to 6,000 characters, six units, four recipients and
-  174 questions. Up to eight distinct prior records have 6,000 characters each
+  at most50 questions (one response, one conditional scope and48 optional priors; scope has up to63 nonempty source groups plus unsafe). Up to eight distinct prior records have 6,000 characters each
   (48,000 aggregate), with a 64 KiB retained original-record limit. The Jev request
   limit is 524,288 bytes; its response limit is 262,144 bytes. Nothing is silently
   truncated. Selected media and inseparable authored/reference composition are unsupported.
