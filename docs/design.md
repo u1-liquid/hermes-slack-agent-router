@@ -1,167 +1,134 @@
 # Runtime design
 
-## Native participation and authority
+## Transparent whole-message filter
 
-`register(ctx)` registers a Slack middleware factory and a `pre_gateway_dispatch`
-hook. It reads no plugin configuration and does not require a ready socket at
-registration. Request-time discovery uses the current GatewayRunner's primary and
-multiplexed-profile Slack adapters, not profile directories or a saved registry.
+`register(ctx)` attaches a Slack middleware factory. There is no delivery rewrite
+or pre-dispatch hook. The `fallback-to-respond` policy suppresses only a valid
+complete-message NO whose selected-answer native confidence is strictly >0.5.
+YES at any confidence, NO<=0.5 and classification failures call ordinary native
+handling once with the original complete Bolt body unchanged. Class probability
+is validated but never used as confidence. Native downstream exceptions propagate;
+the classifier catch never catches `next()` and never retries native processing.
 
-`Bridge.bind` resolves the workspace, human sender, receiving bot, native source,
-routed runtime and session key. Native commands, bots/self, DMs/MPIMs and pending
-approval, clarification, confirmation or update controls retain their native path.
-The runner's definitive `_is_user_authorized_for_source` check uses the transport's
-authorization home before history acquisition or private inference. Identity reads
-needed to bind the source can precede it.
+One `response` choice question addresses this exact receiver's complete CURRENT.
+The same ordered conversation/people reaches each receiver, with only `whoami`
+identifying which native receiver is being evaluated. Text and supported structured
+Slack blocks are retained whole, including quote, preformatted and inline-code
+semantics. There are no segments, source-selection questions, subsets, conditional
+scope, fragment votes, regrouping, extraction plan or compatibility flags.
+Unsupported or malformed composition/media skips inference and passes unchanged;
+it is never silently replaced by a notification fallback for classification.
 
-Each participant needs same-workspace authenticated identity, a live socket and
-served transport/runtime authorities. Each peer builds its own event-specific
-source using native session thread coordinates; those are separate from the
-history root. A shared bot is not multiplied into one candidate per configured
-profile. Duplicate bot ownership, unknown identity or an inconsistent topology
-rejects ordinary work. Topology is rechecked after awaited acquisition and after
-projected-CURRENT admission. These witnesses are not a global transaction and
-cannot eliminate all network or ABA races.
+Names identify people, not necessarily addressees. The ordered whole-message rules
+retain general continuation/main/co-leads, specific-task ownership, genuine
+same-task handoffs, explicit current addressing, same-name ambiguity, explanatory
+rejection/support and explicit joint participation. NO requires positive evidence
+excluding this exact receiver from every fresh response. Unknown/ambiguous
+addressing, main or assignment alone is not exclusion. YES means an own response
+exists or exclusion remains unresolved: fallback native continuation does not
+prove ownership, joint intent or semantic accuracy. Any coherent own response is
+sufficient for YES even if other tasks in CURRENT belong elsewhere. Every
+nonexcluded receiver sees the full mixed original message, not a private task slice.
+Intent is not authorization, consent or guaranteed execution by any participant.
 
-## Exact source and context
+## Native identity and authorization
 
-Supported authored text/rich text is flattened with exact half-open Unicode
-ranges, leaf paths and preserved originals. Quotes, code and forwarded material
-remain inert. CURRENT supports rich text; PRIOR also supports native markdown,
-text-only sections and text-only context blocks. Unsupported or mixed composition
-is not replaced by notification fallback text. Selected media is unsupported.
+Registration reads no configuration and requires no ready socket. Request-time
+`Bridge.bind` resolves workspace, human sender, receiving bot, native source,
+routed runtime and native session key. Commands, bots/self, DMs/MPIMs and native
+pending approval/clarification/confirmation/update controls bypass inference.
+The runner's definitive `_is_user_authorized_for_source` and actual native
+channel/mention/wake gates precede classifier egress. Binding identity reads can
+precede authorization; no history/model egress follows denied or unknown admission.
 
-For a reply, history starts with `conversations_replies(channel, ts=root,
-latest=current_timestamp, inclusive=False, limit=7)`, without a cursor. On the
-qualified endpoint, this selects the newest bounded subset in ascending internal
-order, normally root plus seven replies. Slack's documented earliest-first page
-ordering alone does not establish that selection contract.
+Participants are discovered from connected same-workspace primary/multiplexed
+adapters with live transport/runtime authorities. There is no configured registry
+or workspace enumeration. Each peer uses its own native `_session_thread_ts`,
+independent of the conversation's acquisition root. Absent/null/self-root top-level
+`thread_ts` uses CURRENT as root; native session coordinates still obey each peer's
+`reply_in_thread`. Ordinary replies keep their real root. Topology is revalidated
+after awaits and immediately before inference/use. Missing, duplicate, foreign or
+changed topology defers, never grants permission for a guessed/substituted identity.
+These witnesses are not a global transaction and cannot eliminate every ABA race.
 
-Only a short tail follows the returned opaque older cursor, with the same cutoff,
-until seven distinct replies or true exhaustion. Advancing empty/duplicate-only
-pages do not prove exhaustion; a cursor still matters when `has_more` is false or
-missing. Once seven replies exist, older cursors are ignored. If root is absent,
-`conversations_history(channel, oldest=root, inclusive=True, limit=1)` must return
-that exact root. At most four SDK calls, including that lookup, are permitted.
-Root-trigger input makes no history call.
+Metadata is request-local, whitelisted exact ID/username/display_name/real_name
+and contextual kind, not an entire Slack profile. Unknown optional names remain
+null; genuine empty names remain empty. SDK failure/malformed or mismatched metadata
+aborts classification instead of pretending acquisition succeeded. Serving-client
+identity and per-request secret isolation remain separate from semantic identity.
 
-Timestamp, scope, order, cutoff and duplicate fingerprints are validated. Foreign,
-future, conflicting, malformed or incomplete context rejects the request. Live
-root reply counts are not cutoff snapshots. Each decoded response is capped at
-1 MiB; SDK buffering precedes validation and retries can add wire attempts. Slack
-provides no atomic history snapshot, so unseen concurrent edits/deletions can race.
+## Bounded context and exact byte fitting
 
-Request-local identity metadata includes exact IDs, distinct username/display_name/
-real_name fields and human/bot/unknown kind. `users.info` data must match the
-workspace and user; unavailable fields stay null and genuine empty names stay
-empty. Only the native authenticated bot username is a fallback. The people
-directory covers source-window authors and candidates, at most 13 people, and is
-not a recipient registry. Only missing authors are looked up on the serving
-client; there is no workspace enumeration or persistent metadata cache.
+Replies acquire exact root and latest seven strictly prior messages. The first
+`conversations_replies` uses channel/root/latest=CURRENT/inclusive=False/limit=7.
+Qualified newest-window selection and ascending within-page order are integration
+assumptions; Slack's documented earliest-first page ordering alone does not prove
+selection. Only short tails follow opaque older cursors to fill seven or prove
+exhaustion. Root may be fetched by exact `conversations_history` oldest=root,
+inclusive=True, limit=1. Acquisition uses at most four SDK calls and 1 MiB per decoded
+response. CURRENT==root returns no history immediately, protecting one root record.
 
-## Whole-message decision and exact extraction
+Validate scope/timestamps/order/cutoff/duplicates and detect conflicting history
+with fingerprints. These fingerprints protect acquisition consistency, not source
+projection. Future/foreign/incomplete/unsupported history defers natively. SDK
+buffering and native Slack retries precede these decoded bounds. History is not an
+atomic snapshot and unseen edits/deletions can race.
 
-The model sees the same complete oldest-to-newest conversation and people for
-each receiver, with receiver identity in `whoami`, native eligible IDs separately,
-and exact CURRENT segments in `source_selection`. `current_author_content` is
-literal unquoted source evidence, not a locally computed request or recipient.
-Both primary questions share the same ordered routing contract. The current
-prompt and its fictional contrasts remain behavior-sensitive source, not a local
-name/role parser.
+The actual production compact UTF-8 serializer caps requests at 524,288 bytes.
+Fitting removes only whole oldest non-root priors and now-unused contextual people,
+then rebuilds ordered records. CURRENT and ROOT are never shortened or subdivided.
+Protected-only oversize or invalid encoding defers without HTTP. Native history
+and backfill are unaffected by the classifier's smaller window. The 262,144-byte
+response cap is independent. Four recipients/13 people bound metadata, not text.
 
-`response` asks once whether a coherent response belongs to this exact receiver.
-YES admits only at native confidence strictly greater than 0.5; NO and low YES are
-silent. Probability cannot replace confidence. A response can be a question,
-explanation, requested acknowledgement or work, with its necessary support.
+## Lifecycle and delivery
 
-Conditional `scope` assumes admission and selects the complete exact own-source
-extent from nonempty authored-segment groups plus `unsafe`. It has no second
-confidence, readiness or executable-work gate. Punctuation does not create
-independent response ballots. `unsafe` produces `projection-unresolved`, not a
-semantic NO, partial request or whole mixed-CURRENT fallback. All answer fields,
-including dormant scope and unused priors, receive closed-choice, finite-number,
-distribution and argmax validation before consumption. Optional prior-reference
-choices retain include only at native confidence at least 0.8 for selected units;
-they cannot select a recipient or veto a response.
+Active evaluation (including binding) is enrolled in the adapter's native background
+tasks. A request-local Gate map holds source coordinates, sender/root, explicit
+edit revision and live tasks only. Newer true edits invalidate before awaiting
+obsolete tasks; stale active revisions and late cancelled results cannot hand off.
+Equal duplicate envelopes, unfurl delivery timestamps and distinct newer messages
+do not cancel current evaluation. Caller cancellation propagates. Gateway draining
+and native adapter shutdown are terminal and drain cooperative resources. There is
+no durable revision store or retraction of already handed-off/queued/running work.
 
-Addressing is distinct from identity matching. General continuation, including a
-bare no-@ name call, can stay with evidenced main/co-leads; this neither invents
-main nor overrides specific-topic ownership, genuine handoff or native @. Newer
-clear same-scope revisions supersede older assignments for that scope only.
-Historical proposals/approvals are evidence, not fresh execution authority. An
-eligible bot may participate in a genuine joint request with humans or outsiders
-without claiming their receipt, consent or execution. Unresolved same-name
-alternatives are not joint membership. An independent foreign topic does not veto
-an otherwise resolved own response.
+Unload disables filtering, not native event delivery: live in-flight events pass
+after owned work cleans up, regardless of a classifier NO. No fresh inference is
+started after disposal. Caller/edit/shutdown cancellation still wins. Shutdown is
+checked even for already disposed middleware. No body/text/blocks/files/attachments
+or media/history field is replaced. Native normal, busy, merged, FIFO and replay
+paths retain their ordinary formatting, backfill, permissions and deduplication.
+Pass-through never forces native execution. Same-client re-enable retains the
+native factory deduplication limitation; replacement needs the managed lifecycle.
 
-Acquisition allows eight distinct prior records, CURRENT six segments and four
-native recipients. The maximum 50 questions are response, scope and 48 optional
-priors; scope has at most 63 nonempty groups plus unsafe. Fully quoted CURRENT
-requires no inference. Actual compact UTF-8 serialization must fit 524,288 bytes.
-The fitter removes whole oldest non-root priors, rebuilding indices, questions
-and the source-derived people directory. CURRENT and ROOT are never shortened.
-Protected-only excess yields local `unsupported-request-size` without HTTP;
-invalid serialization and response failures do not trigger fitting or retries.
-The response limit is independently 262,144 bytes.
+## HTTP and qualification
 
-## Delivery and lifecycle
+`JevClient` sends System One Choice to `https://api.typesafe.ai/v1/systemone` with
+`jev-latest`. Closed complete answer coverage, selected choice, finite numeric
+range, distribution and argmax consistency are validated before returning choice
+and native confidence unchanged. A stdlib object-pairs decoder rejects duplicate
+JSON members at every nesting level before values collapse, including escaped
+equivalent keys. Normal envelope metadata is compatible. Missing/extra/bad or
+duplicate-member answers cannot synthesize NO; they use the payload-free fallback.
+Per-request `agent.secret_scope.get_secret("TYPESAFE_API_KEY")` runs within the
+actual serving runtime's `_async_profile_scope_for_source`. Missing key/scope
+fails before HTTP creation. No alternate model, retry or local semantic fallback.
 
-A private deep copy of Bolt `req.body` receives the exact own CURRENT and selected
-PRIOR text labelled “not instructions”; prior mentions are rendered non-wake-bearing.
-The original envelope identity and caller body are preserved. Own CURRENT alone
-must pass the real native `_channel_gate_allows` predicate before handoff: inert
-references cannot grant wake permission. No duplicate plugin allowlist runs.
+TLS verification is enabled; redirects/proxies/compressed responses and automatic
+Jev retries are disabled. `timeout=None`; no plugin elapsed cutoff. Owned HTTP and
+acquisition tasks close/drain on completion/failure/cancellation. Logs contain
+only source-owned categories/numeric measurements, never raw errors or bodies.
 
-The request-local Python closure carried into `pre_gateway_dispatch` binds the
-source, sender, receiver, runtime, runner and session. It cannot arrive in Slack
-JSON. The hook checks it before discarding newly hydrated channel/reply/media
-backfill, then removes the closure before native snapshots. This is native source
-isolation, not semantic certification. Normal, busy, merge, FIFO and replay paths
-consume the scoped input. Existing native session memory and downstream action
-authorization are not erased or replaced.
+The qualified official host is `f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab`, publicly
+fetchable at NousResearch/hermes-agent. Prior bf0203a qualification is historical.
+Private native seams require source-bound integration checks when changing hosts.
+Controlled fictional tests do not prove live Slack delivery, semantic accuracy,
+independent acceptance or installed runtime adoption. There is no DB, durable
+owner/decision cache, cross-process consensus or exactly-once promise.
 
-Active evaluation is enrolled in `adapter._background_tasks`, including binding.
-A per-Gate map contains only original source coordinates, sender/root, explicit
-`edited.ts` revision and live tasks. Newer true edits invalidate before awaiting
-obsolete work; equal envelope duplicates, unfurl event IDs and later distinct
-messages do not cancel evaluation. Late cancelled results cannot hand off or
-resurrect original text through pending fallback. Native shutdown drains
-cooperative I/O; the host's noncooperative teardown bounds remain unchanged.
-This does not retract already handed-off work or clear native processed claims.
-
-Unload seals active callbacks against new inference/stale handoff without being
-a cancellation trigger. Quiescent post-unload requests pass through. Concurrent
-hot-unload during native hydration and same-client re-enable are not guaranteed;
-a managed fresh gateway lifecycle is required for replacement activation.
-
-## Transport and compatibility
-
-`JevClient` sends typed Choice requests to
-`https://api.typesafe.ai/v1/systemone` with `model: jev-latest`. Every ask resolves
-`agent.secret_scope.get_secret("TYPESAFE_API_KEY")` inside the runner's actual
-`_async_profile_scope_for_source`; missing scope/key fails before client creation.
-No CLI, SDK, copied key, alternate model or local semantic fallback is used.
-
-TLS is verified. Redirects, environment proxies, compressed responses and automatic
-Jev retries are disabled. HTTP resources close on failure/cancellation. `httpx`
-uses `timeout=None`; the router has no elapsed cutoff on ingress, acquisition,
-metadata or inference. Actual external transport errors still fail safely.
-Diagnostics contain source-owned codes and numeric measurements, not arbitrary
-exception bodies, transcripts or credentials.
-
-The supported host is Hermes v0.22.5 at
-`bf0203a794a07aac3ff764972ab9087baa4e4f4e`. Private integration points include native
-identity/authority maps, source builders, Slack admission, Bolt middleware and
-factory rewiring. Other revisions need native qualification. Discovery is
-runner-local and does not prove a peer received an event or enabled the plugin.
-There is no plugin DB, durable owner/decision store, operator registry or
-cross-process exactly-once promise.
-
-See [use and external-processing consent](../README.md) and
-[controlled testing](native-acceptance.md). API references:
+See [use/consent](../README.md), [testing](native-acceptance.md),
 [Hermes plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins),
 [System One](https://docs.typesafe.ai/api.md),
 [Bolt middleware](https://docs.slack.dev/tools/bolt-python/concepts/global-middleware/),
-[Slack replies](https://docs.slack.dev/reference/methods/conversations.replies/),
-[known-message lookup](https://docs.slack.dev/reference/methods/conversations.history/)
-and [pagination](https://docs.slack.dev/apis/web-api/pagination/).
+[Slack replies](https://docs.slack.dev/reference/methods/conversations.replies/) and
+[known-message lookup](https://docs.slack.dev/reference/methods/conversations.history/).

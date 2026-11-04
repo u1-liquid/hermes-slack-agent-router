@@ -35,7 +35,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: NousResearch/hermes-agent
-          ref: bf0203a794a07aac3ff764972ab9087baa4e4f4e
+          ref: f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab
           path: .native-host
           persist-credentials: false
       - name: Isolated test home and dependencies

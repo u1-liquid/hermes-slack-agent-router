@@ -1,11 +1,11 @@
-"""Read-only integration with official Hermes bf0203a794a0 private seams."""
+"""Read-only integration with qualified official Hermes native seams."""
 
 import asyncio
 import copy
 import re
 from dataclasses import dataclass
 
-from .policy import Event, Recipient, Thread
+from .policy import Event, Recipient, Thread, identifier
 
 
 class Uncertain(ValueError):
@@ -16,136 +16,72 @@ class TopologyError(ValueError):
     """An ordinary request lacks a stable, authoritative native candidate view."""
 
 
-def canonical_text(event, *, prior=False):
-    """Flatten supported source fields, preserving exact leaf paths and ranges.
+def message_content(event):
+    """Validate complete supported content, retaining Slack quote/code structure.
 
-    Human CURRENT composition remains rich_text-only. Prior Slack bot responses
-    also use native markdown and text-only section blocks; their notification
-    fallback is not a substitute for the visible authored source.
+    Unsupported composition skips inference, never ordinary native delivery.
+    This is not a renderer, source selector or per-fragment intent check.
     """
     from .semantic import SemanticError
 
-    if not event.get("blocks"):
-        text = event.get("text", "")
-        return text, (
-            {
-                "field": "text",
-                "start": 0,
-                "end": len(text),
-                "kind": "authored",
-                "raw": text,
-                "source_start": 0,
-                "source_end": len(text),
-                "mapping": "literal",
-            },
-        )
-    pieces, provenance = [], []
-    offset = 0
+    def invalid():
+        raise SemanticError("unsupported message composition")
 
-    def append(text, path, kind, *, raw=None, mapping="literal"):
-        nonlocal offset
-        structural = kind == "separator"
-        raw = text if raw is None and not structural else raw
-        pieces.append(text)
-        provenance.append(
-            {
-                "field": None if structural else path,
-                "start": offset,
-                "end": offset + len(text),
-                "kind": kind,
-                "raw": raw,
-                "mapping": "separator" if structural else mapping,
-                "source_start": None if structural else 0,
-                "source_end": None if structural else len(raw),
-            }
-        )
-        offset += len(text)
-
-    def visit(node, path, kind="authored"):
+    def leaf(node):
+        if not isinstance(node, dict):
+            invalid()
         tag = node.get("type")
-        if tag in (
+        if tag in {
             "rich_text",
             "rich_text_section",
             "rich_text_list",
             "rich_text_quote",
             "rich_text_preformatted",
-        ):
-            if tag in ("rich_text_quote", "rich_text_preformatted"):
-                kind = "reference"
-            children = node.get("elements", [])
-            for i, child in enumerate(children):
-                if i and tag in ("rich_text", "rich_text_list"):
-                    append("\n", path, "separator")
-                visit(child, f"{path}.elements[{i}]", kind)
-        elif tag == "text":
-            append(node["text"], path + ".text", "reference" if node.get("style", {}).get("code") else kind)
+        }:
+            if not isinstance(node.get("elements"), list) or not node["elements"]:
+                invalid()
+            for child in node["elements"]:
+                leaf(child)
+        elif tag in {"text", "mrkdwn", "plain_text"}:
+            if not isinstance(node.get("text"), str):
+                invalid()
+            style = node.get("style", {})
+            if not isinstance(style, dict) or any(type(v) is not bool for v in style.values()):
+                invalid()
         elif tag == "user":
-            append(
-                "<@" + node["user_id"] + ">",
-                path + ".user_id",
-                kind,
-                raw=node["user_id"],
-                mapping="slack-user",
-            )
-        elif tag == "link":
-            append(node.get("text") or node["url"], path + (".text" if node.get("text") else ".url"), kind)
-        elif tag == "emoji":
-            append(":" + node["name"] + ":", path + ".name", kind, raw=node["name"], mapping="emoji")
+            identifier(node["user_id"])
+        elif tag in {"link", "emoji"}:
+            if not isinstance(node.get("url" if tag == "link" else "name"), str):
+                invalid()
+            if "text" in node and not isinstance(node["text"], str):
+                invalid()
         else:
-            raise SemanticError("unsupported authored rich_text element")
+            invalid()
 
-    for i, block in enumerate(event["blocks"]):
-        path = f"blocks[{i}]"
-        if i:
-            append("\n", "blocks", "separator")
-        if block.get("type") == "rich_text":
-            visit(block, path)
-        elif prior and block.get("type") == "markdown" and isinstance(block.get("text"), str):
-            append(block["text"], path + ".text", "authored")
-        elif (
-            prior
-            and block.get("type") == "section"
-            and not (set(block) - {"type", "block_id", "text", "expand"})
-            and isinstance(block.get("text"), dict)
-            and block["text"].get("type") in ("mrkdwn", "plain_text")
-            and isinstance(block["text"].get("text"), str)
-        ):
-            append(block["text"]["text"], path + ".text.text", "authored")
-        elif prior and block.get("type") == "context":
-            if (
-                set(block) - {"type", "block_id", "elements"}
-                or ("block_id" in block and not isinstance(block["block_id"], str))
-                or not isinstance(block.get("elements"), list)
-                or not block["elements"]
-            ):
-                raise SemanticError("unsupported prior context block")
-            for j, leaf in enumerate(block["elements"]):
-                if not isinstance(leaf, dict) or leaf.get("type") not in ("mrkdwn", "plain_text"):
-                    raise SemanticError("unsupported prior context leaf")
-                optional = "verbatim" if leaf["type"] == "mrkdwn" else "emoji"
-                if (
-                    set(leaf) - {"type", "text", optional}
-                    or not isinstance(leaf.get("text"), str)
-                    or (optional in leaf and type(leaf[optional]) is not bool)
-                ):
-                    raise SemanticError("unsupported prior context leaf")
-                if j:
-                    append("\n", path, "separator")
-                append(leaf["text"], f"{path}.elements[{j}].text", "authored")
+    text, blocks = event.get("text", ""), event.get("blocks", [])
+    if not isinstance(text, str) or not isinstance(blocks, list):
+        invalid()
+    for block in blocks:
+        if not isinstance(block, dict):
+            invalid()
+        tag = block.get("type")
+        if tag == "rich_text":
+            leaf(block)
+        elif tag == "markdown" and isinstance(block.get("text"), str):
+            if set(block) - {"type", "block_id", "text"}:
+                invalid()
+        elif tag == "section" and not (set(block) - {"type", "block_id", "text", "expand"}):
+            leaf(block.get("text"))
+        elif tag == "context" and not (set(block) - {"type", "block_id", "elements"}):
+            if not isinstance(block.get("elements"), list) or not block["elements"]:
+                invalid()
+            for child in block["elements"]:
+                if not isinstance(child, dict) or child.get("type") not in {"mrkdwn", "plain_text"}:
+                    invalid()
+                leaf(child)
         else:
-            raise SemanticError("unsupported prior block" if prior else "unsupported current block")
-    result = "".join(pieces)
-    for part in provenance:
-        mapping = part["mapping"]
-        if mapping == "separator":
-            continue
-        raw = part["raw"]
-        rendered = (
-            "<@" + raw + ">" if mapping == "slack-user" else ":" + raw + ":" if mapping == "emoji" else raw
-        )
-        if result[part["start"] : part["end"]] != rendered:
-            raise SemanticError("canonical source provenance does not roundtrip")
-    return result, tuple(provenance)
+            invalid()
+    return text, tuple(copy.deepcopy(blocks))
 
 
 def contextual_person(user_id, payload, team):
@@ -163,24 +99,24 @@ def contextual_person(user_id, payload, team):
         and payload.get("ok") is True
         and user.get("id") == user_id
         and user.get("team_id") == team
-        and type(user.get("is_bot")) is bool
+        and (user.get("is_bot") is None or type(user["is_bot"]) is bool)
         and isinstance(user.get("profile", {}), dict)
     ):
-        return result
+        raise Uncertain("invalid contextual identity metadata")
     profile = user.get("profile", {})
 
     def field(value):
-        return (
-            value
-            if isinstance(value, str) and len(value) <= 128 and not any(ord(c) < 32 for c in value)
-            else None
-        )
+        if value is not None and (
+            not isinstance(value, str) or len(value) > 128 or any(ord(c) < 32 for c in value)
+        ):
+            raise Uncertain("invalid contextual identity field")
+        return value
 
     result.update(
         username=field(user.get("name")),
         display_name=field(profile.get("display_name")),
         real_name=field(profile["real_name"] if "real_name" in profile else user.get("real_name")),
-        kind="bot" if user["is_bot"] else "human",
+        kind="unknown" if user.get("is_bot") is None else "bot" if user["is_bot"] else "human",
     )
     return result
 
@@ -212,7 +148,6 @@ class Bridge:
             runner = self.adapter.gateway_runner
             maps = [runner._primary_adapters(), *runner._profile_adapters_map().values()]
             from gateway.config import Platform
-            from slack_sdk.errors import SlackClientError
 
             adapter = next(
                 m[Platform.SLACK] for m in maps if Platform.SLACK in m and id(m[Platform.SLACK]) == witness[0]
@@ -226,16 +161,12 @@ class Bridge:
                 "display_name": None,
                 "real_name": None,
             }
-            person = fallback
-            try:
-                response = await adapter._team_clients[team].users_info(user=recipient.bot_user)
-                verified = contextual_person(recipient.bot_user, response, team)
-                if verified["kind"] == "bot":
-                    person = verified
-                    if "name" not in response["user"]:
-                        person["username"] = fallback["username"]
-            except (TimeoutError, SlackClientError, OSError):
-                pass
+            response = await adapter._team_clients[team].users_info(user=recipient.bot_user)
+            person = contextual_person(recipient.bot_user, response, team)
+            if person["kind"] != "bot":
+                raise Uncertain("invalid recipient metadata")
+            if "name" not in response["user"]:
+                person["username"] = fallback["username"]
             return recipient.bot_user, {key: value for key, value in person.items() if key != "kind"}
 
         async with asyncio.TaskGroup() as group:
@@ -244,8 +175,6 @@ class Bridge:
 
     async def context_people(self, bound, history, whoami):
         """Exact source-window people, via serving client only; never eligibility."""
-        from slack_sdk.errors import SlackClientError
-
         team = bound.event.thread.workspace
         if (
             self.adapter._team_bot_user_ids.get(team) != bound.recipient.bot_user
@@ -255,15 +184,14 @@ class Bridge:
             raise TopologyError("serving metadata client mismatch")
         client = self.adapter._team_clients[team]
         people = {user: {**fields, "kind": "bot"} for user, fields in whoami}
-        people[bound.event.sender] = bound.sender_metadata or contextual_person(bound.event.sender, {}, team)
+        if bound.sender_metadata is None:
+            raise Uncertain("missing sender metadata")
+        people[bound.event.sender] = bound.sender_metadata
         authors = {bound.event.sender, *(h.sender for h in history)}
 
         async def resolve(user):
-            try:
-                payload = await client.users_info(user=user)
-                return user, contextual_person(user, payload, team)
-            except (TimeoutError, SlackClientError, OSError):
-                return user, contextual_person(user, {}, team)
+            payload = await client.users_info(user=user)
+            return user, contextual_person(user, payload, team)
 
         async with asyncio.TaskGroup() as group:
             tasks = [group.create_task(resolve(user)) for user in sorted(authors - set(people))]

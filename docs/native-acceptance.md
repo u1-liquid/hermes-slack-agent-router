@@ -18,8 +18,8 @@ ruff check __init__.py hermes_slack_agent_router tests
 ruff format --check __init__.py hermes_slack_agent_router tests
 ```
 
-Use an isolated official Hermes v0.22.5 checkout at
-`bf0203a794a07aac3ff764972ab9087baa4e4f4e` for native integration. Replace the source
+Use an isolated official Hermes checkout at
+`f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab` for native integration. Replace the source
 path below with that prepared checkout. `HERMES_REQUIRE_NATIVE=1` makes missing
 native setup fail rather than silently skip.
 
@@ -37,17 +37,20 @@ PYTHONDONTWRITEBYTECODE=1 python -W error::ResourceWarning -m unittest discover 
 ```
 
 Set `TMPDIR` to a task-owned temporary directory if the default is unsuitable.
-Inspect reported skips: the separate installed-wheel and native Git-installation
-checks are not evidence of executed integration. The startup receiver is exercised
+Inspect reported skips: skipped installed-wheel checks are not evidence of
+executed integration. The startup receiver is exercised
 by its subprocess parent. The controlled suite does not call the live TypeSafe
 service or read private recordings.
 
 ## What the checks establish
 
-Core tests exercise exact Unicode source/provenance, same-context receiver
-isolation, whole-message admission at 0.499/0.500/0.501, confidence independent of
-probability, low-confidence scope without a second veto, optional priors and
-malformed dormant answers. Controlled HTTP tests exercise the official request
+Core tests exercise complete Unicode text and structured quote/code content,
+same-context receiver identity, native selected confidence independent of class
+probability, ties, malformed complete answers and exact UTF-8 fitting. Raw duplicate
+JSON members at envelope/answer/probability levels, including escaped-equivalent
+keys, must defer once with payload-free diagnostics and closed HTTP resources;
+valid YES/high-NO and normal envelope metadata remain controls.
+Controlled HTTP tests exercise the official request
 shape, request-local credentials, serialized request/response bounds, safe errors,
 no elapsed cutoff and resource closure on cancellation.
 
@@ -56,12 +59,23 @@ identity builders, authorization, mention/wake predicates and pending controls.
 SDK I/O, semantic answers and final model/busy receivers are controlled. The suite
 covers connected/foreign/duplicate/unserved participants, topology changes,
 transport-versus-runtime secret scope, exact root/latest-seven acquisition,
-short-tail cursor fill, projected-CURRENT admission, backfill/forgery isolation,
-queue/merge/FIFO/replay, true-edit cancellation and cooperative native shutdown.
-Positive paths must deliver nonempty exact scoped input alongside negative
-security controls. Complete native presentation is formatted from independently
-specified own CURRENT plus validated references; formatting CURRENT alone is not
-a valid prefix oracle when appended references make trailing whitespace internal.
+short-tail cursor fill, absent/null/self-root/reply thread coordinates with unequal
+peer settings, complete original payload/history preservation, busy/queue/merge/FIFO/replay,
+true-edit/caller/shutdown cancellation and in-flight unload pass-through. The
+fallback-to-respond rule suppresses only valid NO with native confidence >0.5;
+YES at any confidence, NO<=0.5 and plugin failures defer unchanged to native.
+Compare exact original handoff independently of ordinary native formatting and
+mention humanization. Native authorization/channel/mention/bot/pending gates remain
+authoritative; plugin pass-through does not guarantee a model response.
+
+The independently fictional 103 conversational inputs retain declared whole-message
+continuation decisions. Unresolved main-unknown/main-conflict/M9, the matching
+normal-name cases and both C-unresolved receivers expect fallback YES, not proven
+ownership or semantic accuracy. Demonstrably foreign and inert/courtesy/data
+negatives remain. The outgoing one-question rubric is audited through controlled
+HTTP separately from the injected decisions. Partial-CURRENT masks, projection/backfill restrictions and
+scope/prior-selector assertions are retired as user-superseded, not relabelled PASS.
+There is no compatibility fixture schema for the removed architecture.
 
 Passing these tests proves controlled protocol and native-boundary behavior, not
 classifier accuracy, genuine Slack delivery or deployment acceptance. Request
