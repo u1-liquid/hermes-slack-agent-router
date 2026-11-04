@@ -52,17 +52,23 @@ normal managed Gateway lifecycle for replacement activation.
 
 ## External processing and permissions
 
-Eligible complete text and supported structured Slack blocks, bounded history and
+Supported complete text and structured Slack blocks, bounded history and
 whitelisted participant metadata go to `https://api.typesafe.ai/v1/systemone` with
 `jev-latest`. Slack read permission is not external-processing consent. There is
 no plugin privacy classifier or per-channel egress configuration.
 
-Definitive native authorization and channel/mention eligibility precede classifier
-egress. Commands, bots/self, DMs/MPIMs and pending approval, clarification,
-confirmation or update controls keep their native path. Pass-through does not
-override any native gate, force a mention, call the model directly or grant action
-authority. Native history, media, sessions, pending queues and deduplication remain
-host-owned, including when classification fails.
+Middleware may classify before native admission: the plugin does not duplicate
+sender bot/self/human filtering, user/channel allowlists, ignored-channel rules or
+mention/wake policy. Bot, human and unknown sender kinds are factual context, not
+classification eligibility. Native Hermes applies its own admission when the
+plugin continues; a YES or failure cannot force a reply. Native Bolt self-event
+filtering may run before this middleware. Commands, unsupported DMs/MPIMs and
+pending approval, clarification, confirmation or update controls bypass inference.
+Profile activation must authorize external processing even for messages native
+policy would later deny; Slack permissions and allowlists do not provide that
+consent. Pass-through does not override any native gate, force a mention, call the
+model directly or grant action authority. Native history, media, sessions, pending
+queues and deduplication remain host-owned, including when classification fails.
 
 Credentials resolve per request in the serving runtime's native secret scope.
 TLS verification is enabled; redirects, environment proxies and automatic Jev

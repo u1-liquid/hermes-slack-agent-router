@@ -31,15 +31,20 @@ sufficient for YES even if other tasks in CURRENT belong elsewhere. Every
 nonexcluded receiver sees the full mixed original message, not a private task slice.
 Intent is not authorization, consent or guaranteed execution by any participant.
 
-## Native identity and authorization
+## Native identity and admission boundary
 
 Registration reads no configuration and requires no ready socket. Request-time
-`Bridge.bind` resolves workspace, human sender, receiving bot, native source,
-routed runtime and native session key. Commands, bots/self, DMs/MPIMs and native
+`Bridge.bind` resolves workspace, source sender ID, receiving bot, native source,
+routed runtime and native session key. Commands, unsupported DMs/MPIMs and native
 pending approval/clarification/confirmation/update controls bypass inference.
-The runner's definitive `_is_user_authorized_for_source` and actual native
-channel/mention/wake gates precede classifier egress. Binding identity reads can
-precede authorization; no history/model egress follows denied or unknown admission.
+The plugin does not call incoming-sender bot/human predicates or duplicate native
+user authorization, channel allowlist/ignored-channel or mention/wake gates.
+Supported ordinary messages may therefore reach history/metadata acquisition and
+Jev before native admission, regardless of sender kind or native policy. Native
+Hermes still enforces its own rules on continuation; Bolt self-event middleware
+may reject an event before the plugin runs. No sender is fabricated from bot_id.
+External-processing consent is a profile-activation responsibility, never inferred
+from Slack permissions or native allowlists.
 
 Participants are discovered from connected same-workspace primary/multiplexed
 adapters with live transport/runtime authorities. There is no configured registry
@@ -53,8 +58,11 @@ These witnesses are not a global transaction and cannot eliminate every ABA race
 
 Metadata is request-local, whitelisted exact ID/username/display_name/real_name
 and contextual kind, not an entire Slack profile. Unknown optional names remain
-null; genuine empty names remain empty. SDK failure/malformed or mismatched metadata
-aborts classification instead of pretending acquisition succeeded. Serving-client
+null; genuine empty names remain empty. Sender and history authors share bounded
+contextual lookup; there is no separate acquisition to prove a human. Bot/human/
+unknown kinds do not decide eligibility, and handoff evidence is not human-only.
+Recipient whoami still requires validated bot identity. SDK failure or malformed/
+mismatched metadata aborts classification instead of pretending acquisition succeeded. Serving-client
 identity and per-request secret isolation remain separate from semantic identity.
 
 ## Bounded context and exact byte fitting

@@ -38,30 +38,6 @@ class Gate:
         return False
 
     @staticmethod
-    async def native_policy(adapter, event, bot):
-        """Check the complete original message with the actual native channel gate."""
-        from plugins.platforms.slack.adapter import _slack_mention_detection_text
-
-        routing_text = _slack_mention_detection_text(event) or event.get("text", "") or ""
-        mentioned = bool(
-            (bot and f"<@{bot}>" in routing_text)
-            or adapter._slack_message_matches_mention_patterns(routing_text)
-        )
-        thread_ts = event.get("thread_ts")
-        return await adapter._channel_gate_allows(
-            channel_id=event["channel"],
-            routing_text=routing_text,
-            bot_uid=bot,
-            is_mentioned=mentioned,
-            is_thread_reply=bool(thread_ts and thread_ts != event["ts"]),
-            event_thread_ts=thread_ts,
-            user_id=event["user"],
-            team_id=event["team"],
-            is_dm=False,
-            force_process=False,
-        )
-
-    @staticmethod
     async def history(client, thread, cutoff) -> tuple[History, ...]:
         """Read newest replies, following older cursors only to fill a short tail.
 
@@ -225,8 +201,6 @@ class Gate:
             text, blocks = message_content(event)
         except (SemanticError, KeyError, TypeError):
             return self.unresolved("unsupported-current-composition")
-        if not await self.native_policy(adapter, event, bound.recipient.bot_user):
-            return False
         client = adapter._team_clients[thread.workspace]
         from slack_sdk.errors import SlackApiError, SlackClientError
 
@@ -305,7 +279,6 @@ class Gate:
                 if (
                     self.disposed
                     or getattr(adapter.gateway_runner, "_draining", False)
-                    or not adapter.gateway_runner._is_user_authorized_for_source(bound.source)
                     or await bridge.participants(bound) != topology
                 ):
                     return False
@@ -390,8 +363,6 @@ class Gate:
         async def evaluate(body):
             bound = await bridge.bind(body)
             if bridge.pending(bound):
-                return False
-            if not adapter.gateway_runner._is_user_authorized_for_source(bound.source):
                 return False
             topology = await bridge.participants(bound)
             excluded = await self.excludes(bound, adapter, bridge, topology)

@@ -67,6 +67,13 @@ YES at any confidence, NO<=0.5 and plugin failures defer unchanged to native.
 Compare exact original handoff independently of ordinary native formatting and
 mention humanization. Native authorization/channel/mention/bot/pending gates remain
 authoritative; plugin pass-through does not guarantee a model response.
+Supported bot, human and unknown-kind senders receive one whole-message ballot;
+controlled real HTTP exercises YES, NO=0.5 continuation and NO=0.501 suppression.
+Native allow_bots admits or rejects bots only after continuation. Native-denied
+user/channel allowlist, ignored-channel and mention-policy inputs still reach the
+ballot, while YES and classifier failure remain subject to real native denial.
+The suite retains Bolt's upstream self-event rejection and native control bypasses;
+it does not assert a pre-egress native-policy guarantee.
 
 The independently fictional 103 conversational inputs retain declared whole-message
 continuation decisions. Unresolved main-unknown/main-conflict/M9, the matching

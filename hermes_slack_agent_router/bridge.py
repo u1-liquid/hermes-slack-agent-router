@@ -129,7 +129,6 @@ class Bound:
     identity: object
     session_key: str
     native_event: dict
-    sender_metadata: dict | None = None
 
 
 class Bridge:
@@ -184,9 +183,6 @@ class Bridge:
             raise TopologyError("serving metadata client mismatch")
         client = self.adapter._team_clients[team]
         people = {user: {**fields, "kind": "bot"} for user, fields in whoami}
-        if bound.sender_metadata is None:
-            raise Uncertain("missing sender metadata")
-        people[bound.event.sender] = bound.sender_metadata
         authors = {bound.event.sender, *(h.sender for h in history)}
 
         async def resolve(user):
@@ -374,8 +370,8 @@ class Bridge:
             if info.get("ok") is not True or obj.get("id") != channel:
                 raise Uncertain("unverified conversation")
             channel_type = "im" if obj.get("is_im") else "mpim" if obj.get("is_mpim") else "channel"
-        if channel_type not in ("channel", "group") or adapter._is_ignored_channel(channel):
-            raise Uncertain("native conversation exemption")
+        if channel_type not in ("channel", "group"):
+            raise Uncertain("unsupported conversation")
         if kind == "file_shared":
             file_id = event.get("file_id")
             if not file_id:
@@ -397,15 +393,7 @@ class Bridge:
                 raise Uncertain("conflicting file sender")
             event.update(user=sender, ts=shares[0]["ts"], thread_ts=shares[0].get("thread_ts"), text="")
             provenance = "file_shared"
-        sender = event.get("user")
-        if not sender or sender == bot or adapter._event_declares_bot_sender(event):
-            raise Uncertain("native bot/self/unknown sender")
-        payload = await client.users_info(user=sender)
-        user = payload.get("user") or {}
-        if payload.get("ok") is not True or user.get("id") != sender or user.get("is_bot") is not False:
-            raise Uncertain("no positive human evidence")
-        if adapter._parse_users_info(payload, sender)[1]:
-            raise Uncertain("native bot identity")
+        sender = identifier(event["user"])
         text = event.get("text", "")
         probe = re.sub(r"^\s*<@" + re.escape(bot) + r">\s*", "", text).lstrip()
         if probe.startswith("/"):
@@ -441,5 +429,4 @@ class Bridge:
             identity,
             session_key,
             copy.deepcopy(event),
-            contextual_person(sender, payload, team),
         )

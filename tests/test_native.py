@@ -680,24 +680,33 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("UDROP", [p["user_id"] for p in batch["state"]["people"]])
         self.model.assert_awaited_once()
 
-    async def test_native_authorization_channel_mention_controls_before_egress(self):
+    async def test_native_denial_after_ballot_and_failure_continuation(self):
+        from hermes_slack_agent_router.jev import JevError
+
         baseline = dict(self.adapter.config.extra)
         for options, text, allowed in (
             ({"allowed_users": ["UOTHER"]}, "<@UBETA> explain", False),
             ({"allowed_channels": ["COTHER"]}, "<@UBETA> explain", False),
+            ({"ignored_channels": ["CDEMO"]}, "<@UBETA> explain", False),
             ({"ignore_other_user_mentions": True}, "<@UALPHA> explain", False),
             ({"strict_mention": True, "require_mention": True}, "explain", False),
             ({"thread_require_mention": True, "require_mention": False}, "explain", False),
             ({"require_mention": False}, "explain", True),
             ({"require_mention": True}, "explain", True),
         ):
-            with self.subTest(options=options):
-                self.adapter.config.extra = {**baseline, **options}
-                self.model.reset_mock()
-                self.gate.jev.ask.reset_mock()
-                await self.assert_passed(self.message(text))
-                self.assertEqual(self.gate.jev.ask.await_count, int(allowed))
-                self.assertEqual(self.model.await_count, int(allowed))
+            for failure in (False, True):
+                with self.subTest(options=options, failure=failure):
+                    self.adapter.config.extra = {**baseline, **options}
+                    self.model.reset_mock()
+                    self.gate.jev.ask.reset_mock()
+                    self.gate.jev.ask.side_effect = JevError("controlled failure") if failure else None
+                    body = self.message(text)
+                    await self.assert_passed(body)
+                    self.gate.jev.ask.assert_awaited_once()
+                    batch = self.gate.jev.ask.await_args.args[0]
+                    self.assertEqual(set(batch["questions"]), {"response"})
+                    self.assertEqual(batch["state"]["conversation"]["records"][-1]["text"], text)
+                    self.assertEqual(self.model.await_count, int(allowed))
         self.adapter.config.extra = baseline
 
     async def test_native_authorization_transport_home_not_routed_runtime(self):
@@ -716,8 +725,9 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.adapter.config.extra["allowed_users"] = ["UOTHER"]
         self.peer.config.extra["allowed_users"] = ["UHUMAN"]
         await self.assert_passed(body)
-        self.gate.jev.ask.assert_not_awaited()
+        self.gate.jev.ask.assert_awaited_once()
         self.model.assert_not_awaited()
+        self.gate.jev.ask.reset_mock()
         self.adapter.config.extra["allowed_users"] = ["UHUMAN"]
         self.peer.config.extra["allowed_users"] = ["UOTHER"]
         await self.assert_passed(self.message("<@UBETA> Explain the full diagram; include all context."))
@@ -725,9 +735,85 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.model.assert_awaited_once()
         self.assertEqual(self.model.await_args.args[0].source.profile, "peer")
 
-    async def test_native_bot_self_dm_mpim_and_commands_keep_ordinary_controls(self):
+    async def test_sender_kind_is_context_not_admission_with_real_http(self):
+        import httpx
+
+        from hermes_slack_agent_router.jev import JevClient
+
+        (self.home / ".env").write_text("TYPESAFE_API_KEY=fictional-sender-policy\n")
+        self.gate.jev = JevClient()
+        native = httpx.AsyncClient
+        requests, clients = [], []
+        choice, confidence = "yes", 1.0
+
+        async def respond(request):
+            batch = json.loads(request.content)
+            requests.append(batch)
+            return httpx.Response(200, json=controlled_answers(batch, choice, confidence))
+
+        def client(**kwargs):
+            value = native(transport=httpx.MockTransport(respond), **kwargs)
+            clients.append(value)
+            return value
+
+        directory = self.client.users_info.side_effect
+        sender_kind = "human"
+
+        async def names(*, user):
+            value = await directory(user=user)
+            if user == "UHUMAN":
+                value["user"]["is_bot"] = {"human": False, "bot": True, "unknown": None}[sender_kind]
+            return value
+
+        self.client.users_info.side_effect = names
+        with patch("httpx.AsyncClient", side_effect=client):
+            for sender_kind, changes in (
+                ("human", {}),
+                ("bot", {"bot_id": "BMONITOR", "subtype": "bot_message"}),
+                ("bot", {}),
+                ("unknown", {}),
+            ):
+                for allow_bots in ("all", "none"):
+                    self.adapter.config.extra["allow_bots"] = allow_bots
+                    os.environ["SLACK_ALLOW_BOTS"] = allow_bots
+                    self.assertEqual(self.adapter._slack_allow_bots(), allow_bots)
+                    # Native identity cache is fixture-local; do not reuse a prior kind.
+                    self.adapter._user_is_bot_cache.clear()
+                    for choice, confidence, suppressed in (
+                        ("yes", 1.0, False),
+                        ("no", 0.5, False),
+                        ("no", 0.501, True),
+                    ):
+                        with self.subTest(
+                            kind=sender_kind,
+                            changes=changes,
+                            allow=allow_bots,
+                            choice=choice,
+                            confidence=confidence,
+                        ):
+                            self.model.reset_mock()
+                            before = len(requests)
+                            body = self.message(
+                                "<@UBETA> Explain all of this.\n\nKeep the full body.", **changes
+                            )
+                            if suppressed:
+                                await self.assert_suppressed(body)
+                            else:
+                                await self.assert_passed(body)
+                            self.assertEqual(len(requests), before + 1)
+                            batch = requests[-1]
+                            self.assertEqual(set(batch["questions"]), {"response"})
+                            current = batch["state"]["conversation"]["records"][-1]
+                            self.assertEqual(current["text"], body["event"]["text"])
+                            self.assertEqual(current["sender"]["kind"], sender_kind)
+                            self.assertEqual(
+                                self.model.await_count,
+                                int(not suppressed and (sender_kind != "bot" or allow_bots == "all")),
+                            )
+        self.assertTrue(all(value.is_closed for value in clients))
+
+    async def test_native_self_dm_mpim_and_commands_keep_ordinary_controls(self):
         for changes, text in (
-            ({"bot_id": "BMONITOR", "subtype": "bot_message"}, "monitor alert"),
             ({"user": "UBETA"}, "self"),
             ({"channel_type": "im"}, "DM"),
             ({"channel_type": "mpim"}, "MPIM"),
@@ -1487,11 +1573,14 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                         closed.set()
 
                 async def info(*, user, held=held, phase=phase, block=block):
-                    if not held[0] and (
-                        (phase == "bind" and user == "UHUMAN") or (phase == "metadata" and user == "UBETA")
-                    ):
+                    if not held[0] and phase == "metadata" and user == "UBETA":
                         await block()
                     return await directory(user=user)
+
+                async def conversation(*, channel, held=held, phase=phase, block=block):
+                    if not held[0] and phase == "bind":
+                        await block()
+                    return {"ok": True, "channel": {"id": channel, "is_im": False, "is_mpim": False}}
 
                 async def page(held=held, phase=phase, block=block, **kwargs):
                     if not held[0] and phase == "history" and "latest" in kwargs:
@@ -1499,8 +1588,11 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                     return {"ok": True, "messages": [{"ts": "100.001", "user": "UHUMAN", "text": "anchor"}]}
 
                 self.client.users_info.side_effect = info
+                self.client.conversations_info.side_effect = conversation
                 self.client.conversations_replies.side_effect = page
                 body = self.message("<@UBETA> OLD_MARKER")
+                if phase == "bind":
+                    body["event"].pop("channel_type")
                 edited = copy.deepcopy(body)
                 edited["event"] = {
                     "type": "message",
