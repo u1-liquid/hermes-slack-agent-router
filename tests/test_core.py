@@ -7,12 +7,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hermes_slack_agent_router.policy import Recipient, Thread
-
-A = Recipient("TDEMO", "UALPHA", "alpha")
-B = Recipient("TDEMO", "UBETA", "beta")
-KEY = Thread("TDEMO", "CDEMO", "100.001")
-
 
 class CoreTests(unittest.TestCase):
     def test_fresh_process_registration_without_config_or_initialization(self):
@@ -55,10 +49,3 @@ class CoreTests(unittest.TestCase):
         ctx.register_platform_handler.assert_called_once()
         # Actual factory activation is mandatory in the separate native/discovery/wheel lane.
         ctx.on_unload.call_args.args[0]()
-
-    def test_literal_identity_validation(self):
-        for value in ("100", "100.001 extra", "1e2", 100.001):
-            with self.assertRaises(ValueError):
-                Thread("TDEMO", "CDEMO", value)
-        with self.assertRaises(ValueError):
-            Recipient("TDEMO", "<@UALPHA>", "alpha")

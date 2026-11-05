@@ -1,11 +1,15 @@
-"""Controlled source projection, wire bounds and official transport checks."""
+"""Whole-message context, exact wire fitting and controlled official HTTP protocol."""
 
 import asyncio
+import copy
 import json
+import sys
 import unittest
+from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
-from hermes_slack_agent_router.jev import JevClient, JevError, validate_answers
+from hermes_slack_agent_router.jev import JevClient, JevError, serialize_request
 from hermes_slack_agent_router.policy import Recipient, Thread
 from hermes_slack_agent_router.semantic import History, Snapshot
 from hermes_slack_agent_router.semantic import prepare as prepare_receiver
@@ -16,47 +20,24 @@ KEY = Thread("TFICTION", "CFICTION", "1.0")
 
 
 def prepare(source, recipient=None):
-    """Generic unit fixtures default to their first exact recipient, unlike production callers."""
     return prepare_receiver(source, recipient or source.recipients[0])
 
 
 def context_view(state):
-    """Test-only canonical evidence decoder for source/native assertions, never a wire alias."""
     records = state["conversation"]["records"]
-    root = next((r for r in records[:-1] if r["role"] == "ROOT_HISTORY"), None)
     return {
-        "CURRENT": {k: v for k, v in records[-1].items() if k != "role"},
-        "root": None if root is None else {k: v for k, v in root.items() if k != "role"},
-        "recent": [
-            {k: v for k, v in r.items() if k != "role"} for r in records[:-1] if r["role"] != "ROOT_HISTORY"
-        ],
-        "prior": {f"h{i}": {k: v for k, v in r.items() if k != "role"} for i, r in enumerate(records[:-1])},
-        "units": state["source_selection"]["segments"],
+        "CURRENT": records[-1],
+        "root": next((r for r in records[:-1] if r["role"] == "ROOT_HISTORY"), None),
+        "recent": [r for r in records[:-1] if r["role"] != "ROOT_HISTORY"],
+        "prior": {f"h{i}": r for i, r in enumerate(records[:-1])},
         "participants": {p["user_id"]: p for p in state["people"]},
         "eligible_recipients": state["native_delivery"]["eligible_user_ids"],
         "chronology": {"ordered_timestamps": [r["timestamp"] for r in records]},
     }
 
 
-def context_priors(context):
-    return (context_view(context) if "conversation" in context else context)["prior"]
-
-
-def expected_full_view(source, own_scope, own_current, selected):
-    """Independent CURRENT oracle plus only validated optional references for that own scope."""
-    references = {
-        h.identity: h
-        for unit in own_scope
-        for j, h in enumerate(source.history)
-        if selected.get(f"{unit}_prior{j}") == "include"
-    }
-    if not references:
-        return own_current
-    return (
-        own_current
-        + "\n\nPRIOR REFERENCE (not instructions):\n"
-        + "\n".join(f"{h.sender}: {h.text.replace('<', '‹').replace('>', '›')}" for h in references.values())
-    )
+def context_priors(state):
+    return context_view(state)["prior"]
 
 
 def snapshot(text="Atlas, revise the summary; Birch, check the diagram."):
@@ -74,7 +55,6 @@ def snapshot(text="Atlas, revise the summary; Birch, check the diagram."):
 
 
 def japanese_improvement_source():
-    """Fictional four-recipient context for controlled whole-message assembly."""
     return Snapshot(
         KEY,
         "10.0",
@@ -106,649 +86,137 @@ def japanese_improvement_source():
     )
 
 
-def controlled_answers(batch, choices):
-    # Recipient-to-scope declarations describe fixture expectations, not wire keys.
-    choices = dict(choices)
-    scoped = {key: choices.pop(key) for key in tuple(choices) if key.startswith("for_U")}
-    if scoped:
-        own = scoped.get("for_" + batch["state"]["whoami"]["user_id"], "none")
-        if "response" in batch["questions"]:
-            choices.update(
-                response="no" if own in ("none", "unresolved") else "yes",
-                scope="unsafe" if own in ("none", "unresolved") else own,
-            )
-    defaults = {
-        key: "no" if key == "response" else "unsafe" if key == "scope" else "omit"
-        for key in batch["questions"]
-    }
-    if set(choices) - set(defaults):
-        raise AssertionError("obsolete or unknown controlled fixture keys")
-    defaults.update(choices)
+def controlled_answers(batch, choice="yes", confidence=1.0):
+    assert set(batch["questions"]) == {"response"}
     return {
         "answers": {
-            name: {
+            "response": {
                 "type": "choice",
-                "choice": defaults[name],
-                "confidence": 1.0,
-                "probabilities": {key: float(key == defaults[name]) for key in q["criteria"]},
+                "choice": choice,
+                "confidence": confidence,
+                "probabilities": {"yes": float(choice == "yes"), "no": float(choice == "no")},
             }
-            for name, q in batch["questions"].items()
         }
     }
 
 
-def two_topic_answers(batch):
-    return controlled_answers(
-        batch,
-        {
-            "for_UATLAS": "u0",
-            "for_UBIRCH": "u1",
-            "u0_prior0": "include",
-            "u1_prior1": "include",
-        },
-    )
-
-
-class WireNormalization(unittest.TestCase):
-    def test_native_wire_maxima_and_response_distributions(self):
-        from hermes_slack_agent_router.bridge import canonical_text
-        from hermes_slack_agent_router.jev import serialize_request
-
-        recipients = (A, B, Recipient("TFICTION", "UCEDAR", "cedar"), Recipient("TFICTION", "UDUNE", "dune"))
-        for character in ("🦊", "\x00", '"', "\\"):
-
-            def record(text, fragmented=False):
-                event = {"text": text}
-                if fragmented:
-                    event["blocks"] = [
-                        {
-                            "type": "rich_text",
-                            "elements": [
-                                {
-                                    "type": "rich_text_section",
-                                    "elements": [{"type": "text", "text": c} for c in text],
-                                }
-                            ],
-                        }
-                    ]
-                canonical, provenance = canonical_text(event)
-                self.assertEqual(canonical, text)
-                return canonical, event, provenance
-
-            current, original, provenance = record((character * 999 + ";") * 6, True)
-            history = []
-            for i in range(8):
-                text, event, ranges = record(character * 6000, i % 2 == 0)
-                history.append(History(f"{i + 1}.0", f"UAUTHOR{i}", text, event, ranges))
-            source = Snapshot(
-                KEY,
-                "9.0",
-                "UCURRENT",
-                current,
-                tuple(history),
-                recipients,
-                original,
-                provenance,
-                recipient_whoami=tuple(
-                    (
-                        r.bot_user,
-                        {
-                            "user_id": r.bot_user,
-                            "username": "🦊" * 128,
-                            "display_name": "🦊" * 128,
-                            "real_name": "🦊" * 128,
-                        },
-                    )
-                    for r in recipients
-                ),
-                context_people=tuple(
-                    (
-                        user,
-                        {
-                            "user_id": user,
-                            "username": "🦊" * 128,
-                            "display_name": "🦊" * 128,
-                            "real_name": "🦊" * 128,
-                            "kind": "bot" if user in {r.bot_user for r in recipients} else "human",
-                        },
-                    )
-                    for user in [
-                        "UCURRENT",
-                        *[f"UAUTHOR{i}" for i in range(8)],
-                        *[r.bot_user for r in recipients],
-                    ]
-                ),
-            )
-            batch = prepare(source)
-            self.assertEqual(len(batch["state"]["people"]), 13)
-            raw = serialize_request(batch)
-            response = json.dumps(controlled_answers(batch, {}), ensure_ascii=False, allow_nan=False).encode()
-            self.assertLessEqual(len(raw), JevClient.request_limit)
-            self.assertLessEqual(len(response), JevClient.limit)
-            self.assertTrue(all(len(q["criteria"]) <= 255 for q in batch["questions"].values()))
-            self.assertEqual(
-                "".join(
-                    current[u["start"] : u["end"]]
-                    for u in batch["state"]["source_selection"]["segments"].values()
-                ),
-                current,
-            )
-            print(
-                f"SIMPLE_MAX codepoint={ord(character)} request={len(raw)} response={len(response)} questions={len(batch['questions'])}"
-            )
-
-
-class APITransportTests(unittest.IsolatedAsyncioTestCase):
-    async def test_coherent_response_actual_http(self):
-        import sys
-        from types import SimpleNamespace
-
-        import httpx
-
-        source = snapshot("No, that proposal is unacceptable; explain the effect.")
-        captured = []
-        factory = httpx.AsyncClient
-
-        async def respond(request):
-            batch = json.loads(request.content)
-            captured.append(batch)
-            self.assertEqual({k for k in batch["questions"] if "_prior" not in k}, {"response", "scope"})
-            self.assertEqual(set(batch["questions"]["scope"]["criteria"]), {"u0", "u1", "u0+u1", "unsafe"})
-            raw = controlled_answers(batch, {"response": "yes", "scope": "u0+u1"})
-            raw["answers"]["response"]["confidence"] = 0.701
-            raw["answers"]["scope"]["confidence"] = 0.01
-            return httpx.Response(200, json=raw)
-
-        with (
-            patch.dict(
-                sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=lambda name: "fictional")}
-            ),
-            patch(
-                "httpx.AsyncClient",
-                side_effect=lambda **kw: factory(transport=httpx.MockTransport(respond), **kw),
-            ),
-        ):
-            answer = await JevClient().ask(prepare(source, A))
-        from hermes_slack_agent_router.semantic import assemble
-
-        self.assertEqual(assemble(source, A, answer).view(A), source.text)
-        self.assertEqual(len(captured), 1)
-
-    async def test_chronology_people_actual_http(self):
-        import sys
-        from dataclasses import replace
-        from types import SimpleNamespace
-
-        import httpx
-
-        source = replace(
-            snapshot("Could you explain this? The units matter."),
-            sender="UHUMAN",
-            context_people=(
-                (
-                    "UHUMAN",
-                    {
-                        "user_id": "UHUMAN",
-                        "username": "fiction.human",
-                        "display_name": "",
-                        "real_name": "共通名",
-                        "kind": "human",
-                    },
-                ),
-            ),
+class ContextTests(unittest.TestCase):
+    def test_same_whole_context_across_exact_receivers(self):
+        source = snapshot()
+        first, second = prepare(source, A), prepare(source, B)
+        self.assertEqual(first["questions"], second["questions"])
+        self.assertEqual(context_view(first["state"]), context_view(second["state"]))
+        self.assertEqual(first["state"]["whoami"]["user_id"], A.bot_user)
+        self.assertEqual(second["state"]["whoami"]["user_id"], B.bot_user)
+        self.assertEqual(
+            context_view(first["state"])["chronology"]["ordered_timestamps"], ["1.0", "2.0", "3.0"]
         )
-        captured = []
-        factory = httpx.AsyncClient
 
-        async def respond(request):
-            batch = json.loads(request.content)
-            context = context_view(batch["state"])
-            captured.append(batch)
-            self.assertEqual(context["CURRENT"]["sender"], context["participants"]["UHUMAN"])
-            self.assertEqual(context["CURRENT"]["sender"]["display_name"], "")
-            self.assertEqual(context["chronology"]["ordered_timestamps"], ["1.0", "2.0", "3.0"])
-            self.assertEqual(context["CURRENT"]["order"], 2)
-            self.assertEqual(context["root"]["order"], 0)
-            self.assertEqual(set(batch["questions"]["response"]["criteria"]), {"yes", "no"})
-            return httpx.Response(200, json=controlled_answers(batch, {"response": "yes", "scope": "u0+u1"}))
-
-        with (
-            patch.dict(
-                sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=lambda name: "fictional")}
-            ),
-            patch(
-                "httpx.AsyncClient",
-                side_effect=lambda **kw: factory(transport=httpx.MockTransport(respond), **kw),
-            ),
-        ):
-            for recipient in (A, B):
-                await JevClient().ask(prepare(source, recipient))
-        self.assertEqual(context_view(captured[0]["state"]), context_view(captured[1]["state"]))
-        for history in (
-            (History("3.0", "UHUMAN", "current collision"),),
-            (History("4.0", "UHUMAN", "future"),),
-        ):
-            with self.assertRaises(ValueError):
-                prepare(replace(source, history=history))
-
-    async def test_response_unit_actual_http_single_judgment(self):
-        import sys
-        from types import SimpleNamespace
-
-        import httpx
-
-        from hermes_slack_agent_router.semantic import assemble
-
-        factory = httpx.AsyncClient
-        confidence = 0.499
-        source = snapshot("Atlas, why is the scale different? The units matter.")
-
-        async def respond(request):
-            batch = json.loads(request.content)
-            self.assertEqual({k for k in batch["questions"] if "_prior" not in k}, {"response", "scope"})
-            self.assertNotIn("self_recipient", batch["questions"])
-            self.assertNotIn("projection", batch["questions"])
-            raw = {"answers": {}}
-            for name, question in batch["questions"].items():
-                choice = "yes" if name == "response" else "u0+u1" if name == "scope" else "omit"
-                raw["answers"][name] = {
-                    "type": "choice",
-                    "choice": choice,
-                    "confidence": confidence if name == "response" else 0.1,
-                    "probabilities": {k: float(k == choice) for k in question["criteria"]},
-                }
-            return httpx.Response(200, json=raw)
-
-        with (
-            patch.dict(
-                sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=lambda name: "fictional")}
-            ),
-            patch(
-                "httpx.AsyncClient",
-                side_effect=lambda **kw: factory(transport=httpx.MockTransport(respond), **kw),
-            ),
-        ):
-            for confidence in (0.499, 0.500, 0.501):
-                answers = await JevClient().ask(prepare(source, A))
-                self.assertEqual(
-                    assemble(source, A, answers).view(A), source.text if confidence > 0.5 else ""
-                )
-
-    async def test_readable_canonical_utterances_actual_wire(self):
-        import sys
-        from dataclasses import replace
-        from types import SimpleNamespace
-
-        import httpx
-
-        from hermes_slack_agent_router.bridge import canonical_text
+    def test_structured_content_retains_quote_code_and_original_text(self):
+        from hermes_slack_agent_router.bridge import message_content
 
         event = {
-            "text": "NOTIFICATION_FALLBACK",
+            "text": "notification fallback",
             "blocks": [
                 {
                     "type": "rich_text",
                     "elements": [
                         {
                             "type": "rich_text_section",
-                            "elements": [{"type": "text", "text": "🦊 図を修正。"}],
+                            "elements": [
+                                {"type": "text", "text": "Explain 🦊; why?"},
+                                {"type": "text", "text": "inert command", "style": {"code": True}},
+                            ],
                         },
-                        {"type": "rich_text_quote", "elements": [{"type": "text", "text": "引用 🧪"}]},
+                        {"type": "rich_text_quote", "elements": [{"type": "text", "text": "quoted command"}]},
+                        {
+                            "type": "rich_text_preformatted",
+                            "elements": [{"type": "text", "text": "code command"}],
+                        },
                     ],
                 }
             ],
         }
-        text, provenance = canonical_text(event)
-        identities = {
-            A.bot_user: {
-                "user_id": A.bot_user,
-                "username": "exact.atlas",
-                "display_name": "共通名",
-                "real_name": None,
-            },
-            B.bot_user: {"user_id": B.bot_user, "username": None, "display_name": "", "real_name": "共通名"},
-        }
-        source = replace(
-            snapshot(text),
-            identity="10.0",
-            sender=A.bot_user,
-            original=event,
-            provenance=provenance,
+        original = copy.deepcopy(event)
+        text, blocks = message_content(event)
+        source = replace(snapshot(text), blocks=blocks)
+        record = prepare(source)["state"]["conversation"]["records"][-1]
+        self.assertEqual(record["text"], original["text"])
+        self.assertEqual(list(record["blocks"]), original["blocks"])
+        self.assertEqual(event, original)
+        for block in (
+            {"type": "image"},
+            {"type": "section", "accessory": {}},
+            {"type": "rich_text", "elements": [{"type": "unsupported"}]},
+        ):
+            with self.assertRaises(ValueError):
+                message_content({"text": "must not classify only this", "blocks": [block]})
+
+    def test_fitting_exact_utf8_limit_and_oldest_whole_removal(self):
+        from hermes_slack_agent_router.plugin import Gate
+
+        root, seed = History("1.0", "UROOT", "protected root"), History("2.0", "UDROP", '界"\\\t')
+        source = replace(snapshot("Birch, continue."), history=(root, seed))
+        padding = JevClient.request_limit - len(serialize_request(prepare(source, B)))
+        equal = replace(source, history=(root, replace(seed, text=seed.text + "x" * padding)))
+        self.assertEqual(len(serialize_request(prepare(equal, B))), 524288)
+        self.assertEqual(Gate.fit(equal, B)[0], equal)
+        above = replace(equal, history=(root, replace(equal.history[1], text=equal.history[1].text + "x")))
+        fitted, batch = Gate.fit(above, B)
+        self.assertEqual(fitted.history, (root,))
+        self.assertEqual(fitted.text, source.text)
+        self.assertEqual([r["order"] for r in batch["state"]["conversation"]["records"]], [0, 1])
+        huge = replace(
+            source,
+            identity="5.0",
             history=(
-                History("1.0", B.bot_user, "正準 root 🦊", {"text": "HIDDEN_ROOT_FALLBACK"}),
-                *tuple(
-                    History(f"{i}.0", "UFABLE" if i % 2 else B.bot_user, f"正準 prior {i}")
-                    for i in range(2, 9)
-                ),
+                replace(root, text="r" * 300000),
+                History("2.0", "UDROP", "a" * 300000),
+                History("3.0", "UDROPTWO", "b" * 300000),
+                History("4.0", "UKEEP", "keep"),
             ),
-            recipient_whoami=tuple(identities.items()),
         )
-        sent = []
-        factory = httpx.AsyncClient
-
-        async def respond(request):
-            batch = json.loads(request.content)
-            sent.append(batch)
-            context = context_view(batch["state"])
-            self.assertEqual(
-                context["CURRENT"],
-                {
-                    "timestamp": source.identity,
-                    "source_event_identity": source.identity,
-                    "sender": {**identities[source.sender], "kind": "unknown"},
-                    "order": 8,
-                    "text": source.text,
-                    "provenance": context["CURRENT"]["provenance"],
-                },
-            )
-            self.assertEqual(context["root"]["timestamp"], "1.0")
-            self.assertEqual(context["root"]["text"], "正準 root 🦊")
-            self.assertEqual(context["root"]["sender"], {**identities[B.bot_user], "kind": "unknown"})
-            self.assertEqual([r["timestamp"] for r in context["recent"]], [f"{i}.0" for i in range(2, 9)])
-            self.assertEqual(context["recent"][1]["sender"], context["participants"]["UFABLE"])
-            self.assertEqual(context["recent"][0]["sender"]["display_name"], "")
-            self.assertEqual(
-                [r["timestamp"] for r in context["prior"].values()], [f"{i}.0" for i in range(1, 9)]
-            )
-            self.assertIn("conversation.records[0]", batch["questions"]["u0_prior0"]["instructions"])
-            self.assertIn("conversation.records[7]", batch["questions"]["u0_prior7"]["instructions"])
-            self.assertEqual(set(context["participants"]), {*identities, "UFABLE"})
-            self.assertEqual(context["CURRENT"]["text"], text)
-            self.assertTrue(context["units"]["u1"]["quoted"])
-            self.assertNotIn("FALLBACK", request.content.decode())
-            self.assertIn("complete CURRENT", batch["questions"]["response"]["instructions"]["question"])
-            self.assertEqual(set(batch["questions"]["response"]["criteria"]), {"yes", "no"})
-            self.assertNotIn("u1_response", batch["questions"])  # quoted source is inert
-            return httpx.Response(200, json=controlled_answers(batch, {"response": "yes", "scope": "u0"}))
-
-        with (
-            patch.dict(
-                sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=lambda name: "fictional")}
-            ),
-            patch(
-                "httpx.AsyncClient",
-                side_effect=lambda **kw: factory(transport=httpx.MockTransport(respond), **kw),
-            ),
-        ):
-            for receiver in (A, B):
-                await JevClient().ask(prepare(source, receiver))
-        self.assertEqual(context_view(sent[0]["state"]), context_view(sent[1]["state"]))
-        unknown = replace(source, sender="UHUMAN")
-        self.assertEqual(
-            prepare(unknown)["state"]["conversation"]["records"][-1]["sender"],
-            {
-                "user_id": "UHUMAN",
-                "username": None,
-                "display_name": None,
-                "real_name": None,
-                "kind": "unknown",
-            },
-        )
-        overlap = context_view(prepare(snapshot())["state"])
-        self.assertNotIn(overlap["root"]["timestamp"], [r["timestamp"] for r in overlap["recent"]])
-
-    def test_unit_question_is_response_membership_not_executable_work(self):
-        batch = prepare(snapshot())
-        question = batch["questions"]["response"]
-        self.assertIn("necessary declarative rejection", json.dumps(question["instructions"]))
-        self.assertIn("same-task", json.dumps(question["instructions"]))
-        self.assertIn("independent own response", json.dumps(question["instructions"]))
-        self.assertIn("foreign, unresolved", question["criteria"]["no"]["meaning"])
-        self.assertNotIn("projection", batch["questions"])
-
-    async def test_explicit_whoami_self_scope_actual_wire(self):
-        import sys
-        from types import SimpleNamespace
-
-        import httpx
-
-        native = httpx.AsyncClient
-        captured = []
-        expected_whoami = {
-            user: {"user_id": user, "username": None, "display_name": None, "real_name": None}
-            for user in ("UATLAS", "UBIRCH")
-        }
-
-        async def respond(request):
-            batch = json.loads(request.content)
-            captured.append(batch)
-            user = batch["state"]["whoami"]["user_id"]
-            self.assertEqual(batch["state"]["whoami"], expected_whoami[user])
-            question = batch["questions"]["response"]
-            self.assertIn("whoami", json.dumps(question["instructions"]))
-            self.assertEqual(set(question["criteria"]), {"yes", "no"})
-            self.assertIn("scope", batch["questions"])
-            self.assertNotIn("self_recipient", batch["questions"])
-            self.assertNotIn("projection", batch["questions"])
-            self.assertIn("conversation", batch["state"])
-            self.assertFalse(any(k.startswith("self_U") for k in batch["questions"]))
-            return httpx.Response(200, json=two_topic_answers(batch))
-
-        with (
-            patch.dict(
-                sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=lambda name: "fictional")}
-            ),
-            patch(
-                "httpx.AsyncClient",
-                side_effect=lambda **kw: native(transport=httpx.MockTransport(respond), **kw),
-            ),
-        ):
-            for receiver in (A, B):
-                await JevClient().ask(prepare(snapshot(), receiver))
-            from dataclasses import replace
-
-            expected_whoami = {
-                "UATLAS": {
-                    "user_id": "UATLAS",
-                    "username": "exact.handle",
-                    "display_name": "",
-                    "real_name": "別の実名",
-                },
-                "UBIRCH": {
-                    "user_id": "UBIRCH",
-                    "username": "other.handle",
-                    "display_name": "こはる",
-                    "real_name": None,
-                },
-            }
-            for receiver in (A, B):
-                await JevClient().ask(
-                    prepare(replace(snapshot(), recipient_whoami=tuple(expected_whoami.items())), receiver)
+        huge = replace(
+            huge,
+            context_people=tuple(
+                (
+                    u,
+                    {
+                        "user_id": u,
+                        "username": u,
+                        "display_name": None,
+                        "real_name": None,
+                    },
                 )
-        self.assertEqual(len(captured), 4)
-        self.assertEqual(context_view(captured[0]["state"]), context_view(captured[1]["state"]))
-
-    async def test_exact_literal_unit_bodies_and_actual_paths_reach_http(self):
-        import sys
-        from dataclasses import replace
-        from types import SimpleNamespace
-
-        import httpx
-
-        from hermes_slack_agent_router.bridge import canonical_text
-        from hermes_slack_agent_router.semantic import assemble
-
-        authored = '🦊 図を直して；要約 "A\\B" を直して。'
-        events = (
-            (
-                {"text": authored + "\n> 引用 🧪\nThanks."},
-                ["🦊 図を直して；", '要約 "A\\B" を直して。\n', "> 引用 🧪\n", "Thanks."],
-            ),
-            (
-                {
-                    "blocks": [
-                        {
-                            "type": "rich_text",
-                            "elements": [
-                                {
-                                    "type": "rich_text_section",
-                                    "elements": [{"type": "text", "text": authored}],
-                                },
-                                {
-                                    "type": "rich_text_quote",
-                                    "elements": [{"type": "text", "text": "引用 🧪"}],
-                                },
-                                {
-                                    "type": "rich_text_section",
-                                    "elements": [{"type": "text", "text": "Thanks."}],
-                                },
-                            ],
-                        }
-                    ]
-                },
-                ["🦊 図を直して；", '要約 "A\\B" を直して。\n', "引用 🧪\n", "Thanks."],
+                for u in ("UROOT", "UDROP", "UDROPTWO", "UKEEP", huge.sender)
             ),
         )
-        native = httpx.AsyncClient
-        sent = []
-        for event, expected in events:
-            text, provenance = canonical_text(event)
-            source = replace(snapshot(text), original=event, provenance=provenance)
-            original = json.loads(json.dumps(event))
+        fitted, batch = Gate.fit(huge, B)
+        self.assertEqual(fitted.history, (huge.history[0], huge.history[3]))
+        self.assertEqual({u for u, _ in fitted.context_people}, {"UROOT", "UKEEP", huge.sender})
 
-            async def respond(request, expected=expected):
-                batch = json.loads(request.content)
-                sent.append(batch)
-                units = batch["state"]["source_selection"]["segments"]
-                self.assertEqual([u["text"] for u in units.values()], expected)
-                self.assertEqual([u["quoted"] for u in units.values()], [False, False, True, False])
-                self.assertIn(batch["state"]["whoami"]["user_id"], ("UATLAS", "UBIRCH"))
-                self.assertIn("whoami", json.dumps(batch["questions"]["response"]["instructions"]))
-                self.assertNotIn("state.current[start:end]", request.content.decode())
-                return httpx.Response(200, json=two_topic_answers(batch))
+    def test_protected_size_and_invalid_encoding_fail_locally(self):
+        from hermes_slack_agent_router.plugin import Gate
 
-            with (
-                patch.dict(
-                    sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=lambda name: "fictional")}
-                ),
-                patch(
-                    "httpx.AsyncClient",
-                    side_effect=lambda **kw: native(transport=httpx.MockTransport(respond), **kw),
-                ),
-            ):
-                for receiver, own in ((A, expected[0]), (B, expected[1])):
-                    selected = await JevClient().ask(prepare(source, receiver))
-                    plan = assemble(source, receiver, selected)
-                    self.assertEqual(plan.status, "ready", plan.reason)
-                    self.assertEqual(plan.view(receiver).split("\n\nPRIOR REFERENCE", 1)[0], own)
-                    self.assertTrue(
-                        all(not plan.view(peer) for peer in source.recipients if peer != receiver)
-                    )
-            self.assertEqual(event, original)
-        self.assertEqual(len(sent), 4)
-
-    def test_fixed_failure_diagnostics_do_not_echo_messages(self):
-        self.assertEqual(JevError("malformed native Jev answer").diagnostic, ("answer-malformed", 0))
-
-        self.assertEqual(JevError("synthetic-private-body-key").diagnostic, ("unclassified", 0))
-
-    async def test_transport_status_and_timeout_have_distinct_safe_diagnostics(self):
-        import sys
-        from types import SimpleNamespace
-
-        import httpx
-
-        factory = httpx.AsyncClient
-        response = httpx.Response(401, content=b"synthetic-private-body-key")
-
-        async def respond(request):
-            if isinstance(response, Exception):
-                raise response
-            return response
-
-        def client(**kwargs):
-            return factory(transport=httpx.MockTransport(respond), **kwargs)
-
-        with (
-            patch.dict(
-                sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=lambda name: "fictional")}
-            ),
-            patch("httpx.AsyncClient", side_effect=client),
+        for source in (
+            snapshot("x" * 600000),
+            replace(snapshot(), history=(History("1.0", "UROOT", "r" * 600000),)),
         ):
-            for outcome, expected in (
-                (response, ("http-rejected", 401)),
-                (httpx.ReadTimeout("synthetic-private-key"), ("transport-timeout", 0)),
-                (httpx.ConnectError("synthetic-private-key"), ("transport-failed", 0)),
-            ):
-                response = outcome
-                with self.assertRaises(JevError) as caught:
-                    await JevClient().ask(prepare(snapshot()))
-                self.assertEqual(caught.exception.diagnostic, expected)
-                self.assertNotIn("synthetic-private", str(caught.exception))
-
-    async def test_official_http_contract_without_cli_and_request_local_key(self):
-        import sys
-        from types import SimpleNamespace
-
-        import httpx
-
-        batch = prepare(snapshot())
-        sent = []
-
-        async def respond(request):
-            sent.append(request)
-            return httpx.Response(200, json=two_topic_answers(batch))
-
-        native = httpx.AsyncClient
-        secret = Mock(side_effect=["synthetic-atlas", "synthetic-birch"])
-        clients = []
-
-        def factory(**kwargs):
-            self.assertFalse(kwargs["follow_redirects"])
-            self.assertFalse(kwargs["trust_env"])
-            client = native(transport=httpx.MockTransport(respond), **kwargs)
-            clients.append(client)
-            return client
-
-        with (
-            patch.dict(sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=secret)}),
-            patch("httpx.AsyncClient", side_effect=factory),
-            patch("asyncio.create_subprocess_exec", side_effect=AssertionError("local CLI forbidden")),
-        ):
-            client = JevClient()
-            for _ in range(2):
-                self.assertEqual(await client.ask(batch), validate_answers(batch, two_topic_answers(batch)))
-        self.assertEqual(secret.call_args_list, [call("TYPESAFE_API_KEY")] * 2)
-        self.assertEqual(
-            [r.headers["Authorization"] for r in sent], ["Bearer synthetic-atlas", "Bearer synthetic-birch"]
-        )
-        for request in sent:
-            self.assertEqual(str(request.url), "https://api.typesafe.ai/v1/systemone")
-            self.assertEqual(request.method, "POST")
-            self.assertEqual(request.headers["Content-Type"], "application/json")
-            self.assertEqual(json.loads(request.content), {"model": "jev-latest", **batch})
-        self.assertTrue(all(client.is_closed for client in clients))
-
-    async def test_missing_or_inaccessible_scope_never_creates_transport(self):
-        import sys
-        from types import SimpleNamespace
-
-        for outcome in (None, "", RuntimeError("synthetic-private-scope-detail")):
-            resolver = (
-                Mock(side_effect=outcome) if isinstance(outcome, Exception) else Mock(return_value=outcome)
-            )
-            with (
-                self.subTest(outcome=type(outcome).__name__),
-                patch.dict(sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=resolver)}),
-                patch("httpx.AsyncClient") as transport,
-                patch("asyncio.create_subprocess_exec", side_effect=AssertionError("local CLI forbidden")),
-                self.assertRaises(JevError) as caught,
-            ):
-                await JevClient().ask(prepare(snapshot()))
-            transport.assert_not_called()
-            self.assertNotIn("synthetic-private", str(caught.exception))
-            self.assertIsNone(caught.exception.__cause__)
+            with self.assertRaises(JevError) as caught:
+                Gate.fit(source, B)
+            self.assertEqual(caught.exception.diagnostic, ("unsupported-request-size", 0))
+        with self.assertRaises(JevError) as caught:
+            Gate.fit(snapshot("bad surrogate \ud800"), B)
+        self.assertEqual(caught.exception.diagnostic, ("request-invalid", 0))
 
 
 class ProtocolTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        import sys
-        from types import SimpleNamespace
-
         import httpx
 
         self.requests, self.clients = [], []
         native = httpx.AsyncClient
+        self.secret = Mock(return_value="synthetic-key")
 
         async def respond(request):
             self.requests.append(request)
@@ -757,35 +225,32 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             return self.response
 
         def factory(**kwargs):
+            self.assertIsNone(kwargs["timeout"])
+            self.assertFalse(kwargs["follow_redirects"] or kwargs["trust_env"])
             client = native(transport=httpx.MockTransport(respond), **kwargs)
             self.clients.append(client)
             return client
 
         for patcher in (
-            patch.dict(
-                sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=lambda name: "synthetic-key")}
-            ),
+            patch.dict(sys.modules, {"agent.secret_scope": SimpleNamespace(get_secret=self.secret)}),
             patch("httpx.AsyncClient", side_effect=factory),
-            patch("asyncio.create_subprocess_exec", side_effect=AssertionError("local CLI forbidden")),
+            patch("asyncio.create_subprocess_exec", side_effect=AssertionError("CLI forbidden")),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def stream(self, chunks=(), *, block=False, release=None):
+    def stream(self, chunks=(), *, release=None):
         import httpx
 
         class Stream(httpx.AsyncByteStream):
             def __init__(self):
-                self.started = asyncio.Event()
-                self.closed = False
-                self.reads = 0
-                self.cancelled = False
+                self.started, self.closed, self.reads, self.cancelled = asyncio.Event(), False, 0, False
 
             async def __aiter__(self):
                 self.started.set()
-                if block or release is not None:
+                if release is not None:
                     try:
-                        await (release if release is not None else asyncio.Event()).wait()
+                        await release.wait()
                     except asyncio.CancelledError:
                         self.cancelled = True
                         raise
@@ -798,106 +263,39 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
 
         return Stream()
 
-    async def test_fitting_exact_wire_limit_and_one_byte_over_single_http(self):
-        from dataclasses import replace
-
+    async def test_actual_http_single_question_and_request_owned_secret(self):
         import httpx
 
-        from hermes_slack_agent_router.jev import serialize_request
-        from hermes_slack_agent_router.plugin import Gate
-
-        root = History("1.0", "UROOT", "protected anchor")
-        seed = History("2.0", "UDROPPED", '界"\\\t')
-        source = replace(snapshot("Birch, continue."), history=(root, seed))
-        padding = JevClient.request_limit - len(serialize_request(prepare(source, B)))
-        equal = replace(source, history=(root, replace(seed, text=seed.text + "x" * padding)))
-        fitted, batch = Gate.fit(equal, B)
-        self.assertEqual(fitted, equal)
-        self.assertEqual(len(serialize_request(batch)), JevClient.request_limit)
-        above = replace(equal, history=(root, replace(equal.history[1], text=equal.history[1].text + "x")))
-        with self.assertRaisesRegex(JevError, "oversized serialized request"):
-            serialize_request(prepare(above, B))
-        fitted_above, above_batch = Gate.fit(above, B)
-        self.assertEqual(fitted_above.history, (root,))
-        self.assertEqual(fitted_above.text, source.text)
-        self.response = httpx.Response(200, json=controlled_answers(batch, {"for_UBIRCH": "u0"}))
-        await JevClient().ask(batch)
-        self.assertEqual(len(self.requests), 1)
-        self.assertEqual(self.requests[0].content, serialize_request(batch))
-        self.assertTrue(self.clients[0].is_closed)
+        batch = prepare(snapshot())
+        self.secret.side_effect = ["synthetic-atlas", "synthetic-birch"]
+        self.response = httpx.Response(200, json=controlled_answers(batch, "yes", 0.1))
+        for _ in range(2):
+            self.assertEqual(await JevClient().ask(batch), ("yes", 0.1))
+        self.assertEqual(self.secret.call_args_list, [call("TYPESAFE_API_KEY")] * 2)
         self.assertEqual(
-            above_batch["state"]["source_selection"]["current_record"], "conversation.records[1]"
+            [r.headers["Authorization"] for r in self.requests],
+            ["Bearer synthetic-atlas", "Bearer synthetic-birch"],
         )
+        for request in self.requests:
+            self.assertEqual(str(request.url), "https://api.typesafe.ai/v1/systemone")
+            self.assertEqual(request.method, "POST")
+            self.assertEqual(request.headers["Accept-Encoding"], "identity")
+            self.assertEqual(request.content, serialize_request(batch))
+            self.assertEqual(set(json.loads(request.content)["questions"]), {"response"})
+        self.assertTrue(all(c.is_closed for c in self.clients))
 
-    def test_fitting_multiple_oldest_priors_reindexes_directory_and_rejects_old_answers(self):
-        from dataclasses import replace
-
-        from hermes_slack_agent_router.plugin import Gate
-
-        source = replace(
-            snapshot("Birch, continue " + "c" * 30000),
-            identity="5.0",
-            history=(
-                History("1.0", "UROOT", "r" * 200000),
-                History("2.0", "UDROPONE", "a" * 300000),
-                History("3.0", "UDROPTWO", "b" * 300000),
-                History("4.0", "UKEEP", "unaltered recent"),
-            ),
-        )
-        source = replace(
-            source,
-            context_people=tuple(
-                (u, {"user_id": u, "username": u, "display_name": None, "real_name": None, "kind": "human"})
-                for u in ("UROOT", "UDROPONE", "UDROPTWO", "UKEEP", source.sender)
-            ),
-        )
-        old_batch = prepare(source, B)
-        fitted, batch = Gate.fit(source, B)
-        self.assertEqual(fitted.history, (source.history[0], source.history[3]))
-        self.assertEqual(fitted.text, source.text)
-        self.assertEqual({u for u, _ in fitted.context_people}, {"UROOT", "UKEEP", source.sender})
-        self.assertEqual(set(batch["questions"]), {"response", "scope", "u0_prior0", "u0_prior1"})
-        self.assertEqual([r["order"] for r in batch["state"]["conversation"]["records"]], [0, 1, 2])
-        with self.assertRaisesRegex(JevError, "answer keys"):
-            validate_answers(batch, controlled_answers(old_batch, {"for_UBIRCH": "u0"}))
-
-    def test_fitting_protected_only_and_invalid_encoding_never_open_http(self):
-        from dataclasses import replace
-
-        from hermes_slack_agent_router.plugin import Gate
-
-        for source in (
-            replace(snapshot("x" * 200000), history=()),
-            replace(snapshot("Birch, continue."), history=(History("1.0", "UROOT", "r" * 600000),)),
-        ):
-            with self.assertRaises(JevError) as caught:
-                Gate.fit(source, B)
-            self.assertEqual(caught.exception.diagnostic, ("unsupported-request-size", 0))
-        malformed = replace(
-            snapshot(),
-            history=(
-                History(
-                    "1.0",
-                    "UROOT",
-                    "anchor",
-                    provenance=({"start": float("nan"), "end": 1, "kind": "authored"},),
-                ),
-                History("2.0", "UBIRCH", "must not shed for invalid serialization"),
-            ),
-        )
-        with self.assertRaises(JevError) as caught:
-            Gate.fit(malformed, B)
-        self.assertEqual(caught.exception.diagnostic, ("request-invalid", 0))
-        self.assertEqual(self.requests, [])
-        self.assertEqual(self.clients, [])
-
-    async def test_oversized_or_nonfinite_request_never_connects(self):
+    async def test_missing_scope_key_and_invalid_request_never_connect(self):
+        for value in (None, "", RuntimeError("synthetic-private")):
+            self.secret.side_effect = value if isinstance(value, Exception) else None
+            self.secret.return_value = value
+            with self.assertRaises(JevError):
+                await JevClient().ask(prepare(snapshot()))
         for batch in ({"state": "x" * 524289, "questions": {}}, {"state": float("nan")}):
-            with self.assertRaisesRegex(JevError, "serialized"):
+            with self.assertRaises(JevError):
                 await JevClient().ask(batch)
         self.assertEqual(self.clients, [])
 
-    async def test_status_redirect_errors_never_retry_forward_auth_or_read_body(self):
+    async def test_status_redirect_errors_never_retry_or_read_body(self):
         import httpx
 
         for status in (301, 302, 307, 308, 400, 401, 413, 422, 429, 500, 503, 529):
@@ -906,110 +304,70 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
                 self.response = httpx.Response(
                     status, headers={"Location": "https://other.invalid/steal"}, stream=stream
                 )
-                count = len(self.requests)
+                before = len(self.requests)
                 with self.assertRaises(JevError) as caught:
                     await JevClient().ask(prepare(snapshot()))
-                self.assertEqual(len(self.requests), count + 1)
-                self.assertEqual(str(self.requests[-1].url), "https://api.typesafe.ai/v1/systemone")
+                self.assertEqual(caught.exception.diagnostic, ("http-rejected", status))
+                self.assertEqual(len(self.requests), before + 1)
                 self.assertEqual(stream.reads, 0)
-                self.assertTrue(stream.closed)
-                self.assertTrue(self.clients[-1].is_closed)
-                self.assertNotIn("synthetic", str(caught.exception))
+                self.assertTrue(stream.closed and self.clients[-1].is_closed)
 
-    async def test_malformed_oversized_and_compressed_answers_close(self):
+    async def test_malformed_oversized_compressed_answers_and_transport_close(self):
         import httpx
 
-        cases = (
+        for headers, chunks in (
             ({}, (b"not JSON synthetic-private",)),
-            ({}, (b"\\xff",)),
+            ({}, (b"\xff",)),
             ({}, (b"{}",)),
             ({}, (b"[",)),
             ({}, (b"x" * 131073, b"x" * 131073)),
             ({"Content-Length": "262145"}, (b"never read",)),
             ({"Content-Length": "garbage"}, (b"never read",)),
             ({"Content-Encoding": "gzip"}, (b"never decompress",)),
-        )
-        for headers, chunks in cases:
-            with self.subTest(headers=headers, chunks=len(chunks)):
-                stream = self.stream(chunks)
-                self.response = httpx.Response(200, headers=headers, stream=stream)
-                with self.assertRaises(JevError) as caught:
-                    await JevClient().ask(prepare(snapshot()))
-                self.assertNotIn("synthetic-private", str(caught.exception))
-                self.assertTrue(stream.closed)
-                self.assertTrue(self.clients[-1].is_closed)
-                if headers:
-                    self.assertEqual(stream.reads, 0)
-
-    async def test_delayed_http_answer_has_no_plugin_or_httpx_time_cutoff(self):
-        import httpx
-
-        batch = prepare(snapshot())
-        release = asyncio.Event()
-        stream = self.stream((json.dumps(two_topic_answers(batch)).encode(),), release=release)
-        self.response = httpx.Response(200, stream=stream)
-        loop = asyncio.get_running_loop()
-        now = [loop.time()]
-        with patch.object(loop, "time", side_effect=lambda: now[0]):
-            task = asyncio.create_task(JevClient().ask(batch))
-            timer = None
-            try:
-                await stream.started.wait()
-                timer = loop.call_at(now[0] + 9, release.set)
-                now[0] += 10
-                result = await task
-            finally:
-                if timer:
-                    timer.cancel()
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-        self.assertEqual(result, validate_answers(batch, two_topic_answers(batch)))
-        self.assertEqual(
-            self.requests[-1].extensions["timeout"],
-            {"connect": None, "read": None, "write": None, "pool": None},
-        )
-        self.assertFalse(stream.cancelled)
-        self.assertTrue(stream.closed and self.clients[-1].is_closed)
-
-    async def test_caller_cancellation_closes_stream_and_client(self):
-        import httpx
-
-        stream = self.stream(block=True)
-        self.response = httpx.Response(200, stream=stream)
-        task = asyncio.create_task(JevClient().ask(prepare(snapshot())))
-        try:
-            await stream.started.wait()
-            task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
-        finally:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        self.assertTrue(task.done() and stream.cancelled and stream.closed)
-        self.assertTrue(self.clients[-1].is_closed)
-
-    async def test_safe_transport_errors_and_typed_invalid_replies(self):
-        import httpx
-
-        for error in (
-            httpx.ConnectError("synthetic-key/private"),
-            httpx.ReadError("synthetic-private"),
-            httpx.ReadTimeout("synthetic-private"),
+        ):
+            stream = self.stream(chunks)
+            self.response = httpx.Response(200, headers=headers, stream=stream)
+            with self.assertRaises(JevError) as caught:
+                await JevClient().ask(prepare(snapshot()))
+            self.assertNotIn("synthetic-private", str(caught.exception))
+            self.assertTrue(stream.closed and self.clients[-1].is_closed)
+            if headers:
+                self.assertEqual(stream.reads, 0)
+        for error, diagnostic in (
+            (httpx.ReadTimeout("private"), "transport-timeout"),
+            (httpx.ConnectError("private"), "transport-failed"),
         ):
             self.response = error
             with self.assertRaises(JevError) as caught:
                 await JevClient().ask(prepare(snapshot()))
-            self.assertNotIn("synthetic", str(caught.exception))
+            self.assertEqual(caught.exception.diagnostic, (diagnostic, 0))
             self.assertIsNone(caught.exception.__cause__)
             self.assertTrue(self.clients[-1].is_closed)
+
+    async def test_caller_cancellation_and_delayed_answer_resource_cleanup(self):
+        import httpx
+
         batch = prepare(snapshot())
-        for value in (float("nan"), float("inf")):
-            invalid = two_topic_answers(batch)
-            invalid["answers"]["response"]["confidence"] = value
-            self.response = httpx.Response(200, content=json.dumps(invalid).encode())
-            with self.assertRaises(JevError):
-                await JevClient().ask(batch)
-        raw = two_topic_answers(batch)
-        raw["answers"]["response"]["confidence"] = 0.1
-        self.response = httpx.Response(200, content=json.dumps(raw).encode())
-        self.assertEqual((await JevClient().ask(batch))["response"], "no")
+        for cancel in (True, False):
+            release = asyncio.Event()
+            stream = self.stream((json.dumps(controlled_answers(batch)).encode(),), release=release)
+            self.response = httpx.Response(200, stream=stream)
+            task = asyncio.create_task(JevClient().ask(batch))
+            try:
+                await stream.started.wait()
+                if cancel:
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                else:
+                    release.set()
+                    self.assertEqual(await task, ("yes", 1.0))
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            self.assertEqual(stream.cancelled, cancel)
+            self.assertTrue(stream.closed and self.clients[-1].is_closed)
+            self.assertEqual(
+                self.requests[-1].extensions["timeout"],
+                {"connect": None, "read": None, "write": None, "pool": None},
+            )

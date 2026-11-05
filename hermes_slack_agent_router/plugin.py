@@ -1,56 +1,23 @@
 """Request-local contextual routing through the official native middleware seam."""
 
 import asyncio
-import copy
 import hashlib
 import json
 import logging
 import time
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from types import FunctionType
 
-from .bridge import Bridge, TopologyError, Uncertain, canonical_text
+from .bridge import Bridge, TopologyError, Uncertain, message_content
 from .jev import JevClient, JevError, serialize_request
-from .policy import Thread, identifier
-from .semantic import History, SemanticError, Snapshot, assemble, prepare
+from .policy import Thread
+from .semantic import History, SemanticError, Snapshot, prepare
 
 logger = logging.getLogger(__name__)
-_PROJECTION = "_hermes_slack_agent_router_projection"
-
-
-def constrain_backfill(event, gateway, **kwargs):
-    """Native ingress hook: discard only backfill on a proven routed request.
-
-    A Python closure cannot arrive through Slack JSON. It also crosses profile
-    module instances without relying on a process-global registry or class token.
-    Remove it before native admission snapshots any input; replay needs no token.
-    """
-    raw = event.raw_message
-    if not isinstance(raw, dict):
-        return None
-    proof = raw.pop(_PROJECTION, None)
-    if not isinstance(proof, FunctionType):
-        return None
-    try:
-        if not proof(event, gateway):
-            return {"action": "skip", "reason": "agent-router projection identity changed"}
-        event.channel_context = None
-        event.reply_to_text = None
-        # Successful routing accepted text-only current/root/reference composition.
-        # Native hydration can independently recover root images after that check.
-        event.media_urls = []
-        event.media_types = []
-        event.media_text_inlined = []
-    except Exception:  # noqa: BLE001 - no untrusted data or internal token in diagnostics
-        return {"action": "skip", "reason": "agent-router projection validation failed"}
-    return None  # Continue native authorization/controls; do not short-circuit other hooks.
 
 
 @dataclass(eq=False)
 class Evaluation:
-    sender: str
-    root: str
     revision: Decimal
     tasks: set = field(default_factory=set)
     invalidated: bool = False
@@ -66,30 +33,7 @@ class Gate:
     def unresolved(reason):
         # Fixed local reason codes only: no transcript, raw model answer or durable queue.
         logger.warning("agent-router unresolved: %s", reason)
-
-    @staticmethod
-    async def native_policy(adapter, event, bot):
-        """Delegate original/own-CURRENT admission to the actual native channel gate."""
-        from plugins.platforms.slack.adapter import _slack_mention_detection_text
-
-        routing_text = _slack_mention_detection_text(event) or event.get("text", "") or ""
-        mentioned = bool(
-            (bot and f"<@{bot}>" in routing_text)
-            or adapter._slack_message_matches_mention_patterns(routing_text)
-        )
-        thread_ts = event.get("thread_ts")
-        return await adapter._channel_gate_allows(
-            channel_id=event["channel"],
-            routing_text=routing_text,
-            bot_uid=bot,
-            is_mentioned=mentioned,
-            is_thread_reply=bool(thread_ts and thread_ts != event["ts"]),
-            event_thread_ts=thread_ts,
-            user_id=event["user"],
-            team_id=event["team"],
-            is_dm=False,
-            force_process=False,
-        )
+        return False
 
     @staticmethod
     async def history(client, thread, cutoff) -> tuple[History, ...]:
@@ -139,7 +83,6 @@ class Gate:
                 or Decimal(ts) < Decimal(thread.root)
                 or ("thread_ts" in message and message["thread_ts"] != thread.root)
                 or ("channel" in message and message["channel"] != thread.channel)
-                or ("team" in message and message["team"] != thread.workspace)
             ):
                 raise SemanticError("foreign-or-future-context")
             return ts
@@ -204,11 +147,11 @@ class Gate:
         for message in (root, *recent):
             if message.get("files") or message.get("attachments"):
                 raise SemanticError("unsupported-prior-media-or-identity")
-            sender = identifier(message["user"])
-            text, provenance = canonical_text(message, prior=True)
+            sender = message["user"]
+            text, blocks = message_content(message)
             if not isinstance(text, str):
                 raise SemanticError("unsupported-prior-composition")
-            history.append(History(message["ts"], sender, text, copy.deepcopy(message), provenance))
+            history.append(History(message["ts"], sender, text, blocks))
         return tuple(history)
 
     @staticmethod
@@ -244,19 +187,17 @@ class Gate:
                     logger.info("agent-router request-fit stage=fit bytes=%d dropped=%d", len(raw), dropped)
                 return source, batch
 
-    async def project(self, body, bound, adapter, bridge, topology):
-        event = copy.deepcopy(bound.native_event)
+    async def excludes(self, bound, adapter, bridge, topology):
+        event = dict(bound.native_event)
         thread = bound.event.thread
         event.update(team=thread.workspace, channel=thread.channel)
 
         if bound.event.provenance == "file_shared" or event.get("files") or event.get("attachments"):
             return self.unresolved("unsupported-current-composition")
         try:
-            text, provenance = canonical_text(event)
+            text, blocks = message_content(event)
         except (SemanticError, KeyError, TypeError):
             return self.unresolved("unsupported-current-composition")
-        if not await self.native_policy(adapter, event, bound.recipient.bot_user):
-            return None
         client = adapter._team_clients[thread.workspace]
         from slack_sdk.errors import SlackApiError, SlackClientError
 
@@ -314,8 +255,6 @@ class Gate:
             )
         except (ValueError, KeyError, TypeError, AttributeError):
             return self.unresolved("incomplete-context")
-        if await bridge.participants(bound) != topology:
-            return self.unresolved("native-topology-changed")
         people = await bridge.context_people(bound, history, whoami)
         source = Snapshot(
             thread,
@@ -324,24 +263,20 @@ class Gate:
             text,
             history,
             topology[0],
-            copy.deepcopy(body["event"]),
-            provenance,
-            recipient_whoami=whoami,
+            blocks,
             context_people=people,
         )
-        started, stage, questions = time.monotonic(), "scope", 0
+        started, stage, questions = time.monotonic(), "credential-scope", 0
         try:
             # The serving runtime may differ from the receiving adapter's profile.
             async with adapter.gateway_runner._async_profile_scope_for_source(bound.source):
                 if self.disposed or getattr(adapter.gateway_runner, "_draining", False):
-                    return None
+                    return False
                 stage = "fit"
                 source, batch = self.fit(source, bound.recipient)
                 questions = len(batch["questions"])
                 stage = "inference"
-                answers = await self.jev.ask(batch) if batch["questions"] else {}
-                stage = "assemble"
-                plan = assemble(source, bound.recipient, answers)
+                response, confidence = await self.jev.ask(batch)
         except (JevError, SemanticError, TimeoutError) as exc:
             reason, status = (
                 exc.diagnostic
@@ -360,91 +295,29 @@ class Gate:
                 exc.size if isinstance(exc, JevError) else 0,
                 exc.dropped if isinstance(exc, JevError) else 0,
             )
-            return None
-        if plan.status != "ready":
-            return self.unresolved(
-                "projection-unresolved"
-                if plan.reason == "projection-unresolved"
-                else "coverage-or-grounding-unresolved"
-            )
-        text = plan.view(bound.recipient)
-        if not text:
-            return None
-        projected = copy.deepcopy(body)
-        target = projected["event"]
-        if target.get("subtype") == "message_changed":
-            target["text"] = text
-            target = target["message"]
-        target["text"] = text
-        for name in ("blocks", "attachments", "files"):
-            target.pop(name, None)
-            projected["event"].pop(name, None)
-        current = "".join(
-            plan.source[u.start : u.end]
-            for u in plan.units
-            if u.disposition == "action" and bound.recipient in u.recipients
-        )
-        admission = {**event, "text": current}
-        admission.pop("blocks", None)
-        if not await self.native_policy(adapter, admission, bound.recipient.bot_user):
-            return None
-        if await bridge.participants(bound) != topology:
-            return self.unresolved("native-topology-changed")
-
-        def proof(delivered, gateway):
-            source = delivered.source
-            identity = adapter._canonicalize(source)
-            return (
-                gateway is adapter.gateway_runner
-                and identity == bound.identity
-                and identity is not None
-                and identity.adapter() is adapter
-                and identity.runtime_profile == bound.recipient.runtime_profile
-                and adapter._team_bot_user_ids.get(thread.workspace) == bound.recipient.bot_user
-                and source.scope_id == thread.workspace
-                and source.chat_id == thread.channel
-                and source.thread_id == bound.source.thread_id
-                and source.user_id == bound.event.sender
-                and source.message_id == bound.source.message_id
-                and delivered.message_id == bound.source.message_id
-                and gateway._session_key_for_source(source) == bound.session_key
-            )
-
-        target[_PROJECTION] = proof
-        return projected
+            return False
+        return response == "no" and confidence > 0.5
 
     def dispose(self):
         self.disposed = True
 
     @staticmethod
-    def coordinates(body):
+    def coordinates(body, adapter):
         """Structural source/revision only, before any awaited identity lookup."""
         event = body.get("event") or {}
         if body.get("type") != "event_callback" or event.get("type") not in ("message", "app_mention"):
             return None
         changed = event.get("subtype") == "message_changed"
-        message = event.get("message") if changed else event
+        message = adapter._normalize_changed_message(event) if changed else event
         if not isinstance(message, dict):
             return None
-        team = body.get("team_id")
+        team = adapter._event_team_id(message, body)
         channel = message.get("channel") or event.get("channel")
-        ts, sender = message.get("ts"), message.get("user")
-        if (
-            not isinstance(team, str)
-            or not isinstance(channel, str)
-            or not isinstance(ts, str)
-            or not isinstance(sender, str)
-        ):
+        ts = message.get("ts")
+        if not isinstance(channel, str) or not isinstance(ts, str):
             return None
-        for item in (event, message):
-            if (item.get("team") and item["team"] != team) or (
-                item.get("channel") and item["channel"] != channel
-            ):
-                raise SemanticError("conflicting revision source")
         Thread(team, channel, ts)
-        identifier(sender)
-        root = message.get("thread_ts") or ts
-        Thread(team, channel, root)
+
         edit = message.get("edited")
         if changed and (not isinstance(edit, dict) or not edit.get("ts")):
             return None  # An unfurl/delivery event_ts is not an edit revision.
@@ -456,7 +329,7 @@ class Gate:
             Thread(team, channel, revision)
             if Decimal(revision) <= Decimal(ts):
                 raise SemanticError("invalid edit revision")
-        return (team, channel, ts), sender, root, Decimal(revision)
+        return (team, channel, ts), Decimal(revision)
 
     def wire(self, native, adapter):
         from slack_bolt.response import BoltResponse
@@ -465,45 +338,31 @@ class Gate:
 
         async def evaluate(body):
             bound = await bridge.bind(body)
-
             if bridge.pending(bound):
-                return body
-            if not adapter.gateway_runner._is_user_authorized_for_source(bound.source):
-                return None
-            try:
-                topology = await bridge.participants(bound)
-                projected = await self.project(body, bound, adapter, bridge, topology)
-            except Exception:
-                if bridge.pending(bound):
-                    return body
-                raise
-            if self.disposed or getattr(adapter.gateway_runner, "_draining", False):
-                return None
+                return False
+            topology = await bridge.participants(bound)
+            excluded = await self.excludes(bound, adapter, bridge, topology)
             if bridge.pending(bound):
-                return body
-            return projected
+                return False
+            return bool(excluded)
 
         async def middleware(body, next, req):
-            if self.disposed:
-                return await next()  # Existing quiescent-unload native pass-through.
             entry = task = key = None
+            excluded = False
             try:
                 if getattr(adapter.gateway_runner, "_draining", False):
                     return BoltResponse(status=200, body="")
-                coordinates = self.coordinates(body)
+                coordinates = self.coordinates(body, adapter)
                 if coordinates is not None:
-                    key, sender, root, revision = coordinates
+                    key, revision = coordinates
                     previous = self.active.get(key)
-                    if previous is not None:
-                        if (previous.sender, previous.root) != (sender, root):
-                            raise SemanticError("conflicting revision source")
-                        if revision < previous.revision:
-                            return BoltResponse(status=200, body="")
+                    if previous is not None and revision < previous.revision:
+                        return BoltResponse(status=200, body="")
                     if previous is None or revision > previous.revision:
                         retiring = set(previous.tasks) if previous is not None else set()
                         if previous is not None:
                             previous.invalidated = True
-                        entry = Evaluation(sender, root, revision, set(retiring))
+                        entry = Evaluation(revision, set(retiring))
                         self.active[key] = entry  # Invalidate BEFORE awaiting old cleanup.
                         for old in retiring:
                             if not old.cancelling():
@@ -515,42 +374,33 @@ class Gate:
                             return BoltResponse(status=200, body="")
                     else:
                         entry = previous  # Equal-revision duplicate, not a cancellation.
-                if self.disposed or getattr(adapter.gateway_runner, "_draining", False):
+                if getattr(adapter.gateway_runner, "_draining", False):
                     return BoltResponse(status=200, body="")
-                task = asyncio.create_task(evaluate(body))
-                adapter._background_tasks.add(task)
-                task.add_done_callback(adapter._background_tasks.discard)
-                if entry is not None:
-                    entry.tasks.add(task)
-                try:
-                    projected = await task
-                except Uncertain:
-                    logger.debug("agent-router native exemption or unknown identity/control; pass-through")
-                    projected = body
-                except asyncio.CancelledError:
-                    current = asyncio.current_task()
-                    if current is not None and current.cancelling():
-                        raise  # Caller cancellation is never a native pending fallback.
-                    if entry is None or not entry.invalidated:
-                        raise  # Native adapter shutdown remains definitive cancellation.
-                    return BoltResponse(status=200, body="")  # Superseded child, already drained.
-                if task.cancelling() and (entry is None or not entry.invalidated):
-                    raise asyncio.CancelledError  # A transport cannot turn definitive cancellation into success.
-                if (
-                    projected is None
-                    or self.disposed
-                    or getattr(adapter.gateway_runner, "_draining", False)
-                    or (entry is not None and (entry.invalidated or self.active.get(key) is not entry))
-                ):
-                    return BoltResponse(status=200, body="")
-                req.body = projected
-                return await next()  # No intervening awaited plugin work before native handoff.
+                if not self.disposed:
+                    task = asyncio.create_task(evaluate(body))
+                    adapter._background_tasks.add(task)
+                    task.add_done_callback(adapter._background_tasks.discard)
+                    if entry is not None:
+                        entry.tasks.add(task)
+                    try:
+                        excluded = await task
+                    except Uncertain:
+                        logger.debug(
+                            "agent-router native exemption or unknown identity/control; pass-through"
+                        )
+                    except asyncio.CancelledError:
+                        current = asyncio.current_task()
+                        if current is not None and current.cancelling():
+                            raise  # Caller cancellation is terminal.
+                        if entry is None or not entry.invalidated:
+                            raise  # Native adapter shutdown is terminal.
+                        return BoltResponse(status=200, body="")
+                    if task.cancelling() and (entry is None or not entry.invalidated):
+                        raise asyncio.CancelledError
             except TopologyError:
                 self.unresolved("native-topology-unresolved")
-                return BoltResponse(status=200, body="")
             except Exception:  # noqa: BLE001 - fixed diagnostics, no untrusted payload
                 self.unresolved("ingress-failed")
-                return BoltResponse(status=200, body="")
             finally:
                 if task is not None:
                     if not task.done():
@@ -560,6 +410,13 @@ class Gate:
                     entry.tasks.difference_update(t for t in tuple(entry.tasks) if t.done())
                     if self.active.get(key) is entry and not entry.tasks:
                         self.active.pop(key, None)
+            if (
+                (excluded and not self.disposed)
+                or getattr(adapter.gateway_runner, "_draining", False)
+                or (entry is not None and entry.invalidated)
+            ):
+                return BoltResponse(status=200, body="")
+            return await next()  # Outside classifier catch; native failures are never retried.
 
         native.use(middleware)
 
@@ -581,6 +438,5 @@ def register(ctx):
         gates.append(gate)
         gate.wire(native, adapter)
 
-    ctx.register_hook("pre_gateway_dispatch", constrain_backfill)
     ctx.register_platform_handler("slack", wire)
     ctx.on_unload(dispose)

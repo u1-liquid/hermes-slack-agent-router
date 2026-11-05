@@ -38,6 +38,15 @@ class JevError(ValueError):
         return code, self.status if code == "http-rejected" else 0
 
 
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON member")
+        result[key] = value
+    return result
+
+
 def validate_answers(batch, result):
     try:
         answers = result["answers"]
@@ -49,7 +58,9 @@ def validate_answers(batch, result):
             criteria = question["criteria"]
             distribution = answer["probabilities"]
             if (
-                answer["type"] != "choice"
+                not isinstance(answer, dict)
+                or set(answer) != {"type", "choice", "confidence", "probabilities"}
+                or answer["type"] != "choice"
                 or answer["choice"] not in criteria
                 or not isinstance(distribution, dict)
                 or set(distribution) != set(criteria)
@@ -63,29 +74,10 @@ def validate_answers(batch, result):
             choice = answer["choice"]
             if distribution[choice] < max(distribution.values()):
                 raise JevError("uncertain or contradictory answer")
-            selected[name] = choice
-        # Exhaustive native-generated families: only exact optional priors may omit.
-        state = batch["state"]
-        authored = [
-            unit for unit, span in state["source_selection"]["segments"].items() if not span["quoted"]
-        ]
-        required = {"response", "scope"} if authored else set()
-        priors = {
-            f"{unit}_prior{j}" for unit in authored for j in range(len(state["conversation"]["records"]) - 1)
-        }
-        if set(answers) != required | priors:
+            selected[name] = (choice, answer["confidence"])
+        if set(answers) != {"response"}:
             raise JevError("answer keys do not match request")
-        admitted = (
-            bool(authored) and selected["response"] == "yes" and answers["response"]["confidence"] > 0.5
-        )
-        if authored:
-            selected["response"] = "yes" if admitted else "no"
-        extent = set(selected["scope"].split("+")) if admitted and selected["scope"] != "unsafe" else set()
-        for name in priors:
-            unit = name.split("_prior", 1)[0]
-            if unit not in extent or answers[name]["confidence"] < 0.8 or selected[name] != "include":
-                selected[name] = "omit"
-        return selected
+        return selected["response"]
     except (KeyError, TypeError, AttributeError) as exc:
         raise JevError("malformed native Jev answer") from exc
 
@@ -165,7 +157,7 @@ class JevClient:
         try:
             stdout = await self._exchange(raw, key)
             try:
-                result = json.loads(stdout)
+                result = json.loads(stdout, object_pairs_hook=_unique_object)
             except (ValueError, UnicodeError):
                 raise JevError("invalid Jev JSON") from None
             return validate_answers(batch, result)

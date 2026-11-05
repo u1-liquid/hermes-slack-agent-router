@@ -1,18 +1,25 @@
 # Hermes Slack Agent Router
 
-Context-aware Slack routing for Hermes, powered by Jev. Each receiving bot judges
-whether the complete current message asks it to respond, then receives only its
-exact source text and selected inert references. One message can address several
-bots with different work. Routing does not authorize external actions.
+Context-aware Slack routing for Hermes, powered by Jev. A transparent whole-message
+filter implements `fallback-to-respond`: each receiving native identity asks one
+yes/no intent question about the complete current message. Only a valid NO with
+selected-answer native confidence strictly greater than 0.5 suppresses delivery.
+NO requires positive grounds excluding this exact receiver from every fresh
+response. Unknown or ambiguous addressing, leadership or assignment alone means
+fallback YES/native continuation, not proven ownership or joint intent.
+Every other result or plugin failure defers to ordinary native handling with the
+original event unchanged. Passing is not execution permission or a guaranteed reply.
 
 ## Install and use
 
-Requires Python 3.11+, a working Hermes Slack integration, and Hermes v0.22.5 at
-`bf0203a794a07aac3ff764972ab9087baa4e4f4e`. The plugin uses private native seams;
-other host revisions need explicit integration testing.
+Requires Python 3.11+, a working Hermes Slack integration, and the qualified official
+Hermes revision `f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab`. This plugin uses private
+native seams; other host revisions require explicit integration testing. Earlier
+qualification at `bf0203a794a07aac3ff764972ab9087baa4e4f4e` is historical, not proof
+of the current native path.
 
 Install through the native plugin manager. Replace `REVIEWED_COMMIT_SHA` with a
-reviewed full 40-character commit, not a branch or tag:
+reviewed full 40-character plugin commit, not a branch or tag:
 
 ```sh
 hermes plugins install https://github.com/u1-liquid/hermes-slack-agent-router.git --ref REVIEWED_COMMIT_SHA --yes-deps --no-enable
@@ -21,91 +28,101 @@ hermes plugins list
 hermes plugins doctor slack-agent-router --ci
 ```
 
-Enable the plugin for each receiving profile that needs selective routing. Use
-Hermes's normal secret setup to supply `TYPESAFE_API_KEY` in the runtime that
-serves requests. That runtime can differ from the receiving bot's profile. Do not
-inject dependencies into a plugin-manager-selected environment with pip or uv.
+Enable only for profiles where external processing is authorized. Supply
+`TYPESAFE_API_KEY` through normal Hermes secret setup in the runtime serving the
+request, which may differ from the receiving transport profile. Do not inject
+dependencies into a plugin-manager-selected environment with pip or uv.
 
-There is no plugin configuration file, manual participant/policy registry,
-assignment database, initialization command or thread-owner setup. Participants
-come from the gateway's connected, authenticated Slack adapters. No Jev executable
-or TypeSafe SDK is required. The distribution is `hermes-slack-agent-router`, the
-Python package is `hermes_slack_agent_router`, and the sole plugin ID is
-`slack-agent-router`.
+There is no plugin configuration, manual participant/policy registry, assignment
+database, thread-owner setup, Jev executable or TypeSafe SDK. Participants come
+from the current GatewayRunner's connected authenticated Slack adapters. The
+distribution is `hermes-slack-agent-router`, Python package
+`hermes_slack_agent_router`, and plugin ID `slack-agent-router`.
 
-For example, if history establishes that Atlas prepared a summary and Birch
-prepared a diagram, “Atlas, revise the summary; Birch, check the diagram” can
-produce different inputs for the two bots. A general continuation can stay with
-an evidenced conversational lead, including a bare no-@ name call. Specific-topic
-assignments, genuine handoffs and native @ addressing remain distinct; the plugin
-does not invent a lead or reply to everyone.
+If Atlas and Birch are both addressed in a mixed message, each nonexcluded bot
+receives that same complete message, including the other bot's topic. The plugin
+does not isolate foreign tasks by deleting text. General continuation may stay
+with an evidenced lead; specific-task ownership, real handoffs, native @ addressing,
+ambiguous names and joint participation remain part of whole-message intent.
 
-Plugin Doctor checks registration, not socket readiness or delivery. Use the
-normal managed gateway lifecycle when activating a replacement. On the pinned
-host, same-client disable/re-enable is not a supported hot replacement because
-native factory deduplication can prevent a new callback from attaching.
+Plugin Doctor verifies registration, not socket readiness or delivery. On the
+qualified host, same-client disable/re-enable is not a supported hot replacement:
+native factory deduplication may prevent attachment of a new callback. Use the
+normal managed Gateway lifecycle for replacement activation.
 
-## External processing and activation boundary
+## External processing and permissions
 
-Enable this plugin only where you are authorized to send the conversation to
-TypeSafe. Eligible current text, bounded prior text, author metadata and candidate
-Slack identities go to `https://api.typesafe.ai/v1/systemone` with `jev-latest`.
-Slack read permission alone is not external-processing consent. There is no
-plugin privacy classifier or per-channel egress setting.
+Supported complete text and structured Slack blocks, bounded history and
+whitelisted participant metadata go to `https://api.typesafe.ai/v1/systemone` with
+`jev-latest`. Slack read permission is not external-processing consent. There is
+no plugin privacy classifier or per-channel egress configuration.
 
-Credentials resolve inside the serving runtime's native secret scope. TLS is
-verified; redirects, environment proxies and automatic Jev retries are disabled.
-The router sets `httpx`'s `timeout=None` and imposes no elapsed-time cutoff on
-inference, history or identity reads. Native transport policies remain native.
-Missing credentials, external errors and invalid answers produce no ordinary work.
-Production does not log keys, transcripts or service error bodies, or persist
-routing decisions.
+Middleware may classify before native admission: the plugin does not duplicate
+sender filtering, user/channel allowlists, ignored-channel rules or mention/wake
+policy. IDs, workspace resolution, source identities and runtime bindings come
+from native Hermes without a second plugin validator. Participant metadata contains
+IDs and names, with no bot/human classification. Native Hermes applies its own
+admission when the plugin continues; a YES or failure cannot force a reply. Native Bolt self-event
+filtering may run before this middleware. Commands, unsupported DMs/MPIMs and
+pending approval, clarification, confirmation or update controls bypass inference.
+Profile activation must authorize external processing even for messages native
+policy would later deny; Slack permissions and allowlists do not provide that
+consent. Pass-through does not override any native gate, force a mention, call the
+model directly or grant action authority. Native history, media, sessions, pending
+queues and deduplication remain host-owned, including when classification fails.
 
-## Routing behavior and limits
+Credentials resolve per request in the serving runtime's native secret scope.
+TLS verification is enabled; redirects, environment proxies and automatic Jev
+retries are disabled. HTTP uses `timeout=None`, with no plugin elapsed cutoff on
+inference/history/metadata. Diagnostics contain fixed codes and numeric measurements,
+not transcripts, keys or service error bodies. Routing decisions are not persisted.
 
-- One whole-message `response` decision admits only YES with native confidence
-  strictly greater than 0.5. Probability is not confidence. Conditional `scope`
-  selects the complete exact own-source extent without another confidence,
-  approval or executable-work gate. Questions, explanations, requested
-  acknowledgements and necessary supporting clauses can qualify.
-- Source slices are extraction choices, not fragment response ballots. An
-  unrepresentable own extent is `projection-unresolved`, not semantic NO or a
-  fallback to the whole mixed message. Optional prior references require native
-  confidence at least 0.8 and never select recipients or veto admission.
-- An eligible bot may respond to a joint request with human or outside
-  co-assignees. It does not invoke outsiders or claim their consent or execution.
-- Acquisition keeps the verified root and latest seven strictly prior replies.
-  It follows older cursors only to fill a short tail, within four SDK calls and
-  1 MiB per decoded response. The pinned endpoint's newest-page selection is a
+## Behavior and bounds
+
+- One complete-CURRENT `response` question per receiver, including quoted/code-only
+  messages. No paragraph/sentence/punctuation splitting, source subsets, partial
+  extraction, regrouping, unit-count refusal or compatibility mode.
+- Suppress only valid `response == "no"` with native confidence `> 0.5`. YES at any
+  confidence and NO at/below 0.5 pass. Class probability is validated protocol data,
+  never the suppression threshold. Missing, malformed or contradictory answers pass.
+  Duplicate JSON members (including escaped equivalents and nested probability
+  keys) are rejected before decoding can collapse contradictory values.
+- History, metadata, topology, credentials, transport, HTTP, encoding, schema,
+  semantic preparation and size failures pass the original event natively. Unsupported
+  media/composition skips inference rather than classifying only a text fallback.
+- Replies use verified root plus latest seven strictly prior records, within four
+  SDK calls and 1 MiB per decoded response. Newest-window endpoint selection is a
   qualified integration assumption, not a universal Slack ordering guarantee.
-- Current text has at most six source segments, with at most four native recipients
-  and 50 questions. The actual serialized request is limited to 524,288 UTF-8 bytes.
-  Fitting drops whole oldest non-root priors and regenerates the request; full
-  CURRENT and ROOT are protected. Protected-only excess stops locally without HTTP.
-  The separate response limit is 262,144 bytes. Unsupported media and inseparable
-  authored/reference composition are rejected, not replaced by notification text.
-- Native authorization precedes private inference. Original and projected CURRENT
-  use the native channel/mention/wake predicates. Commands, bots/self, DMs/MPIMs and
-  pending controls keep native handling. Unselected ordinary input is acknowledged
-  silently before model, queue or steering work.
-- Explicit newer source edits invalidate and drain obsolete active evaluation;
-  equal duplicates and later distinct messages do not cancel it. Native shutdown
-  owns cooperative task draining. This cannot retract already queued/running work.
+- Top-level messages support absent, null or explicit self-root `thread_ts`.
+  Conversation root and each adapter's native session coordinates are separate.
+  CURRENT==root is one protected record and never fetches its own prior thread.
+- Up to four native recipients and 13 contextual people bound metadata acquisition,
+  not text segmentation. Actual compact UTF-8 requests are capped at 524,288 bytes;
+  fitting removes only whole oldest non-root priors and unused people. ROOT and
+  CURRENT are never shortened. Protected-only excess passes locally without HTTP.
+  Responses are separately capped at 262,144 bytes.
+- True newer edits invalidate and drain obsolete active evaluation; stale active
+  revisions cannot hand off. Equal duplicates and later distinct messages do not
+  cancel it. Caller cancellation and Gateway shutdown are terminal, not fallbacks
+  that resurrect an event. This cannot retract already handed-off work.
+- Disabled/unloaded filters defer live events to native handling, even when unload
+  occurs during acquisition/inference. Unload is not Gateway shutdown. Actual
+  caller/edit/shutdown cancellation remains authoritative.
 
-Discovery is local to one GatewayRunner, not other processes or hosts. Ambiguous,
-disconnected, foreign or unserved identities do not become fallback recipients.
-Native history, sessions, queues and deduplication remain host-owned. Separate
-events can classify differently; there is no durable owner, cross-process consensus
-or exactly-once guarantee. Slack history is not an atomic snapshot. Disabling or
-breaking this plugin is not a universal fail-closed enforcement boundary.
+Discovery is local to one GatewayRunner, not other processes/hosts. Each selected
+adapter uses its native client for the request workspace; the plugin does not
+revalidate native identity maps or retain topology witnesses. Acquisition failures
+cause native pass-through. There is no durable owner, atomic history snapshot,
+cross-process consensus or exactly-once guarantee. Semantic confidence guarantees neither
+another participant's receipt nor native response/model execution.
 
 ## Troubleshooting and disabling
 
-Check the Slack connection, serving runtime, runtime-scoped key and supported
-root/recent source first. Fixed payload-free diagnostics distinguish topology,
-context acquisition, classifier and source-projection failures. Access failures
-must be resolved through the existing Slack integration, not borrowed tokens or
-a plugin credential store. Do not paste private input or credentials into logs.
+Check the native Slack connection, serving runtime, scoped key and root/recent
+context. Fixed diagnostics distinguish acquisition, topology and classifier
+failures. Resolve access through the existing Slack integration, not borrowed
+tokens. Do not paste credentials/private input into logs. Classification failure
+alone does not explain silence: native gates and lifecycle may still exclude work.
 
 ```sh
 hermes plugins disable slack-agent-router
@@ -114,9 +131,8 @@ hermes plugins remove slack-agent-router
 
 ## Development
 
-See [design](docs/design.md) for data flow and trust boundaries and
-[testing](docs/native-acceptance.md) for controlled checks. CI has separate `core`
-and `native` jobs on Python 3.14. Controlled tests do not establish live Slack
-delivery, classifier accuracy or deployment acceptance.
+See [design](docs/design.md) and [testing](docs/native-acceptance.md). CI has separate
+`core` and `native` jobs on Python 3.14. Controlled tests are not live Slack delivery,
+real classifier accuracy, independent review or deployment acceptance.
 
 MIT license, copyright u1-liquid.
