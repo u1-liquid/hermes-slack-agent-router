@@ -37,33 +37,37 @@ Registration reads no configuration and requires no ready socket. Request-time
 `Bridge.bind` resolves workspace, source sender ID, receiving bot, native source,
 routed runtime and native session key. Commands, unsupported DMs/MPIMs and native
 pending approval/clarification/confirmation/update controls bypass inference.
-The plugin does not call incoming-sender bot/human predicates or duplicate native
-user authorization, channel allowlist/ignored-channel or mention/wake gates.
+The plugin does not classify people or duplicate native user authorization,
+channel allowlist/ignored-channel or mention/wake gates.
 Supported ordinary messages may therefore reach history/metadata acquisition and
-Jev before native admission, regardless of sender kind or native policy. Native
+Jev before native admission, regardless of sender metadata or native policy. Native
 Hermes still enforces its own rules on continuation; Bolt self-event middleware
 may reject an event before the plugin runs. No sender is fabricated from bot_id.
 External-processing consent is a profile-activation responsibility, never inferred
 from Slack permissions or native allowlists.
 
-Participants are discovered from connected same-workspace primary/multiplexed
-adapters with live transport/runtime authorities. There is no configured registry
-or workspace enumeration. Each peer uses its own native `_session_thread_ts`,
+Participants come from connected primary/multiplexed adapters' native workspace
+maps. `_event_team_id`, `build_source`, `_canonicalize` and `_source_session_key`
+own workspace resolution, source identity, runtime binding and session keys. The
+plugin consumes their outputs directly: no user-ID regex, repeated workspace/ID
+equality gates, home/name authorization registry or topology witnesses. Each lookup
+uses the selected adapter's client for the request workspace, not another workspace's
+client. There is no configured registry or workspace enumeration.
+Each peer uses its own native `_session_thread_ts`,
 independent of the conversation's acquisition root. Absent/null/self-root top-level
 `thread_ts` uses CURRENT as root; native session coordinates still obey each peer's
-`reply_in_thread`. Ordinary replies keep their real root. Topology is revalidated
-after awaits and immediately before inference/use. Missing, duplicate, foreign or
-changed topology defers, never grants permission for a guessed/substituted identity.
-These witnesses are not a global transaction and cannot eliminate every ABA race.
+`reply_in_thread`. Ordinary replies keep their real root. Native identities are not
+revalidated after awaits; native lifecycle and downstream admission remain authoritative.
 
-Metadata is request-local, whitelisted exact ID/username/display_name/real_name
-and contextual kind, not an entire Slack profile. Unknown optional names remain
+Metadata is request-local ID/username/display_name/real_name, not an entire Slack
+profile or a bot/human category. Unknown optional names remain
 null; genuine empty names remain empty. Sender and history authors share bounded
-contextual lookup; there is no separate acquisition to prove a human. Bot/human/
-unknown kinds do not decide eligibility, and handoff evidence is not human-only.
-Recipient whoami still requires validated bot identity. SDK failure or malformed/
-mismatched metadata aborts classification instead of pretending acquisition succeeded. Serving-client
-identity and per-request secret isolation remain separate from semantic identity.
+contextual lookup; no recipient classification is required. The selected native
+client supplies names for native IDs without rechecking SDK user/team echoes.
+SDK failure, malformed profile structure or invalid/beyond-bound name fields abort
+classification instead of pretending acquisition succeeded. Name-field validation
+occurs at acquisition, not again in semantic preparation. Per-request secret scope
+is the actual native serving runtime's scope.
 
 ## Bounded context and exact byte fitting
 
@@ -76,9 +80,11 @@ exhaustion. Root may be fetched by exact `conversations_history` oldest=root,
 inclusive=True, limit=1. Acquisition uses at most four SDK calls and 1 MiB per decoded
 response. CURRENT==root returns no history immediately, protecting one root record.
 
-Validate scope/timestamps/order/cutoff/duplicates and detect conflicting history
-with fingerprints. These fingerprints protect acquisition consistency, not source
-projection. Future/foreign/incomplete/unsupported history defers natively. SDK
+Validate SDK content structure, channel/thread selection, timestamps, order,
+cutoff and duplicates; detect conflicting history with fingerprints. These
+fingerprints protect acquisition consistency, not source
+projection or native user/workspace admission. Future, wrong-channel/thread,
+incomplete or unsupported history defers natively. SDK
 buffering and native Slack retries precede these decoded bounds. History is not an
 atomic snapshot and unseen edits/deletions can race.
 
@@ -92,7 +98,7 @@ response cap is independent. Four recipients/13 people bound metadata, not text.
 ## Lifecycle and delivery
 
 Active evaluation (including binding) is enrolled in the adapter's native background
-tasks. A request-local Gate map holds source coordinates, sender/root, explicit
+tasks. A request-local Gate map holds native source coordinates, explicit
 edit revision and live tasks only. Newer true edits invalidate before awaiting
 obsolete tasks; stale active revisions and late cancelled results cannot hand off.
 Equal duplicate envelopes, unfurl delivery timestamps and distinct newer messages

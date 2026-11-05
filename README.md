@@ -58,10 +58,11 @@ whitelisted participant metadata go to `https://api.typesafe.ai/v1/systemone` wi
 no plugin privacy classifier or per-channel egress configuration.
 
 Middleware may classify before native admission: the plugin does not duplicate
-sender bot/self/human filtering, user/channel allowlists, ignored-channel rules or
-mention/wake policy. Bot, human and unknown sender kinds are factual context, not
-classification eligibility. Native Hermes applies its own admission when the
-plugin continues; a YES or failure cannot force a reply. Native Bolt self-event
+sender filtering, user/channel allowlists, ignored-channel rules or mention/wake
+policy. IDs, workspace resolution, source identities and runtime bindings come
+from native Hermes without a second plugin validator. Participant metadata contains
+IDs and names, with no bot/human classification. Native Hermes applies its own
+admission when the plugin continues; a YES or failure cannot force a reply. Native Bolt self-event
 filtering may run before this middleware. Commands, unsupported DMs/MPIMs and
 pending approval, clarification, confirmation or update controls bypass inference.
 Profile activation must authorize external processing even for messages native
@@ -108,10 +109,11 @@ not transcripts, keys or service error bodies. Routing decisions are not persist
   occurs during acquisition/inference. Unload is not Gateway shutdown. Actual
   caller/edit/shutdown cancellation remains authoritative.
 
-Discovery is local to one GatewayRunner, not other processes/hosts. Unavailable or
-ambiguous topology causes native pass-through, never inference for a guessed
-receiver. There is no durable owner, atomic history snapshot, cross-process
-consensus or exactly-once guarantee. Semantic confidence guarantees neither
+Discovery is local to one GatewayRunner, not other processes/hosts. Each selected
+adapter uses its native client for the request workspace; the plugin does not
+revalidate native identity maps or retain topology witnesses. Acquisition failures
+cause native pass-through. There is no durable owner, atomic history snapshot,
+cross-process consensus or exactly-once guarantee. Semantic confidence guarantees neither
 another participant's receipt nor native response/model execution.
 
 ## Troubleshooting and disabling

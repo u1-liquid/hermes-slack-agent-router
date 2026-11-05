@@ -735,7 +735,92 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.model.assert_awaited_once()
         self.assertEqual(self.model.await_args.args[0].source.profile, "peer")
 
-    async def test_sender_kind_is_context_not_admission_with_real_http(self):
+    async def test_native_receiver_metadata_reaches_ballot_and_routed_continuation(self):
+        import httpx
+        from gateway.profile_routing import ProfileRoute
+
+        from hermes_slack_agent_router.jev import JevClient
+
+        self.runner.config.profile_routes.insert(
+            0, ProfileRoute("native-runtime", "slack", "peer", bot_profile="default", chat_id="CDEMO")
+        )
+        (self.peer_home / ".env").write_text("TYPESAFE_API_KEY=fictional-native-runtime\n")
+        self.gate.jev = JevClient()
+        native = httpx.AsyncClient
+        directory = self.client.users_info.side_effect
+        sent, clients = [], []
+        flag, choice, omit_team = "absent", "yes", False
+
+        async def names(*, user):
+            value = await directory(user=user)
+            if user in {"UALPHA", "UBETA"}:
+                # The workspace client and native map supply identity; optional
+                # profile metadata is not another authentication response.
+                if omit_team:
+                    value["user"].pop("team_id")
+                value["user"].pop("is_bot")
+                if flag != "absent":
+                    value["user"]["is_bot"] = flag
+            return value
+
+        async def respond(request):
+            batch = json.loads(request.content)
+            sent.append((batch, request.headers["Authorization"]))
+            if choice == "failure":
+                return httpx.Response(503)
+            return httpx.Response(200, json=controlled_answers(batch, choice, 1.0))
+
+        def client(**kwargs):
+            value = native(transport=httpx.MockTransport(respond), **kwargs)
+            clients.append(value)
+            return value
+
+        self.client.users_info.side_effect = names
+        peer_client, other_workspace_client = AsyncMock(), AsyncMock()
+        peer_client.users_info.side_effect = names
+        other_workspace_client.users_info.side_effect = AssertionError("wrong workspace client")
+        self.peer._team_clients = {"TDEMO": peer_client, "TOTHER": other_workspace_client}
+        self.adapter._team_clients["TOTHER"] = other_workspace_client
+        with patch("httpx.AsyncClient", side_effect=client):
+            for omit_team, flag in (
+                (False, "absent"),
+                (False, True),
+                (False, False),
+                (False, None),
+                (False, "true"),
+                (True, True),
+            ):
+                for choice in ("yes", "no", "failure"):
+                    with self.subTest(flag=flag, omit_team=omit_team, choice=choice):
+                        before = len(sent)
+                        self.model.reset_mock()
+                        body = self.message("<@UBETA> Explain the full chart.\n\nKeep all units and reasons.")
+                        if omit_team:
+                            body.pop("team_id")  # Native resolution uses the inner event workspace.
+                        if choice == "no":
+                            await self.assert_suppressed(body)
+                        else:
+                            await self.assert_passed(body)
+                        self.assertEqual(len(sent), before + 1)
+                        batch, authorization = sent[-1]
+                        self.assertEqual(authorization, "Bearer fictional-native-runtime")
+                        self.assertEqual(batch["state"]["whoami"]["user_id"], "UBETA")
+                        self.assertEqual(batch["state"]["whoami"]["real_name"], "柚原こはる")
+                        self.assertEqual(
+                            batch["state"]["conversation"]["records"][-1]["text"], body["event"]["text"]
+                        )
+                        self.assertEqual(self.model.await_count, int(choice != "no"))
+                        if choice != "no":
+                            self.assertEqual(self.model.await_args.args[0].source.profile, "peer")
+                            self.assertIn("Keep all units and reasons.", self.model.await_args.args[0].text)
+        self.assertTrue(all(value.is_closed for value in clients))
+        self.assertTrue(peer_client.users_info.await_args_list)
+        self.assertTrue(
+            all(call.kwargs == {"user": "UALPHA"} for call in peer_client.users_info.await_args_list)
+        )
+        other_workspace_client.users_info.assert_not_awaited()
+
+    async def test_sender_metadata_does_not_replace_native_policy_with_real_http(self):
         import httpx
 
         from hermes_slack_agent_router.jev import JevClient
@@ -757,27 +842,27 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
             return value
 
         directory = self.client.users_info.side_effect
-        sender_kind = "human"
+        flag = False
 
         async def names(*, user):
             value = await directory(user=user)
             if user == "UHUMAN":
-                value["user"]["is_bot"] = {"human": False, "bot": True, "unknown": None}[sender_kind]
+                value["user"]["is_bot"] = flag
             return value
 
         self.client.users_info.side_effect = names
         with patch("httpx.AsyncClient", side_effect=client):
-            for sender_kind, changes in (
-                ("human", {}),
-                ("bot", {"bot_id": "BMONITOR", "subtype": "bot_message"}),
-                ("bot", {}),
-                ("unknown", {}),
+            for flag, changes in (
+                (False, {}),
+                (True, {"bot_id": "BMONITOR", "subtype": "bot_message"}),
+                (True, {}),
+                (None, {}),
             ):
                 for allow_bots in ("all", "none"):
                     self.adapter.config.extra["allow_bots"] = allow_bots
                     os.environ["SLACK_ALLOW_BOTS"] = allow_bots
                     self.assertEqual(self.adapter._slack_allow_bots(), allow_bots)
-                    # Native identity cache is fixture-local; do not reuse a prior kind.
+                    # Native policy cache is fixture-local; vary its actual input.
                     self.adapter._user_is_bot_cache.clear()
                     for choice, confidence, suppressed in (
                         ("yes", 1.0, False),
@@ -785,7 +870,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                         ("no", 0.501, True),
                     ):
                         with self.subTest(
-                            kind=sender_kind,
+                            flag=flag,
                             changes=changes,
                             allow=allow_bots,
                             choice=choice,
@@ -805,10 +890,10 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(set(batch["questions"]), {"response"})
                             current = batch["state"]["conversation"]["records"][-1]
                             self.assertEqual(current["text"], body["event"]["text"])
-                            self.assertEqual(current["sender"]["kind"], sender_kind)
+                            self.assertEqual(current["sender"]["user_id"], "UHUMAN")
                             self.assertEqual(
                                 self.model.await_count,
-                                int(not suppressed and (sender_kind != "bot" or allow_bots == "all")),
+                                int(not suppressed and (flag is not True or allow_bots == "all")),
                             )
         self.assertTrue(all(value.is_closed for value in clients))
 
@@ -1129,7 +1214,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.client.conversations_replies.side_effect = None
         for bad in (
             {"ok": False},
-            {"ok": True, "messages": [*records[:1], {**records[1], "team": "TFOREIGN"}]},
             {"ok": True, "messages": [records[0], records[2], records[1]]},
             {"ok": True, "messages": [records[0], {**records[1], "ts": "999.001"}]},
             {"ok": True, "messages": [records[0], {**records[0], "text": "conflict"}]},
@@ -1206,15 +1290,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(client.conversations_replies.await_count, 4)
                 client.conversations_history.assert_not_awaited()
 
-    async def test_native_topology_change_after_inference_passes_instead_of_suppressing(self):
-        async def infer(batch):
-            self.peer._team_bot_user_ids["TDEMO"] = "UCHANGED"
-            return "no", 1.0
-
-        self.gate.jev.ask.side_effect = infer
-        await self.assert_passed(self.message("<@UBETA> Full unchanged message."))
-        self.model.assert_awaited_once()
-
     async def test_malformed_metadata_field_defers_instead_of_inventing_null(self):
         directory = self.client.users_info.side_effect
 
@@ -1229,7 +1304,7 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         await self.assert_passed(self.message("<@UBETA> Full original message."))
         self.gate.jev.ask.assert_not_awaited()
 
-    async def test_valid_unknown_context_kind_is_not_an_acquisition_failure(self):
+    async def test_context_author_without_optional_names_preserves_assignment(self):
         directory = self.client.users_info.side_effect
 
         async def info(*, user):
@@ -1247,9 +1322,13 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         await self.assert_passed(self.message("<@UBETA> Explain this."))
         self.gate.jev.ask.assert_awaited_once()
         people = context_view(self.gate.jev.ask.await_args.args[0]["state"])["participants"]
-        self.assertEqual(people["UCONTEXT"]["kind"], "unknown")
+        self.assertEqual(people["UCONTEXT"]["user_id"], "UCONTEXT")
+        self.assertEqual(
+            self.gate.jev.ask.await_args.args[0]["state"]["conversation"]["records"][0]["text"],
+            "<@UBETA> was assigned this task.",
+        )
 
-    async def test_native_same_complete_message_two_receivers_and_topology_controls(self):
+    async def test_native_same_complete_message_two_receivers(self):
         from slack_bolt.async_app import AsyncApp
         from slack_bolt.authorization import AuthorizeResult
         from slack_bolt.request.async_request import AsyncBoltRequest
@@ -1302,38 +1381,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen[0]["state"].pop("whoami")["user_id"], "UBETA")
         self.assertEqual(seen[1]["state"].pop("whoami")["user_id"], "UALPHA")
         self.assertEqual(seen[0], seen[1])
-        for mode in ("duplicate", "unserved", "unknown-socket", "disconnected", "foreign"):
-            with self.subTest(mode=mode):
-                self.gate.jev.ask.reset_mock()
-                old = self.peer._team_bot_user_ids
-                authority = self.runner.session_authorities.for_home(self.peer_home)
-                try:
-                    if mode == "duplicate":
-                        self.peer._team_bot_user_ids = {"TDEMO": "UBETA"}
-                    elif mode == "unserved":
-                        authority.retiring = True
-                    elif mode == "foreign":
-                        self.peer._team_bot_user_ids = {"TFOREIGN": "UALPHA"}
-                    elif mode == "disconnected":
-                        self.peer._running = False
-                    with (
-                        patch.object(self.peer, "_socket_transport_connected", return_value=None)
-                        if mode == "unknown-socket"
-                        else patch.object(
-                            self.peer,
-                            "_socket_transport_connected",
-                            wraps=self.peer._socket_transport_connected,
-                        )
-                    ):
-                        await self.assert_passed(self.message("<@UBETA> Keep the complete text."))
-                    if mode in {"duplicate", "unserved", "unknown-socket", "foreign"}:
-                        self.gate.jev.ask.assert_not_awaited()
-                    else:
-                        self.gate.jev.ask.assert_awaited_once()
-                finally:
-                    self.peer._team_bot_user_ids = old
-                    self.peer._running = True
-                    authority.retiring = False
 
     async def test_native_secret_scope_multiplex_and_routed_runtime(self):
         import httpx
@@ -1685,13 +1732,16 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 "channel_type": "channel",
                 "message": {**body["event"], "text": text, "edited": {"ts": revision}},
             }
+            result.pop("team_id")
+            result["event"]["message"].pop("team")
+            result["event"]["message"].pop("channel")
             return result
 
         coordinates = self.gate.coordinates
 
-        def intake(value):
-            result = coordinates(value)
-            if result is not None and str(result[3]) == "901.001":
+        def intake(value, adapter):
+            result = coordinates(value, adapter)
+            if result is not None and str(result[1]) == "901.001":
                 latest_seen.set()
             return result
 
@@ -2254,7 +2304,6 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                             "ok": True,
                             "user": {
                                 "id": user,
-                                "team_id": "TFOREIGN" if user == "UUNKNOWN" else "TDEMO",
                                 "is_bot": False,
                                 "name": "Human" if user == "UHUMAN" else "outside.person",
                                 "profile": {"display_name": "共通名", "real_name": "Fictional person"},
@@ -2278,14 +2327,9 @@ class NativeDispatch(unittest.IsolatedAsyncioTestCase):
                 await self.dispatch(body)
                 await self.drain()
                 self.assertEqual(len(self.downstream), before + int(expected_pass))
-                if name == "P-unknown":
-                    # The retained foreign metadata input now fails classification,
-                    # correctly deferring instead of inventing an unknown identity.
-                    self.assertEqual(seen, [])
-                else:
-                    self.assertEqual(len(seen), 1)
-                    self.assertEqual(set(seen[0]["questions"]), {"response"})
-                    self.assertEqual(seen[0]["state"]["conversation"]["records"][-1]["text"], text)
+                self.assertEqual(len(seen), 1)
+                self.assertEqual(set(seen[0]["questions"]), {"response"})
+                self.assertEqual(seen[0]["state"]["conversation"]["records"][-1]["text"], text)
                 if expected_pass:
                     self.assertEqual(self.downstream[-1], body)
                     self.model.assert_awaited_once()

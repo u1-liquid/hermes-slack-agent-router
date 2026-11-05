@@ -186,7 +186,6 @@ class ContextTests(unittest.TestCase):
                         "username": u,
                         "display_name": None,
                         "real_name": None,
-                        "kind": "human",
                     },
                 )
                 for u in ("UROOT", "UDROP", "UDROPTWO", "UKEEP", huge.sender)

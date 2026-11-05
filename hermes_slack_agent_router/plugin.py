@@ -10,7 +10,7 @@ from decimal import Decimal
 
 from .bridge import Bridge, TopologyError, Uncertain, message_content
 from .jev import JevClient, JevError, serialize_request
-from .policy import Thread, identifier
+from .policy import Thread
 from .semantic import History, SemanticError, Snapshot, prepare
 
 logger = logging.getLogger(__name__)
@@ -18,8 +18,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass(eq=False)
 class Evaluation:
-    sender: str
-    root: str
     revision: Decimal
     tasks: set = field(default_factory=set)
     invalidated: bool = False
@@ -85,7 +83,6 @@ class Gate:
                 or Decimal(ts) < Decimal(thread.root)
                 or ("thread_ts" in message and message["thread_ts"] != thread.root)
                 or ("channel" in message and message["channel"] != thread.channel)
-                or ("team" in message and message["team"] != thread.workspace)
             ):
                 raise SemanticError("foreign-or-future-context")
             return ts
@@ -150,7 +147,7 @@ class Gate:
         for message in (root, *recent):
             if message.get("files") or message.get("attachments"):
                 raise SemanticError("unsupported-prior-media-or-identity")
-            sender = identifier(message["user"])
+            sender = message["user"]
             text, blocks = message_content(message)
             if not isinstance(text, str):
                 raise SemanticError("unsupported-prior-composition")
@@ -258,8 +255,6 @@ class Gate:
             )
         except (ValueError, KeyError, TypeError, AttributeError):
             return self.unresolved("incomplete-context")
-        if await bridge.participants(bound) != topology:
-            return self.unresolved("native-topology-changed")
         people = await bridge.context_people(bound, history, whoami)
         source = Snapshot(
             thread,
@@ -269,18 +264,13 @@ class Gate:
             history,
             topology[0],
             blocks,
-            recipient_whoami=whoami,
             context_people=people,
         )
         started, stage, questions = time.monotonic(), "credential-scope", 0
         try:
             # The serving runtime may differ from the receiving adapter's profile.
             async with adapter.gateway_runner._async_profile_scope_for_source(bound.source):
-                if (
-                    self.disposed
-                    or getattr(adapter.gateway_runner, "_draining", False)
-                    or await bridge.participants(bound) != topology
-                ):
+                if self.disposed or getattr(adapter.gateway_runner, "_draining", False):
                     return False
                 stage = "fit"
                 source, batch = self.fit(source, bound.recipient)
@@ -306,42 +296,28 @@ class Gate:
                 exc.dropped if isinstance(exc, JevError) else 0,
             )
             return False
-        if await bridge.participants(bound) != topology:
-            return self.unresolved("native-topology-changed")
         return response == "no" and confidence > 0.5
 
     def dispose(self):
         self.disposed = True
 
     @staticmethod
-    def coordinates(body):
+    def coordinates(body, adapter):
         """Structural source/revision only, before any awaited identity lookup."""
         event = body.get("event") or {}
         if body.get("type") != "event_callback" or event.get("type") not in ("message", "app_mention"):
             return None
         changed = event.get("subtype") == "message_changed"
-        message = event.get("message") if changed else event
+        message = adapter._normalize_changed_message(event) if changed else event
         if not isinstance(message, dict):
             return None
-        team = body.get("team_id")
+        team = adapter._event_team_id(message, body)
         channel = message.get("channel") or event.get("channel")
-        ts, sender = message.get("ts"), message.get("user")
-        if (
-            not isinstance(team, str)
-            or not isinstance(channel, str)
-            or not isinstance(ts, str)
-            or not isinstance(sender, str)
-        ):
+        ts = message.get("ts")
+        if not isinstance(channel, str) or not isinstance(ts, str):
             return None
-        for item in (event, message):
-            if (item.get("team") and item["team"] != team) or (
-                item.get("channel") and item["channel"] != channel
-            ):
-                raise SemanticError("conflicting revision source")
         Thread(team, channel, ts)
-        identifier(sender)
-        root = message.get("thread_ts") or ts
-        Thread(team, channel, root)
+
         edit = message.get("edited")
         if changed and (not isinstance(edit, dict) or not edit.get("ts")):
             return None  # An unfurl/delivery event_ts is not an edit revision.
@@ -353,7 +329,7 @@ class Gate:
             Thread(team, channel, revision)
             if Decimal(revision) <= Decimal(ts):
                 raise SemanticError("invalid edit revision")
-        return (team, channel, ts), sender, root, Decimal(revision)
+        return (team, channel, ts), Decimal(revision)
 
     def wire(self, native, adapter):
         from slack_bolt.response import BoltResponse
@@ -376,20 +352,17 @@ class Gate:
             try:
                 if getattr(adapter.gateway_runner, "_draining", False):
                     return BoltResponse(status=200, body="")
-                coordinates = self.coordinates(body)
+                coordinates = self.coordinates(body, adapter)
                 if coordinates is not None:
-                    key, sender, root, revision = coordinates
+                    key, revision = coordinates
                     previous = self.active.get(key)
-                    if previous is not None:
-                        if (previous.sender, previous.root) != (sender, root):
-                            raise SemanticError("conflicting revision source")
-                        if revision < previous.revision:
-                            return BoltResponse(status=200, body="")
+                    if previous is not None and revision < previous.revision:
+                        return BoltResponse(status=200, body="")
                     if previous is None or revision > previous.revision:
                         retiring = set(previous.tasks) if previous is not None else set()
                         if previous is not None:
                             previous.invalidated = True
-                        entry = Evaluation(sender, root, revision, set(retiring))
+                        entry = Evaluation(revision, set(retiring))
                         self.active[key] = entry  # Invalidate BEFORE awaiting old cleanup.
                         for old in retiring:
                             if not old.cancelling():

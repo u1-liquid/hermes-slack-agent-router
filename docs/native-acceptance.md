@@ -57,7 +57,7 @@ no elapsed cutoff and resource closure on cancellation.
 Native tests use real Bolt dispatch, SlackAdapter listeners, native source and
 identity builders, authorization, mention/wake predicates and pending controls.
 SDK I/O, semantic answers and final model/busy receivers are controlled. The suite
-covers connected/foreign/duplicate/unserved participants, topology changes,
+covers native participant/client selection without duplicate identity validation,
 transport-versus-runtime secret scope, exact root/latest-seven acquisition,
 short-tail cursor fill, absent/null/self-root/reply thread coordinates with unequal
 peer settings, complete original payload/history preservation, busy/queue/merge/FIFO/replay,
@@ -67,13 +67,20 @@ YES at any confidence, NO<=0.5 and plugin failures defer unchanged to native.
 Compare exact original handoff independently of ordinary native formatting and
 mention humanization. Native authorization/channel/mention/bot/pending gates remain
 authoritative; plugin pass-through does not guarantee a model response.
-Supported bot, human and unknown-kind senders receive one whole-message ballot;
+Sender metadata variations receive one whole-message ballot;
 controlled real HTTP exercises YES, NO=0.5 continuation and NO=0.501 suppression.
 Native allow_bots admits or rejects bots only after continuation. Native-denied
 user/channel allowlist, ignored-channel and mention-policy inputs still reach the
 ballot, while YES and classifier failure remain subject to real native denial.
 The suite retains Bolt's upstream self-event rejection and native control bypasses;
 it does not assert a pre-egress native-policy guarantee.
+
+Receiver metadata may omit classification/workspace echoes or carry any classification
+flag without blocking the ballot. Controlled HTTP checks preserve names and the full
+CURRENT, actual native workspace resolution, the selected receiving clients and routed
+runtime credentials. Valid high-NO suppresses; YES and HTTP failure continue to the
+real native receiver. ID/workspace revalidation, person-kind schema and topology
+witness assertions are retired, not preserved as negative-test contracts.
 
 The independently fictional 103 conversational inputs retain declared whole-message
 continuation decisions. Unresolved main-unknown/main-conflict/M9, the matching

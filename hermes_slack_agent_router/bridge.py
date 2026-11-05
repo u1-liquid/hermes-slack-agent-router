@@ -5,7 +5,7 @@ import copy
 import re
 from dataclasses import dataclass
 
-from .policy import Event, Recipient, Thread, identifier
+from .policy import Event, Recipient, Thread
 
 
 class Uncertain(ValueError):
@@ -13,7 +13,7 @@ class Uncertain(ValueError):
 
 
 class TopologyError(ValueError):
-    """An ordinary request lacks a stable, authoritative native candidate view."""
+    """Native participant context is unavailable or exceeds its acquisition bound."""
 
 
 def message_content(event):
@@ -49,7 +49,8 @@ def message_content(event):
             if not isinstance(style, dict) or any(type(v) is not bool for v in style.values()):
                 invalid()
         elif tag == "user":
-            identifier(node["user_id"])
+            if not isinstance(node.get("user_id"), str):
+                invalid()
         elif tag in {"link", "emoji"}:
             if not isinstance(node.get("url" if tag == "link" else "name"), str):
                 invalid()
@@ -84,23 +85,17 @@ def message_content(event):
     return text, tuple(copy.deepcopy(blocks))
 
 
-def contextual_person(user_id, payload, team):
-    """Whitelist same-workspace Slack identity fields, never an entire profile."""
+def contextual_person(user_id, payload):
+    """Bound name fields from the selected native client's SDK response."""
     result = {
         "user_id": user_id,
         "username": None,
         "display_name": None,
         "real_name": None,
-        "kind": "unknown",
     }
     user = payload.get("user") if callable(getattr(payload, "get", None)) else None
     if not (
-        isinstance(user, dict)
-        and payload.get("ok") is True
-        and user.get("id") == user_id
-        and user.get("team_id") == team
-        and (user.get("is_bot") is None or type(user["is_bot"]) is bool)
-        and isinstance(user.get("profile", {}), dict)
+        isinstance(user, dict) and payload.get("ok") is True and isinstance(user.get("profile", {}), dict)
     ):
         raise Uncertain("invalid contextual identity metadata")
     profile = user.get("profile", {})
@@ -116,7 +111,6 @@ def contextual_person(user_id, payload, team):
         username=field(user.get("name")),
         display_name=field(profile.get("display_name")),
         real_name=field(profile["real_name"] if "real_name" in profile else user.get("real_name")),
-        kind="unknown" if user.get("is_bot") is None else "bot" if user["is_bot"] else "human",
     )
     return result
 
@@ -143,51 +137,33 @@ class Bridge:
         """
         team = bound.event.thread.workspace
 
-        async def resolve(recipient, witness):
-            runner = self.adapter.gateway_runner
-            maps = [runner._primary_adapters(), *runner._profile_adapters_map().values()]
-            from gateway.config import Platform
-
-            adapter = next(
-                m[Platform.SLACK] for m in maps if Platform.SLACK in m and id(m[Platform.SLACK]) == witness[0]
-            )
+        async def resolve(recipient, adapter):
             handle = adapter._team_bot_names.get(team)
-            fallback = {
-                "user_id": recipient.bot_user,
-                "username": handle
+            username = (
+                handle
                 if isinstance(handle, str) and len(handle) <= 128 and not any(ord(c) < 32 for c in handle)
-                else None,
-                "display_name": None,
-                "real_name": None,
-            }
+                else None
+            )
             response = await adapter._team_clients[team].users_info(user=recipient.bot_user)
-            person = contextual_person(recipient.bot_user, response, team)
-            if person["kind"] != "bot":
-                raise Uncertain("invalid recipient metadata")
+            person = contextual_person(recipient.bot_user, response)
             if "name" not in response["user"]:
-                person["username"] = fallback["username"]
-            return recipient.bot_user, {key: value for key, value in person.items() if key != "kind"}
+                person["username"] = username
+            return recipient.bot_user, person
 
         async with asyncio.TaskGroup() as group:
-            lookups = [group.create_task(resolve(r, w)) for r, w in zip(*topology)]
+            lookups = [group.create_task(resolve(r, adapter)) for r, adapter in zip(*topology)]
         return tuple(task.result() for task in lookups)
 
     async def context_people(self, bound, history, whoami):
         """Exact source-window people, via serving client only; never eligibility."""
         team = bound.event.thread.workspace
-        if (
-            self.adapter._team_bot_user_ids.get(team) != bound.recipient.bot_user
-            or bound.identity.adapter() is not self.adapter
-            or bound.source.scope_id != team
-        ):
-            raise TopologyError("serving metadata client mismatch")
         client = self.adapter._team_clients[team]
-        people = {user: {**fields, "kind": "bot"} for user, fields in whoami}
+        people = dict(whoami)
         authors = {bound.event.sender, *(h.sender for h in history)}
 
         async def resolve(user):
             payload = await client.users_info(user=user)
-            return user, contextual_person(user, payload, team)
+            return user, contextual_person(user, payload)
 
         async with asyncio.TaskGroup() as group:
             tasks = [group.create_task(resolve(user)) for user in sorted(authors - set(people))]
@@ -201,126 +177,40 @@ class Bridge:
         runner = self.adapter.gateway_runner
         if runner is None or getattr(runner, "_draining", False):
             raise TopologyError("native runner unavailable")
-        authorities = runner.session_authorities
-        primary = runner._primary_profile_name
-        maps = [(primary, runner._primary_adapters())]
-        maps.extend(runner._profile_adapters_map().items())
-        slots = tuple((name, mapping.get(Platform.SLACK)) for name, mapping in maps)
-        seen, result, observed = {}, [], []
+        maps = [runner._primary_adapters(), *runner._profile_adapters_map().values()]
+        seen, result = set(), []
         team = bound.event.thread.workspace
-
-        def authority(home, name):
-            value = authorities.for_home(home)
-            if value is None or getattr(value, "retiring", False):
-                raise TopologyError("unserved native runtime")
-            registered = authorities.profile_name(value) or primary
-            if registered != name:
-                raise TopologyError("native runtime name/home mismatch")
-            return value
-
-        def identity_for(adapter):
-            # Native identities pin their source. Rebuild it to observe route changes.
-            thread = bound.event.thread
+        for mapping in maps:
+            adapter = mapping.get(Platform.SLACK)
+            if adapter is None or adapter in seen:
+                continue
+            seen.add(adapter)
+            if team not in adapter._team_clients or team not in adapter._team_bot_user_ids:
+                continue  # Select only this workspace's native transport.
+            if not adapter.is_connected:
+                continue
             source = adapter.build_source(
-                chat_id=thread.channel,
+                chat_id=bound.event.thread.channel,
                 chat_type="group",
                 user_id=bound.event.sender,
                 thread_id=adapter._session_thread_ts(bound.native_event, bound.source.message_id, False, {}),
                 scope_id=team,
                 message_id=bound.source.message_id,
             )
-            return adapter._canonicalize(source)
-
-        for owner, adapter in slots:
-            if adapter is None:
-                continue
-            if id(adapter) in seen:
-                if seen[id(adapter)] != owner:
-                    raise TopologyError("ambiguous native transport owner")
-                continue
-            seen[id(adapter)] = owner
-
-            bot = adapter._team_bot_user_ids.get(team)
-            client = adapter._team_clients.get(team)
-            if not bot and client is None:
-                continue  # Another workspace is not a source of participating identities.
-            if not bot or client is None or adapter.gateway_runner is not runner:
-                raise TopologyError("incomplete native workspace identity")
-            task = adapter._socket_mode_task
-            if not adapter.is_connected or task is None or task.done() or adapter._message_handler is None:
-                continue
-            app, handler = adapter._app, adapter._handler
-            connected = await adapter._socket_transport_connected()
-            if connected is None:
-                raise TopologyError("unknown native socket state")
-            if not connected or adapter._socket_ping_pong_stale():
-                continue
-            identity = identity_for(adapter)
-            if (
-                identity is None
-                or identity.adapter() is not adapter
-                or identity.transport_inferred
-                or identity.transport_profile != owner
-            ):
-                raise TopologyError("unresolved native participant")
-            transport = authority(identity.authorization_home, owner)
-            runtime = authority(identity.runtime_home, identity.runtime_profile)
-            recipient = Recipient(team, bot, identity.runtime_profile)
-            witness = (
-                id(adapter),
-                owner,
-                id(app),
-                id(client),
-                id(handler),
-                id(task),
-                identity,
-                id(transport),
-                id(runtime),
-                adapter._team_bot_names.get(team),
-                adapter._user_name_cache.get((team, bot)),
+            identity = adapter._canonicalize(source)
+            result.append(
+                (Recipient(team, adapter._team_bot_user_ids[team], identity.runtime_profile), adapter)
             )
-            result.append((recipient, witness))
-            observed.append((adapter, bot, client, app, handler, task, identity, transport, runtime))
-        # Socket inspection can await. Validate every captured generation together
-        # after the last await; otherwise a peer can change during the final check.
-        for adapter, bot, client, app, handler, task, identity, transport, runtime in observed:
-            if (
-                getattr(runner, "_draining", False)
-                or adapter._team_bot_user_ids.get(team) != bot
-                or adapter._team_clients.get(team) is not client
-                or adapter._app is not app
-                or adapter._handler is not handler
-                or adapter._socket_mode_task is not task
-                or task.done()
-                or not adapter.is_connected
-                or adapter._message_handler is None
-                or identity_for(adapter) != identity
-                or authority(identity.authorization_home, identity.transport_profile) is not transport
-                or authority(identity.runtime_home, identity.runtime_profile) is not runtime
-            ):
-                raise TopologyError("native participant changed during discovery")
-        current = [(primary, runner._primary_adapters())]
-        current.extend(runner._profile_adapters_map().items())
-        if slots != tuple((name, mapping.get(Platform.SLACK)) for name, mapping in current):
-            raise TopologyError("native transports changed during discovery")
         result.sort(key=lambda item: (item[0].workspace, item[0].bot_user, item[0].runtime_profile))
-        recipients = tuple(item[0] for item in result)
-        if (
-            bound.recipient not in recipients
-            or not 1 <= len(recipients) <= 4
-            or len({r.bot_user for r in recipients}) != len(recipients)
-        ):
-            raise TopologyError("missing or ambiguous native participants")
-        return recipients, tuple(item[1] for item in result)
+        if len(result) > 4:
+            raise TopologyError("native participant context exceeds bound")
+        return tuple(item[0] for item in result), tuple(item[1] for item in result)
 
     def pending(self, bound):
         from tools import approval, clarify_gateway, slash_confirm
 
         runner = self.adapter.gateway_runner
-        if runner is None or self.adapter._source_session_key(bound.source) != bound.session_key:
-            raise Uncertain("native session identity changed")
-        if runner._session_key_for_source(bound.source) != bound.session_key:
-            raise Uncertain("adapter/runner key mismatch")
+
         # Actual native scope keeps pending reads attached to the routed runtime.
         with runner._profile_scope_for_source(bound.source):
             state = runner._peek_session_state(bound.session_key)
@@ -336,16 +226,9 @@ class Bridge:
         if body.get("type") != "event_callback":
             raise Uncertain("not an event callback")
         event = body.get("event") or {}
-        kind = event.get("type")
-        if kind not in ("message", "app_mention", "file_shared"):
+        event_type = event.get("type")
+        if event_type not in ("message", "app_mention", "file_shared"):
             raise Uncertain("native non-message")
-        team = body.get("team_id")
-        if not team or (event.get("team") and event["team"] != team):
-            raise Uncertain("missing or conflicting workspace")
-        bot = adapter._team_bot_user_ids.get(team)
-        client = adapter._team_clients.get(team)
-        if not bot or client is None or adapter.gateway_runner is None:
-            raise Uncertain("unbound workspace/receiver/runtime")
         event = dict(event)
         provenance = "message"
         if event.get("subtype") == "message_changed":
@@ -354,6 +237,9 @@ class Bridge:
                 raise Uncertain("native edit not admitted")
             if not isinstance(event.get("edited"), dict) or not event["edited"].get("ts"):
                 raise Uncertain("edit identity missing")
+        team = adapter._event_team_id(event, body)
+        bot = adapter._team_bot_user_ids[team]
+        client = adapter._team_clients[team]
         if event.get("edited"):
             edit = event["edited"]
             if not isinstance(edit, dict) or not isinstance(edit.get("ts"), str):
@@ -367,12 +253,12 @@ class Bridge:
         if channel_type is None:
             info = await client.conversations_info(channel=channel)
             obj = info.get("channel") or {}
-            if info.get("ok") is not True or obj.get("id") != channel:
-                raise Uncertain("unverified conversation")
+            if info.get("ok") is not True:
+                raise Uncertain("conversation lookup failed")
             channel_type = "im" if obj.get("is_im") else "mpim" if obj.get("is_mpim") else "channel"
         if channel_type not in ("channel", "group"):
             raise Uncertain("unsupported conversation")
-        if kind == "file_shared":
+        if event_type == "file_shared":
             file_id = event.get("file_id")
             if not file_id:
                 raise Uncertain("missing file id")
@@ -389,11 +275,10 @@ class Bridge:
             if len(shares) != 1 or not shares[0].get("ts"):
                 raise Uncertain("missing/ambiguous exact-channel share")
             sender = event.get("user_id") or file.get("user")
-            if event.get("user_id") and file.get("user") and event["user_id"] != file["user"]:
-                raise Uncertain("conflicting file sender")
+
             event.update(user=sender, ts=shares[0]["ts"], thread_ts=shares[0].get("thread_ts"), text="")
             provenance = "file_shared"
-        sender = identifier(event["user"])
+        sender = event["user"]
         text = event.get("text", "")
         probe = re.sub(r"^\s*<@" + re.escape(bot) + r">\s*", "", text).lstrip()
         if probe.startswith("/"):
@@ -417,13 +302,12 @@ class Bridge:
             message_id=ts,
         )
         identity = adapter._canonicalize(source)
-        if identity is None or identity.adapter() is not adapter or identity.transport_inferred:
-            raise TopologyError("unverified native identity")
+
         session_key = adapter._source_session_key(source)
         recipient = Recipient(team, bot, identity.runtime_profile)
         event_id = ts + (":" + event["edited"]["ts"] if provenance == "edit" else "")
         return Bound(
-            Event(thread, event_id, sender, provenance=provenance),
+            Event(thread, event_id, source.user_id, provenance=provenance),
             recipient,
             source,
             identity,
